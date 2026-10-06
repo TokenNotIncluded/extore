@@ -88,7 +88,7 @@ async def lifespan(app):
     yield
 
 
-app = FastAPI(title="Extore API", version="0.6.1", lifespan=lifespan)
+app = FastAPI(title="Extore API", version="0.6.2", lifespan=lifespan)
 app.include_router(auth.router)
 app.include_router(account_auth_router)
 app.include_router(card_tracking_router)
