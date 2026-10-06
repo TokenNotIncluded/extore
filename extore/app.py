@@ -10,6 +10,7 @@ from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 from . import auth
+from .card_tracking import router as card_tracking_router
 from .config import ORIGIN, check_config
 from .db import audit, db, event, init, setting
 from .models import (
@@ -20,10 +21,12 @@ from .models import (
     ManagementProduct,
     Product,
     ProductLinkInput,
+    QuickProductInput,
     Redemption,
     StaffInput,
     TokenInput,
 )
+from .processors import processor_catalog, public_configuration
 from .security import (
     authorize_management,
     card_digest,
@@ -56,8 +59,9 @@ async def lifespan(app):
     yield
 
 
-app = FastAPI(title="Extore API", version="0.2.0", lifespan=lifespan)
+app = FastAPI(title="Extore API", version="0.3.0", lifespan=lifespan)
 app.include_router(auth.router)
+app.include_router(card_tracking_router)
 
 
 @app.middleware("http")
@@ -117,6 +121,9 @@ def exchange(body: CodeInput, request: Request):
         ).fetchone()
         if not card or card["state"] == "revoked":
             fail("卡密无效，请检查后重试", 404)
+        from .card_tracking import ensure_card_usable, record_verified
+
+        ensure_card_usable(c, card)
         row = c.execute("SELECT * FROM jobs WHERE card_id=?", (card["id"],)).fetchone()
         p = product(c, card["product_id"])
         if row and (
@@ -133,6 +140,7 @@ def exchange(body: CodeInput, request: Request):
             "INSERT INTO grants VALUES (?,?,?)",
             (digest(value), card["id"], time.time() + 30 * 86400),
         )
+        record_verified(c, card["id"])
         return {
             "token": value,
             "product": public_product(p),
@@ -168,18 +176,28 @@ def reveal(body: TokenInput):
             fail("尚无可领取内容", 409)
         p = product(c, card["product_id"])
         if p["delivery"] == "service":
-            return {"content": None}
+            return {"content": None, "output": {}}
         if p["view_policy"] == "once" and row["revealed"]:
             fail("内容已领取，无法再次查看", 410)
-        if not row["content"]:
+        if not row["content"] and row["result_json"] is None:
             fail("内容已销毁", 410)
         content = row["content"]
+        output = (
+            json.loads(row["result_json"])
+            if row["result_json"] is not None
+            else {"content": content}
+        )
         c.execute(
-            "UPDATE jobs SET revealed=1,content=?,updated=? WHERE id=?",
-            (None if p["view_policy"] == "once" else content, time.time(), row["id"]),
+            "UPDATE jobs SET revealed=1,content=?,result_json=?,updated=? WHERE id=?",
+            (
+                None if p["view_policy"] == "once" else content,
+                None if p["view_policy"] == "once" else row["result_json"],
+                time.time(),
+                row["id"],
+            ),
         )
         event(c, "delivery.viewed", row["product_id"], job(c, row["id"]))
-        return {"content": content}
+        return {"content": content, "output": output}
 
 
 @app.post("/api/receipt/destroy")
@@ -192,7 +210,7 @@ def destroy(body: TokenInput):
         if row["state"] == "destroyed":
             return {"ok": True}
         c.execute(
-            "UPDATE jobs SET state='destroyed',content=NULL,params='{}',message='',updated=? WHERE id=?",
+            "UPDATE jobs SET state='destroyed',content=NULL,result_json=NULL,params='{}',message='',updated=? WHERE id=?",
             (time.time(), row["id"]),
         )
         # Scrub queued/history payloads of customer parameters.
@@ -232,6 +250,86 @@ def create_product(body: Product, request: Request):
     return {"id": pid, **body.model_dump()}
 
 
+PRODUCT_TEMPLATES = (
+    {
+        "id": "manual_content",
+        "name": "队列内容交付",
+        "description": "由人员或 AI 从队列领取任务并提供交付内容。创建后请完善商品信息与输入输出。",
+        "mode": "manual",
+        "delivery": "content",
+    },
+    {
+        "id": "manual_service",
+        "name": "队列服务办理",
+        "description": "由人员或 AI 从队列领取任务办理，仅显示办理状态。创建后请完善商品信息与输入。",
+        "mode": "manual",
+        "delivery": "service",
+    },
+)
+
+
+@app.get("/api/admin/product-templates")
+def product_templates(request: Request):
+    session(request)
+    return list(PRODUCT_TEMPLATES)
+
+
+@app.get("/api/admin/processors")
+def admin_processors(request: Request):
+    session(request)
+    return processor_catalog()
+
+
+@app.get("/api/manage/processors")
+def managed_processors(request: Request):
+    s = session(request, ("admin", "staff"))
+    with db() as c:
+        authorize_management(c, s, "product.edit")
+        return processor_catalog()
+
+
+@app.post("/api/admin/products/quick")
+def quick_product(body: QuickProductInput, request: Request):
+    s = session(request)
+    alphabet = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"
+    name = body.name or "未命名商品 · " + "".join(
+        secrets.choice(alphabet) for _ in range(6)
+    )
+    pid = str(uuid.uuid4())
+    with db() as c:
+        if body.template_id == "existing_product":
+            source = product(c, body.from_product_id)
+            values = {key: value for key, value in source.items() if key != "id"}
+            # A new configuration link must never inherit the source product's
+            # callback signing authority, even when the connector is copied.
+            if values["webhook_secret"]:
+                values["webhook_secret"] = secrets.token_urlsafe(32)
+            # Copy processor structure without the source's delivery secrets.
+            values["processor_config"] = public_configuration(values)
+            config = Product.model_validate({**values, "name": name, "public": False})
+        else:
+            template = next(t for t in PRODUCT_TEMPLATES if t["id"] == body.template_id)
+            config = Product(
+                name=name, mode=template["mode"], delivery=template["delivery"]
+            )
+        c.execute(
+            "INSERT INTO products VALUES (?,?,?)",
+            (pid, config.model_dump_json(), time.time()),
+        )
+        audit(c, "owner", "product.create", pid)
+        link = create_product_link(
+            c,
+            ProductLinkInput(
+                product_id=pid,
+                name=("AI 配置 · " + name)[:100],
+                days=7,
+                permissions=["product.edit", "fulfillment.configure"],
+            ),
+            s,
+        )
+        return {"product": {"id": pid, **config.model_dump()}, "management_link": link}
+
+
 @app.put("/api/admin/products/{pid}")
 def edit_product(pid: str, body: Product, request: Request):
     session(request)
@@ -244,23 +342,53 @@ def save_product(c, pid, body, actor):
     old = product(c, pid)
     # Delivery semantics and automation must not change under outstanding cards.
     if c.execute("SELECT 1 FROM cards WHERE product_id=? LIMIT 1", (pid,)).fetchone():
-        for field in ("mode", "delivery", "view_policy", "script", "webhook_secret"):
+        for field in (
+            "mode",
+            "delivery",
+            "view_policy",
+            "script",
+            "webhook_secret",
+            "processor_id",
+        ):
             if old[field] != getattr(body, field):
                 fail(
-                    "已发行卡密的商品不能修改处理方式、交付方式、查看规则、脚本或签名密钥；请新建商品",
+                    "已发行卡密的商品不能修改处理方式、交付方式、查看规则、处理器或签名密钥；请新建商品",
+                    409,
+                )
+        values = body.model_dump()
+        for field, label in (("parameters", "输入"), ("outputs", "输出")):
+            if field_schema(old[field]) != field_schema(values[field]):
+                fail(
+                    f"已发行卡密的商品不能修改{label}字段的代码名、类型或必填规则；请新建商品",
                     409,
                 )
     c.execute("UPDATE products SET config=? WHERE id=?", (body.model_dump_json(), pid))
     audit(c, actor, "product.update", pid)
 
 
+def field_schema(fields):
+    return {field["key"]: (field["type"], field["required"]) for field in fields}
+
+
 @app.post("/api/admin/cards")
 def cards(body: IssueCards, request: Request):
     session(request)
     with db() as c:
-        codes = issue_cards(c, body.product_id, body.count)
+        codes = issue_cards(
+            c, body.product_id, body.count, label=body.label, expires=body.expires
+        )
         audit(c, "owner", "cards.issue", f"{body.product_id}:{body.count}")
-    return {"codes": codes}
+        return {"codes": codes, "batch_id": card_batch_id(c, codes)}
+
+
+def card_batch_id(c, codes):
+    if not codes:
+        return None
+    row = c.execute(
+        "SELECT card_meta.batch_id FROM card_meta JOIN cards ON cards.id=card_meta.card_id WHERE cards.digest=?",
+        (card_digest(codes[0]),),
+    ).fetchone()
+    return row["batch_id"] if row else None
 
 
 @app.get("/api/admin/cards")
@@ -408,17 +536,24 @@ def managed_products(request: Request):
             "SELECT * FROM products WHERE (?='' OR id=?) ORDER BY created",
             (scope, scope),
         ).fetchall()
-        return [
-            {
-                "id": r["id"],
-                **{
-                    key: value
-                    for key, value in json.loads(r["config"]).items()
-                    if key in ("name", "mode", "delivery", "view_policy")
-                },
-            }
-            for r in rows
-        ]
+        result = []
+        for r in rows:
+            p = product(c, r["id"])
+            result.append(
+                {
+                    key: p[key]
+                    for key in (
+                        "id",
+                        "name",
+                        "mode",
+                        "delivery",
+                        "view_policy",
+                        "parameters",
+                        "outputs",
+                    )
+                }
+            )
+        return result
 
 
 def queue_staff_authorization(c, s):
@@ -465,7 +600,7 @@ def batch(body: BatchUpdate, request: Request):
         for r in rows:
             jid = r["id"]
             if p["mode"] != "manual" and body.action != "retry":
-                fail("自动处理任务不能由人工覆盖", 409)
+                fail("自动处理任务不能由队列处理覆盖", 409)
             if body.action == "claim":
                 if r["state"] != "queued":
                     fail("任务已被领取或完成，请刷新列表", 409)
@@ -492,6 +627,7 @@ def batch(body: BatchUpdate, request: Request):
                         progress=body.progress,
                         attempt=r["attempt"],
                         content=body.content,
+                        output=body.output,
                         message=body.message,
                         retryable=body.retryable,
                     ),
@@ -499,6 +635,14 @@ def batch(body: BatchUpdate, request: Request):
             elif body.action == "retry":
                 if r["state"] != "failed":
                     fail("只能放行失败的任务", 409)
+                from .card_tracking import ensure_card_usable
+
+                ensure_card_usable(
+                    c,
+                    c.execute(
+                        "SELECT * FROM cards WHERE id=?", (r["card_id"],)
+                    ).fetchone(),
+                )
                 c.execute("UPDATE jobs SET retryable=1 WHERE id=?", (jid,))
             audit(c, actor, "job." + body.action, jid)
     return {"ok": True}
@@ -525,7 +669,7 @@ def managed_product(request: Request, product_id: str = ""):
 
 def managed_product_view(p, s):
     if "fulfillment.configure" not in s["permissions"]:
-        return {**p, "webhook_secret": ""}
+        return {**p, "webhook_secret": "", "processor_config": {}}
     return p
 
 
@@ -541,6 +685,8 @@ def edit_managed_product(
         if not values["webhook_secret"]:
             values["webhook_secret"] = old["webhook_secret"]
         if "fulfillment.configure" not in s["permissions"]:
+            if not values["processor_config"]:
+                values["processor_config"] = old["processor_config"]
             for field in (
                 "mode",
                 "delivery",
@@ -550,9 +696,13 @@ def edit_managed_product(
                 "webhook_secret",
                 "allow_retry",
                 "max_attempts",
+                "processor_id",
+                "processor_config",
             ):
                 if values[field] != old[field]:
                     fail("修改发货、查看或重试配置需要配置发货权限", 403)
+            if field_schema(values["outputs"]) != field_schema(old["outputs"]):
+                fail("修改输出字段架构需要配置发货权限", 403)
         try:
             updated = Product.model_validate(values)
         except ValueError:
@@ -580,9 +730,9 @@ def issue_managed_cards(body: IssueCards, request: Request):
     s = session(request, ("admin", "staff"))
     with db() as c:
         pid = management_scope(c, s, body.product_id, "cards.manage")
-        codes = issue_cards(c, pid, body.count)
+        codes = issue_cards(c, pid, body.count, label=body.label, expires=body.expires)
         audit(c, management_actor(s), "cards.issue", f"{pid}:{body.count}")
-    return {"codes": codes}
+        return {"codes": codes, "batch_id": card_batch_id(c, codes)}
 
 
 @app.post("/api/manage/cards/{cid}/revoke")
@@ -750,7 +900,14 @@ def platform_cards(body: IssueCards, request: Request):
         key = request.headers.get("idempotency-key", "")
         if not 8 <= len(key) <= 200:
             fail("请提供 8–200 字符的 Idempotency-Key", 400)
-        fingerprint = digest(body.model_dump_json())
+        # Preserve fingerprints for pre-metadata integration requests.
+        fingerprint = digest(
+            body.model_dump_json(
+                exclude={"label", "expires"}
+                if not body.label and body.expires is None
+                else set()
+            )
+        )
         request_key = digest(key)
         old = c.execute(
             "SELECT * FROM api_requests WHERE key=?", (request_key,)
@@ -764,7 +921,11 @@ def platform_cards(body: IssueCards, request: Request):
             if old["fingerprint"] != fingerprint:
                 fail("同一个幂等键不能用于不同请求", 409)
             return json.loads(cipher.decrypt(old["response"]))
-        result = {"codes": issue_cards(c, body.product_id, body.count)}
+        result = {
+            "codes": issue_cards(
+                c, body.product_id, body.count, label=body.label, expires=body.expires
+            )
+        }
         c.execute(
             "INSERT INTO api_requests VALUES (?,?,?,?)",
             (

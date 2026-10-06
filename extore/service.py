@@ -2,9 +2,12 @@ import json
 import re
 import time
 import uuid
+from urllib.parse import urlsplit
 
+from .card_tracking import card_expired, ensure_card_usable, record_issue
 from .db import event
-from .models import JobUpdate
+from .models import JobUpdate, OutputField
+from .processors import normalize_product
 from .security import card_digest, fail, new_card
 
 
@@ -12,19 +15,43 @@ def product(c, pid):
     row = c.execute("SELECT * FROM products WHERE id=?", (pid,)).fetchone()
     if not row:
         fail("商品不存在", 404)
-    return {"id": row["id"], **json.loads(row["config"])}
+    config = json.loads(row["config"])
+    config.setdefault("processor_id", "")
+    config.setdefault("processor_config", {})
+    # Old products predate explicit result schemas. Keep their existing receipts
+    # and callbacks compatible without rewriting stored merchant configuration.
+    config.setdefault(
+        "outputs",
+        [
+            OutputField(
+                key="content",
+                label={"zh-CN": "交付内容", "en": "Delivery content"},
+                type="textarea",
+            ).model_dump()
+        ]
+        if config["delivery"] == "content"
+        else [],
+    )
+    if config.get("mode") == "script" and config.get("processor_id"):
+        config = normalize_product(config)
+    return {"id": row["id"], **config}
 
 
 def public_product(p):
     return {
         k: v
         for k, v in p.items()
-        if k not in ("webhook_url", "webhook_secret", "script")
+        if k not in ("webhook_url", "webhook_secret", "script", "processor_config")
     }
 
 
-def issue_cards(c, pid, count):
-    product(c, pid)
+def issue_cards(c, pid, count, label="", expires=None):
+    p = product(c, pid)
+    if p["mode"] == "script":
+        try:
+            normalize_product(p, allow_incomplete=False)
+        except (ValueError, KeyError):
+            fail("请先完成官方处理器配置")
     codes = []
     for _ in range(count):
         code = new_card()
@@ -33,6 +60,7 @@ def issue_cards(c, pid, count):
             (str(uuid.uuid4()), card_digest(code), pid, time.time()),
         )
         codes.append(code)
+    record_issue(c, pid, codes, label=label, expires=expires)
     return codes
 
 
@@ -60,8 +88,86 @@ def validate_params(p, params):
                     fail("请输入有限数字")
             except decimal.InvalidOperation:
                 fail("请输入数字")
+        if v and f["type"] == "url" and not valid_delivery_url(v):
+            fail("链接格式不正确")
         clean[f["key"]] = v
+    if p["mode"] == "script":
+        from extore_processors import validate_parameters
+
+        try:
+            clean = validate_parameters(p["processor_id"], clean)
+        except ValueError:
+            fail("填写内容不符合商品处理器要求")
     return clean
+
+
+def valid_delivery_url(value):
+    try:
+        parsed = urlsplit(value)
+        valid = (
+            parsed.scheme in ("https", "http")
+            and parsed.hostname
+            and parsed.username is None
+            and parsed.password is None
+            and "\\" not in value
+            and not re.search(r"[\s\x00-\x1f\x7f]", value)
+        )
+        # urlsplit deliberately defers invalid numeric/range port errors.
+        parsed.port
+    except ValueError:
+        return False
+    return bool(valid)
+
+
+def validate_output(p, output):
+    """Validate a delivery against the product's declared result fields."""
+    fields = p["outputs"]
+    if set(output) - {f["key"] for f in fields}:
+        fail("提交了未定义的输出字段")
+    if any(not isinstance(value, str) for value in output.values()):
+        fail("输出字段必须是文本")
+    if sum(len(value) for value in output.values()) > 100000:
+        fail("交付内容过长")
+    clean = {}
+    for field in fields:
+        value = output.get(field["key"], "")
+        if field["required"] and not value.strip():
+            fail(f"请填写 {next(iter(field['label'].values()))}")
+        kind = field["type"]
+        # Text deliveries preserve exact formatting, including indentation.
+        if kind in ("email", "number", "url"):
+            value = value.strip()
+        if (
+            value
+            and kind == "email"
+            and not re.fullmatch(r"[^\s@]+@[^\s@]+\.[^\s@]+", value)
+        ):
+            fail("输出邮箱格式不正确")
+        if value and kind == "number":
+            import decimal
+
+            try:
+                if not decimal.Decimal(value).is_finite():
+                    fail("输出必须是有限数字")
+            except decimal.InvalidOperation:
+                fail("输出必须是数字")
+        if value and kind == "url":
+            if not valid_delivery_url(value):
+                fail("输出链接格式不正确")
+        clean[field["key"]] = value
+    return clean
+
+
+def output_content(p, output):
+    """Readable compatibility value for clients using the original content API."""
+    if len(p["outputs"]) == 1 and p["outputs"][0]["key"] == "content":
+        return output["content"]
+    return "\n\n".join(
+        f"{field['label'].get('zh-CN', next(iter(field['label'].values())))}：\n"
+        f"{output[field['key']]}"
+        for field in p["outputs"]
+        if output[field["key"]]
+    )
 
 
 def job(c, jid):
@@ -95,6 +201,7 @@ def job_view(c, row, staff=False):
         and row["retryable"]
         and p["allow_retry"]
         and row["attempt"] < p["max_attempts"]
+        and not card_expired(c, row["card_id"])
     )
     result["queue_ahead"] = (
         c.execute(
@@ -112,6 +219,7 @@ def job_view(c, row, staff=False):
 
 
 def submit(c, card, params):
+    ensure_card_usable(c, card)
     p = product(c, card["product_id"])
     clean = validate_params(p, params)
     row = c.execute("SELECT * FROM jobs WHERE card_id=?", (card["id"],)).fetchone()
@@ -125,7 +233,7 @@ def submit(c, card, params):
         ):
             fail("此任务不能自动重试，请联系商家", 409)
         c.execute(
-            "UPDATE jobs SET state='queued',params=?,content=NULL,message='',progress=0,attempt=attempt+1,retryable=0,claimed_by=NULL,lease=NULL,updated=? WHERE id=?",
+            "UPDATE jobs SET state='queued',params=?,content=NULL,result_json=NULL,message='',progress=0,attempt=attempt+1,retryable=0,claimed_by=NULL,lease=NULL,updated=? WHERE id=?",
             (json.dumps(clean), time.time(), row["id"]),
         )
         c.execute("UPDATE cards SET state='reserved' WHERE id=?", (card["id"],))
@@ -154,27 +262,33 @@ def apply_update(c, jid, update: JobUpdate):
     if row["state"] not in ("queued", "processing"):
         fail("任务已经结束，不能覆盖结果", 409)
     p = product(c, row["product_id"])
-    if (
-        update.state == "succeeded"
-        and p["delivery"] == "content"
-        and not update.content
-    ):
-        fail("内容型商品需要交付内容")
+    output = None
+    if update.state != "succeeded" and update.output:
+        fail("只有成功状态可以包含交付结果")
+    if update.state == "succeeded":
+        if p["delivery"] == "content":
+            supplied = update.output
+            if update.content is not None:
+                if len(p["outputs"]) != 1 or p["outputs"][0]["key"] != "content":
+                    fail("请按商品定义提交输出字段")
+                if supplied is not None and supplied.get("content") != update.content:
+                    fail("content 与输出字段不一致")
+                supplied = {"content": update.content} if supplied is None else supplied
+            output = validate_output(p, supplied or {})
+        elif update.output:
+            fail("服务型商品只返回状态，不包含交付结果")
     if update.state == "processing" and update.progress < row["progress"]:
         fail("进度不能倒退", 409)
-    content = (
-        update.content
-        if update.state == "succeeded" and p["delivery"] == "content"
-        else None
-    )
+    content = output_content(p, output) if output is not None else None
     progress = 100 if update.state == "succeeded" else update.progress
     c.execute(
-        "UPDATE jobs SET state=?,progress=?,message=?,content=?,retryable=?,updated=?,lease=? WHERE id=?",
+        "UPDATE jobs SET state=?,progress=?,message=?,content=?,result_json=?,retryable=?,updated=?,lease=? WHERE id=?",
         (
             update.state,
             progress,
             update.message,
             content,
+            json.dumps(output, ensure_ascii=False) if output is not None else None,
             int(update.retryable and update.state == "failed"),
             time.time(),
             time.time() + 3600 if update.state == "processing" else None,

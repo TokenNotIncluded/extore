@@ -2,13 +2,17 @@
 
 一个商家的卡密兑换与交付网站。**支付与订单管理在另一平台**；Extore 验证卡密、收集参数、创建处理任务、交付内容或展示服务结果。
 
-支持按商品分开的人工队列、可细分权限的商品管理链接、Python 发货脚本、签名 webhook / 回调。SQLite 持久化任务、事件和投递重试。包含顾客界面、商家后台、Python SDK 与原生 WebMCP。无公开商品时首页显示「暂无公开商品」，采用撕纸折线边缘与分段虚线。
+支持按商品分开的队列、可细分权限的商品管理链接、官方自动处理器、签名 webhook / 回调。人和 AI 可通过同一套受权限约束的队列接口处理任务；AI 也可使用原生 WebMCP。SQLite 持久化任务、事件和投递重试。包含顾客界面、商家后台与 Python SDK。无公开商品时首页显示「暂无公开商品」，采用撕纸折线边缘与分段虚线。
+
+页头可选择自动、浅色或深色主题，以及自动、中文或英文语言，默认均为自动。自动主题实时跟随系统明暗变化；自动语言按浏览器语言偏好顺序选择支持的中文或英文，没有匹配时使用中文。手动选择只保存在当前浏览器。
 
 ## 本地运行
 
 需要 Python 3.12+、[uv](https://docs.astral.sh/uv/) 和 Linux（worker 使用文件锁与进程组）。
 
 ```sh
+# 取得主仓库记录的官方处理器版本
+git submodule update --init processors/official
 uv sync --frozen
 uv run python -m extore.cli init
 # 可选：仅在空数据库创建一个本地演示商品，输出演示卡密
@@ -24,15 +28,19 @@ Passkey 需要 HTTPS 或 localhost。更换域名 / RP ID 后，旧 Passkey 无�
 
 ## 基本流程
 
-1. 商家创建商品，设置参数、公开性、处理方式及交付规则。
+1. 商家创建商品，设置公开性、处理方式及交付规则。队列商品自定义顾客输入和交付输出；自动商品选择官方处理器，由处理器定义输入与输出。
 2. 在后台生成卡密（只显示一次），或支付平台通过制卡接口领取卡密。
 3. 顾客输入卡密。非公开商品仅在验证成功后显示。
 4. 顾客填写参数，卡密锁定到唯一任务，重复提交返回同一个任务。
-5. 人工处理、脚本或外部平台完成任务。顾客保存领取链接，查看状态并领取内容。
+5. 队列管理者、官方处理器或外部平台完成任务。顾客保存领取链接，查看状态并领取内容。
 
 成功后卡密不能再次创建任务。可重复查看商品可用原卡密重新获得领取链接；仅一次领取商品须保存原领取链接。领取链接有效 30 天，放在 URL 片段中，HTTP 请求与访问日志不包含凭证。
 
-每个商品有独立的队列，查看、筛选和批处理都限定当前商品。领取任务后才能更新、完成或标记自己领取的人工任务；自动任务由脚本或外部平台处理。
+每个商品有独立的队列，查看、筛选和批处理都限定当前商品。人或 AI 领取任务后，才能更新、完成或标记自己领取的队列任务；自动任务由官方处理器或外部平台处理。
+
+内容交付支持多个输出字段，如资源链接、账户邮箱和说明文本；服务商品不定义输出字段，只显示处理状态。输入和输出均可使用中英文名称与 Markdown 教程。发行卡密后，输入输出结构及处理器不能改变；队列和 Webhook 商品仍可改善字段的显示名称和说明。
+
+卡密按商品和批次管理，可设置到期时间，查看剩余库存、使用、验码、领取与处理统计。查询用内部 ID 或尾号定位，不重新显示原卡密；可重试卡密单独统计，不能当作新的待售库存。
 
 ## 商品管理链接
 
@@ -48,8 +56,10 @@ Passkey 需要 HTTPS 或 localhost。更换域名 / RP ID 后，旧 Passkey 无�
 
 自动处理有两种：
 
-- **Webhook**：发送 `redemption.requested`，外部平台按任务 ID 去重，再签名回调状态、进度或内容。
-- **Python**：服务器的 `scripts/<name>.py` 接收 JSON，使用 `extore.sdk` 输出进度与最终结果。默认示例 `welcome.py` 不调用外部服务。
+- **Webhook**：发送 `redemption.requested`，独立外部服务按任务 ID 去重，再签名回调状态、进度或结构化交付结果。
+- **官方处理器**：只能选择 [TokenNotIncluded/extore-processors](https://github.com/TokenNotIncluded/extore-processors) 中的白名单预设。`processors/official` 是固定到主仓库记录提交的 Git 子模块，输入输出由预设代码定义；商家只能选择预设并填写配置，不能上传程序、指定文件名或 Git 地址。
+
+内置预设 `resource_link` 交付已配置的 HTTPS 资源链接与可选说明；`personalized_text` 根据顾客姓名生成模板文本。升级处理器需审核代码与预设结构后更新主仓库的固定提交。已审核的固定代码仍按 worker 用户权限运行，不是任意恶意代码的沙箱；其他自动化可放在独立的 HTTPS 公网 Webhook 服务。
 
 内容交付可设置重复查看或仅一次领取；服务交付只显示处理结果。顾客可立即销毁完成的交付：删除应用内内容及参数，后续链接无法查看。**这不会撤回已下载的副本、外部平台内容、已经发出的事件或历史备份，也不承诺物理介质的安全擦除。**一次领取的内容在成功返回后即从数据库中移除；网络中断时无法再次领取，应由商家另行处理。
 
@@ -70,7 +80,6 @@ uv run python -m extore.cli reset-auth
 ```sh
 export EXTORE_ORIGIN=https://redeem.example.com
 export EXTORE_DATA=/var/lib/extore
-export EXTORE_SCRIPTS=/opt/extore/scripts
 ```
 
 使用反向代理提供 HTTPS。API 与 worker 必须共享同一个数据目录及配置。一个数据库运行一个 worker；API 可运行多个进程，但建议单进程起步。数据目录权限为 0700，部署前 `umask 077`，专用低权限用户运行。数据库、WAL 和 `issuance.key` 都是敏感文件。平台制卡响应为实现幂等重试采用加密存储，密钥独立保存在该文件，必须一并备份。
@@ -87,14 +96,14 @@ uv run python -m extore.worker
 ```sh
 mkdir -p data
 chmod 700 data
-# 容器默认 uid 10001，须保证其可以写入 data；脚本目录只读挂载
+# 容器默认 uid 10001，须保证其可以写入 data
 sudo chown 10001:10001 data
 docker compose build
 docker compose run --rm -it api python -m extore.cli init
 docker compose up -d
 ```
 
-脚本目录仅由商家通过 SSH 安装可信代码，**不是沙箱**，会拥有 worker 用户权限；后台不能上传或执行任意脚本文本。仅 `EXTORE_SCRIPT_*` 环境变量会被传给子进程，可用于提供商凭证。脚本超时 120 秒；输出最多 1 MB，单条结果最多 100 KB。
+官方处理器随程序包安装，执行超时 120 秒；输出最多 1 MB，单条结果最多 100 KB。顾客接口不返回处理器配置中的秘密。
 
 未知、超时、崩溃进入“待核实”，默认不能重试。仅明确未交付的失败允许按商品配置重试；商家可以在核实外部结果后放行。下游仍必须以**稳定任务 ID**避免重复发货，无法跨第三方事务承诺绝对只执行一次。
 
@@ -104,21 +113,21 @@ Webhook 地址须使用 HTTPS 公网 IP；DNS 校验后固定连接 IP、保留�
 
 - [原生 WebMCP 工具、权限与浏览器支持](docs/webmcp.md)
 - [接口、状态与完整事件定义](docs/protocol.md)
-- [Python 脚本及回调 SDK](docs/python-sdk.md)
+- [Python 处理器及回调 SDK](docs/python-sdk.md)
 - [验收记录与限制](docs/acceptance.md)
 - 服务运行后 `/docs` 提供交互式 OpenAPI 文档。
 
 ```sh
 uv run pytest -q
-uv run python -m compileall -q extore scripts
+uv run python -m compileall -q extore processors/official
 node --check extore/static/app.js
 ```
 
-数据库结构版本 2；启动时为已有管理链接补充权限与父链接字段，原有数据和权限范围保留。事件与回调协议仍为版本 1。本项目没有支付收款、支付订单管理或多商家功能；商品管理链接只授予指定商品的权限。
+数据库结构版本 4；启动时迁移已有数据库，保留商品、卡密、任务和管理链接的权限范围。事件与回调协议仍为版本 1。本项目没有支付收款、支付订单管理或多商家功能；商品管理链接只授予指定商品的权限。
 
 ## Arch Linux 原生部署
 
-`deploy/arch/PKGBUILD` 在目标机用锁定依赖构建运行环境，以 pacman 包管理文件；不复制本地虚拟环境。API 与 worker 使用独立 systemd 服务、低权限 `extore` 用户、只写 `/var/lib/extore`。脚本由 root 安装在 `/etc/extore/scripts`。
+`deploy/arch/PKGBUILD` 在目标机用锁定依赖构建运行环境，以 pacman 包管理文件；不复制本地虚拟环境。API 与 worker 使用独立 systemd 服务、低权限 `extore` 用户、只写 `/var/lib/extore`。程序包包含固定版本的官方处理器，不从商家指定的目录加载程序。
 
 首次无人值守部署可执行 `sudo -u extore extore-admin bootstrap`：生成随机首次密码，存于 `/var/lib/extore/bootstrap-password.txt`，权限 0600，不输出到日志。由服务器操作人员私密读取并完成 Passkey 注册；注册成功后密码文件也会删除。
 

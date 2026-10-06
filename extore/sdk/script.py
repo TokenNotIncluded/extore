@@ -1,6 +1,6 @@
 import json
 import sys
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Callable
 
 
@@ -10,6 +10,7 @@ class Task:
     product_id: str
     attempt: int
     params: dict[str, str]
+    configuration: dict[str, str] = field(default_factory=dict)
 
     @property
     def idempotency_key(self):
@@ -34,10 +35,11 @@ class Result:
     content: str | None = None
     message: str = ""
     retryable: bool = False
+    output: dict[str, str] | None = None
 
     @classmethod
-    def success(cls, content=None, message="处理完成"):
-        return cls("succeeded", content, message)
+    def success(cls, content=None, message="处理完成", *, output=None):
+        return cls("succeeded", content, message, output=output)
 
     @classmethod
     def failure(cls, message, retryable=False):

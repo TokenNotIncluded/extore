@@ -1,4 +1,4 @@
-"""A local demo; replace with your merchant-installed fulfillment handler."""
+"""External worker SDK protocol example; not a selectable website processor."""
 
 from extore.sdk import Result, Task, run
 

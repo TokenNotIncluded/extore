@@ -1,7 +1,8 @@
 "use strict";
 const $ = (s) => document.querySelector(s),
   app = $("#app");
-let lang = localStorage.getItem("extore_language") || "zh-CN",
+const preferences = window.ExtorePreferences;
+let lang = preferences.resolved.language,
   currentToken = "",
   currentProduct = null,
   timer = null,
@@ -12,10 +13,10 @@ let lang = localStorage.getItem("extore_language") || "zh-CN",
   managementExpires = null,
   tab = "products",
   products = [],
+  cardProductId = "",
   queueProductId = "",
   queueProduct = null,
   queueLoadId = 0;
-$("#language").value = lang;
 const esc = (s) =>
   String(s ?? "").replace(
     /[&<>"']/g,
@@ -131,11 +132,33 @@ $("#brand").addEventListener("click", () => {
     navigate("/admin");
   } else if (location.pathname !== "/") navigate("/");
 });
-$("#language").addEventListener("change", () => {
-  lang = $("#language").value;
-  localStorage.setItem("extore_language", lang);
-  start();
+function syncPreferenceControls() {
+  $("#theme").value = preferences.settings.theme;
+  $("#language").value = preferences.settings.language;
+  $("#theme").setAttribute("aria-label", tr("主题", "Theme"));
+  $("#language").setAttribute("aria-label", tr("语言", "Language"));
+  $("#theme option[value=auto]").textContent = tr("主题：自动", "Theme: Auto");
+  $("#theme option[value=light]").textContent = tr("明亮", "Light");
+  $("#theme option[value=dark]").textContent = tr("深色", "Dark");
+  $("#language option[value=auto]").textContent = tr(
+    "语言：自动",
+    "Language: Auto",
+  );
+  $("#header-context").textContent = tr("兑换与领取", "Redeem & collect");
+}
+syncPreferenceControls();
+preferences.subscribe(({ resolved }) => {
+  const changed = lang !== resolved.language;
+  lang = resolved.language;
+  syncPreferenceControls();
+  if (changed) start();
 });
+$("#language").addEventListener("change", () =>
+  preferences.setLanguage($("#language").value),
+);
+$("#theme").addEventListener("change", () =>
+  preferences.setTheme($("#theme").value),
+);
 window.addEventListener("popstate", start);
 
 async function home() {
@@ -143,7 +166,7 @@ async function home() {
   currentToken = "";
   currentProduct = null;
   const list = await api("/products");
-  app.innerHTML = `<section class="intro"><div class="intro-copy"><h1>${list.length ? tr("公开商品", "Public products") : tr("暂无公开商品", "No public products")}</h1><div class="paper-divider" aria-hidden="true"></div></div><section class="exchange"><h2>${tr("开始兑换", "Redeem your code")}</h2><p>${tr("请使用购买商品时获得的卡密。", "Use the code you received with your purchase.")}</p><form id="form"><div class="field"><label for="code">${tr("兑换卡密", "Redemption code")}</label><input class="code" id="code" placeholder="XXXXXXXX-XXXXXXXX-XXXXXXXX-XXXXXXXX" required autocomplete="off" spellcheck="false" maxlength="128"></div><button type="submit" class="full">${tr("验证并继续", "Verify and continue")} →</button><div id="error" class="error" role="alert"></div></form><div class="footnote">${tr("已有领取链接？直接打开即可查看处理进度。", "Already have a receipt link? Open it to check progress.")}</div></section></section>${list.length ? `<section class="catalog"><div class="section-head"><div><h2>${tr("可兑换商品", "Available products")}</h2><p>${tr("选择商品了解详情，兑换仍需有效卡密。", "Browse the details. A valid code is required to redeem.")}</p></div></div><div class="product-list">${list.map((p, i) => `<article class="product-row">${p.logo ? `<img src="${esc(p.logo)}" alt="">` : `<div class="product-icon">${icon}</div>`}<div class="product-info"><h3>${esc(p.name)}</h3><p>${tr(p.delivery === "service" ? "服务兑换" : "商品领取", p.delivery === "service" ? "Service" : "Digital delivery")} · ${tr(p.mode === "manual" ? "人工处理" : "自动处理", p.mode === "manual" ? "Manual processing" : "Automatic")}</p></div><button class="secondary" data-product="${i}">${tr("查看详情", "Details")}</button></article>`).join("")}</div></section>` : ""}`;
+  app.innerHTML = `<section class="intro"><div class="intro-copy"><h1>${list.length ? tr("公开商品", "Public products") : tr("暂无公开商品", "No public products")}</h1><div class="paper-divider" aria-hidden="true"></div></div><section class="exchange"><h2>${tr("开始兑换", "Redeem your code")}</h2><p>${tr("请使用购买商品时获得的卡密。", "Use the code you received with your purchase.")}</p><form id="form"><div class="field"><label for="code">${tr("兑换卡密", "Redemption code")}</label><input class="code" id="code" placeholder="XXXXXXXX-XXXXXXXX-XXXXXXXX-XXXXXXXX" required autocomplete="off" spellcheck="false" maxlength="128"></div><button type="submit" class="full">${tr("验证并继续", "Verify and continue")} →</button><div id="error" class="error" role="alert"></div></form><div class="footnote">${tr("已有领取链接？直接打开即可查看处理进度。", "Already have a receipt link? Open it to check progress.")}</div></section></section>${list.length ? `<section class="catalog"><div class="section-head"><div><h2>${tr("可兑换商品", "Available products")}</h2><p>${tr("选择商品了解详情，兑换仍需有效卡密。", "Browse the details. A valid code is required to redeem.")}</p></div></div><div class="product-list">${list.map((p, i) => `<article class="product-row">${p.logo ? `<img src="${esc(p.logo)}" alt="">` : `<div class="product-icon">${icon}</div>`}<div class="product-info"><h3>${esc(p.name)}</h3><p>${tr(p.delivery === "service" ? "服务兑换" : "商品领取", p.delivery === "service" ? "Service" : "Digital delivery")} · ${tr(p.mode === "manual" ? "队列处理" : "自动处理", p.mode === "manual" ? "Queue processing" : "Automatic")}</p></div><button class="secondary" data-product="${i}">${tr("查看详情", "Details")}</button></article>`).join("")}</div></section>` : ""}`;
   form(() => exchangeCode($("#code").value));
   window.ExtoreWebMCP?.refresh();
   document
@@ -211,8 +234,16 @@ async function revealReceipt(options = {}) {
   );
   if (context.active()) {
     const content = $("#content");
-    if (content)
-      content.innerHTML = `<pre class="result">${esc(result.content)}</pre>`;
+    if (content) {
+      const output = result.output || { content: result.content };
+      const fields = currentProduct?.outputs || [];
+      content.innerHTML = Object.entries(output)
+        .map(([key, value]) => {
+          const definition = fields.find((field) => field.key === key);
+          return `<div class="delivery-field"><h3>${esc(localized(definition?.label) || key)}</h3><pre class="result">${esc(value)}</pre></div>`;
+        })
+        .join("");
+    }
     if (viewPolicy === "once") $("#reveal")?.remove();
   }
   return result;
@@ -226,6 +257,10 @@ async function destroyReceipt(options = {}) {
     options,
   );
   if (context.active()) {
+    const content = $("#content");
+    if (content) content.innerHTML = "";
+    $("#reveal")?.remove();
+    $("#destroy")?.remove();
     try {
       await readReceipt(options);
     } catch {
@@ -439,7 +474,7 @@ async function renderTab() {
   window.ExtoreWebMCP?.refresh();
   if (tab === "products") {
     if (role === "staff") products = [await api("/manage/product")];
-    renderProducts();
+    await renderProducts();
   }
   if (tab === "jobs") await renderJobs();
   if (tab === "cards") await renderCards();
@@ -452,154 +487,32 @@ function productOptions() {
     .map((p) => `<option value="${p.id}">${esc(p.name)}</option>`)
     .join("");
 }
-function renderProducts() {
-  $("#workspace").innerHTML =
-    `<div class="section-head"><h2>商品</h2>${role === "admin" ? '<button id="new-product">新建商品</button>' : ""}</div>${products.length ? `<div class="product-list">${products.map((p) => `<article class="product-row"><div class="product-icon">${icon}</div><div class="product-info"><h3>${esc(p.name)}</h3><p>${p.public ? "公开展示" : "仅持卡可见"} · ${{ manual: "人工处理", webhook: "Webhook", script: "Python 脚本" }[p.mode]} · ${p.delivery === "content" ? "内容交付" : "服务状态"}</p><div class="mono muted">${p.id}</div></div><button class="secondary" data-edit="${p.id}">配置</button></article>`).join("")}</div>` : '<div class="empty">还没有商品。先创建商品，再生成卡密。</div>'}`;
-  on("#new-product", () => editProduct());
-  document
-    .querySelectorAll("[data-edit]")
-    .forEach((b) =>
-      b.addEventListener("click", () =>
-        editProduct(products.find((p) => p.id === b.dataset.edit)),
-      ),
-    );
+function productUIContext() {
+  const loadId = queueLoadId;
+  const pathname = location.pathname;
+  return {
+    api,
+    workspace: $("#workspace"),
+    products,
+    role,
+    canConfigure: permitted("fulfillment.configure"),
+    lang,
+    isCurrent: () =>
+      loadId === queueLoadId &&
+      location.pathname === pathname &&
+      tab === "products",
+    onSaved: (updated) => {
+      products = updated;
+    },
+    notify: toast,
+    refreshTools: () => window.ExtoreWebMCP?.refresh(),
+  };
 }
-function editProduct(
-  p = {
-    name: "",
-    description: "",
-    parameters: [],
-    mode: "manual",
-    delivery: "content",
-    view_policy: "repeat",
-    allow_retry: true,
-    max_attempts: 3,
-  },
-) {
-  let params = structuredClone(p.parameters);
-  const w = $("#workspace");
-  w.innerHTML = `<div class="section-head"><h2>${p.id ? "配置商品" : "新建商品"}</h2><button id="cancel" class="secondary">返回商品</button></div><form id="form"><div class="grid">${field("p-name", "商品名称", p.name)}${select(
-    "p-mode",
-    "处理方式",
-    [
-      ["manual", "人工队列"],
-      ["webhook", "外部平台 Webhook"],
-      ["script", "Python 脚本"],
-    ],
-    p.mode,
-  )}${field("p-logo", "商品 Logo URL（HTTPS）", p.logo || "")}${field("p-image", "商品图片 URL（HTTPS）", p.image || "")}${select(
-    "p-delivery",
-    "交付类型",
-    [
-      ["content", "交付内容 / 链接"],
-      ["service", "只返回服务状态"],
-    ],
-    p.delivery,
-  )}${select(
-    "p-view",
-    "内容查看规则",
-    [
-      ["repeat", "允许重复查看"],
-      ["once", "仅允许领取一次"],
-    ],
-    p.view_policy,
-  )}</div>${textarea("p-description", "商品描述（Markdown）", p.description)}<div class="checks"><label><input id="p-public" type="checkbox" ${p.public ? "checked" : ""}>公开展示商品</label><label><input id="p-retry" type="checkbox" ${p.allow_retry ? "checked" : ""}>允许明确失败后重试</label></div>${field("p-attempts", "最多尝试次数", p.max_attempts, "number")}<div class="form-divider"><h3>发货对接</h3><p class="caption">人工商品无需填写。脚本须由商家通过服务器安装。Webhook 地址只允许 HTTPS 公网地址。</p><div class="grid">${field("p-url", "Webhook 接收地址", p.webhook_url || "")}${field("p-secret", "Webhook 签名密钥（至少 32 字符）", p.webhook_secret || "", "password")}${field("p-script", "Python 脚本名称（不含 .py）", p.script || "")}</div></div><div class="form-divider"><div class="section-head"><h3>顾客填写的参数</h3><button type="button" id="add-param" class="secondary">添加参数</button></div><div id="parameters"></div></div><button type="submit" class="full">保存商品</button><div id="error" class="error" role="alert"></div></form>`;
-  if (!permitted("fulfillment.configure")) {
-    [
-      "p-mode",
-      "p-delivery",
-      "p-view",
-      "p-url",
-      "p-secret",
-      "p-script",
-      "p-retry",
-      "p-attempts",
-    ].forEach((id) => ($("#" + id).disabled = true));
-  }
-  const capture = () => {
-    params = params.map((f, i) => ({
-      ...f,
-      key: $("#f-key-" + i).value,
-      label: JSON.parse($("#f-label-" + i).value),
-      description: JSON.parse($("#f-description-" + i).value),
-      type: $("#f-type-" + i).value,
-      required: $("#f-required-" + i).checked,
-      collapsed: $("#f-collapsed-" + i).checked,
-    }));
-  };
-  const draw = () => {
-    $("#parameters").innerHTML = params
-      .map(
-        (f, i) =>
-          `<div class="parameter"><h3>参数 ${i + 1}<button type="button" class="danger" data-remove="${i}">删除</button></h3><div class="grid">${field("f-key-" + i, "代码名（传给程序）", f.key)}${select(
-            "f-type-" + i,
-            "输入类型",
-            [
-              ["text", "文本"],
-              ["email", "邮箱"],
-              ["textarea", "多行文本"],
-              ["number", "数字"],
-            ],
-            f.type,
-          )}</div>${textarea("f-label-" + i, "显示名称（语言 → 文本 JSON）", JSON.stringify(f.label, null, 2))}${textarea("f-description-" + i, "Markdown 教程（语言 → 文本 JSON）", JSON.stringify(f.description || {}, null, 2))}<div class="checks"><label><input id="f-required-${i}" type="checkbox" ${f.required ? "checked" : ""}>必填</label><label><input id="f-collapsed-${i}" type="checkbox" ${f.collapsed ? "checked" : ""}>默认折叠教程</label></div></div>`,
-      )
-      .join("");
-    document.querySelectorAll("[data-remove]").forEach((b) =>
-      b.addEventListener("click", () =>
-        perform(() => {
-          capture();
-          params.splice(+b.dataset.remove, 1);
-          draw();
-        }),
-      ),
-    );
-  };
-  draw();
-  on("#cancel", renderProducts);
-  on("#add-param", () => {
-    capture();
-    params.push({
-      key: "field_" + (params.length + 1),
-      label: { "zh-CN": "参数名称", en: "Parameter" },
-      description: { "zh-CN": "" },
-      type: "text",
-      required: true,
-      collapsed: true,
-    });
-    draw();
-  });
-  form(async () => {
-    capture();
-    const body = {
-      name: $("#p-name").value,
-      description: $("#p-description").value,
-      logo: $("#p-logo").value,
-      image: $("#p-image").value,
-      public: $("#p-public").checked,
-      mode: $("#p-mode").value,
-      delivery: $("#p-delivery").value,
-      view_policy: $("#p-view").value,
-      allow_retry: $("#p-retry").checked,
-      max_attempts: +$("#p-attempts").value,
-      parameters: params,
-      webhook_url: $("#p-url").value,
-      webhook_secret: $("#p-secret").value,
-      script: $("#p-script").value,
-    };
-    await api(
-      role === "staff"
-        ? "/manage/product"
-        : "/admin/products" + (p.id ? "/" + p.id : ""),
-      body,
-      p.id ? "PUT" : "POST",
-    );
-    products =
-      role === "staff"
-        ? [await api("/manage/product")]
-        : await api("/admin/products");
-    renderProducts();
-    toast("商品已保存");
-  });
+async function renderProducts() {
+  return window.ExtoreProducts.render(productUIContext());
+}
+async function editProduct(p) {
+  return window.ExtoreProducts.edit(productUIContext(), p);
 }
 async function renderJobs(filter = "", requestedProductId = queueProductId) {
   const loadId = ++queueLoadId;
@@ -678,14 +591,24 @@ async function renderJobs(filter = "", requestedProductId = queueProductId) {
   function finish(action) {
     const selected = ids();
     $("#batch-form").innerHTML =
-      `<div class="panel"><h2>${action === "succeed" ? "批量完成" : "标记失败"} · ${esc(selectedProduct.name)} · ${selected.length} 个任务</h2>${textarea("batch-message", "处理说明")}${action === "succeed" ? textarea("batch-content", "交付内容（内容型商品必填，服务型可留空）") : '<div class="checks"><label><input id="batch-retry" type="checkbox">已确认未交付，允许顾客重试</label></div>'}<div class="actions"><button id="batch-submit">确认提交</button><button id="batch-cancel" class="secondary">取消</button></div></div>`;
+      `<div class="panel"><h2>${action === "succeed" ? "批量完成" : "标记失败"} · ${esc(selectedProduct.name)} · ${selected.length} 个任务</h2>${textarea("batch-message", "处理说明")}${action === "succeed" ? (selectedProduct.outputs || []).map((output, i) => `<div class="field"><label for="batch-output-${i}">${esc(localized(output.label))}${output.required ? " *" : ""}</label>${output.type === "textarea" ? `<textarea id="batch-output-${i}" maxlength="100000" ${output.required ? "required" : ""}></textarea>` : `<input id="batch-output-${i}" type="${output.type}" ${output.type === "number" ? 'step="any"' : ""} maxlength="100000" ${output.required ? "required" : ""}>`}</div>${localized(output.description) ? `<details ${output.collapsed ? "" : "open"}><summary>交付说明</summary><div class="markdown">${md(localized(output.description))}</div></details>` : ""}`).join("") || '<p class="caption">此商品只交付服务状态，无需填写内容。</p>' : '<div class="checks"><label><input id="batch-retry" type="checkbox">已确认未交付，允许顾客重试</label></div>'}<div class="actions"><button id="batch-submit">确认提交</button><button id="batch-cancel" class="secondary">取消</button></div></div>`;
     on("#batch-cancel", () => ($("#batch-form").innerHTML = ""));
     on("#batch-submit", async () => {
+      const output = {};
+      if (action === "succeed") {
+        for (const [i, definition] of (
+          selectedProduct.outputs || []
+        ).entries()) {
+          const input = $("#batch-output-" + i);
+          if (!input.reportValidity()) return;
+          output[definition.key] = input.value;
+        }
+      }
       await executeBatch({
         ids: selected,
         action,
         message: $("#batch-message").value,
-        content: $("#batch-content")?.value || null,
+        output: action === "succeed" ? output : undefined,
         retryable: $("#batch-retry")?.checked || false,
       });
       await renderJobs(filter, productId);
@@ -709,39 +632,30 @@ async function renderJobs(filter = "", requestedProductId = queueProductId) {
   on("#fail", () => finish("fail"));
 }
 async function renderCards() {
-  const endpoint = role === "staff" ? "/manage/cards" : "/admin/cards";
+  const loadId = queueLoadId;
+  const pathname = location.pathname;
   if (role === "staff") products = await api("/manage/products");
-  const cards = await api(endpoint);
-  $("#workspace").innerHTML =
-    `<h2>发行卡密</h2><p class="caption">卡密具有 160 位随机强度。原文只在生成时显示，请立即保存。</p><form id="form"><div class="grid"><div class="field"><label for="card-product">对应商品</label><select id="card-product" required>${productOptions()}</select></div>${field("card-count", "数量", 10, "number")}</div><button type="submit" class="full" ${products.length ? "" : "disabled"}>生成卡密</button><div id="error" class="error" role="alert"></div></form><div id="codes" class="secret-output"></div><div class="form-divider"><h3>最近发行</h3><div class="table-wrap"><table><thead><tr><th>卡密 ID</th><th>商品</th><th>状态</th><th></th></tr></thead><tbody>${cards.map((c) => `<tr><td class="mono">${c.id}</td><td>${esc(products.find((p) => p.id === c.product_id)?.name || c.product_id)}</td><td>${esc(c.state)}</td><td>${c.state === "ready" ? `<button class="danger" data-revoke-card="${c.id}">撤销</button>` : ""}</td></tr>`).join("")}</tbody></table></div></div>`;
-  form(async () => {
-    const r = await api(endpoint, {
-      product_id: $("#card-product").value,
-      count: +$("#card-count").value,
-    });
-    $("#codes").innerHTML =
-      '<label for="generated">本次生成的卡密（离开页面后不能找回）</label><textarea id="generated" readonly></textarea><button id="download" class="secondary">下载文本</button>';
-    $("#generated").value = r.codes.join("\n");
-    on("#download", () => {
-      const url = URL.createObjectURL(
-        new Blob([r.codes.join("\n")], { type: "text/plain" }),
-      );
-      const a = document.createElement("a");
-      a.href = url;
-      a.download = "extore-codes.txt";
-      a.click();
-      setTimeout(() => URL.revokeObjectURL(url), 1000);
-    });
+  if (
+    loadId !== queueLoadId ||
+    pathname !== location.pathname ||
+    tab !== "cards"
+  )
+    return;
+  return window.ExtoreCards.render({
+    api,
+    workspace: $("#workspace"),
+    products,
+    role,
+    productId: role === "staff" ? managedProductId : cardProductId,
+    isCurrent: () =>
+      loadId === queueLoadId &&
+      pathname === location.pathname &&
+      tab === "cards",
+    onContextChange: (productId) => {
+      cardProductId = productId;
+      window.ExtoreWebMCP?.refresh();
+    },
   });
-  document.querySelectorAll("[data-revoke-card]").forEach((b) =>
-    b.addEventListener("click", () =>
-      perform(async () => {
-        if (!confirm("撤销后无法兑换，继续？")) return;
-        await api(endpoint + "/" + b.dataset.revokeCard + "/revoke", {});
-        await renderCards();
-      }, b),
-    ),
-  );
 }
 async function renderStaff() {
   const endpoint = role === "staff" ? "/manage/links" : "/admin/staff";
@@ -913,6 +827,7 @@ window.ExtoreWebMCP?.configure({
     product: currentProduct,
     currentToken,
     tab,
+    cardProductId,
     queueProductId,
     queueProduct,
     permissions,

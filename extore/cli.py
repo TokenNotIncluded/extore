@@ -76,14 +76,8 @@ def main():
                 description="本地演示商品。提交昵称后自动生成一封欢迎函，不会操作外部平台。",
                 public=True,
                 mode="script",
-                script="welcome",
-                parameters=[
-                    {
-                        "key": "name",
-                        "label": {"zh-CN": "你的昵称", "en": "Your name"},
-                        "description": {"zh-CN": "填写你希望出现在欢迎函中的称呼。"},
-                    }
-                ],
+                processor_id="personalized_text",
+                processor_config={"template": "你好，$name！\n你的欢迎函已准备好。"},
             )
             pid = str(uuid.uuid4())
             c.execute(

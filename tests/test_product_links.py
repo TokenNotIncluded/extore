@@ -20,6 +20,21 @@ ALL_PERMISSIONS = {
 }
 LEGACY_PERMISSIONS = {"queue.view", "queue.process"}
 SECRET = "this-is-a-private-webhook-secret-32-chars"
+PROCESSOR_CONFIGS = (
+    (
+        "resource_link",
+        {
+            "resource_url": "https://example.com/private-resource",
+            "message": "私有资源领取说明",
+        },
+    ),
+    (
+        "personalized_text",
+        {
+            "template": "私有交付模板：你好，$name，你的独享内容是 EXTORE-PRIVATE-TEMPLATE。"
+        },
+    ),
+)
 
 
 def as_owner(client):
@@ -145,7 +160,15 @@ def test_permissions_are_normalized_and_work_on_automated_products(
     login_link(owner, link)
     response = owner.get("/api/manage/products")
     assert response.status_code == 200, response.text
-    assert response.json() == [
+    rows = response.json()
+    assert [
+        {
+            key: value
+            for key, value in row.items()
+            if key not in ("parameters", "outputs")
+        }
+        for row in rows
+    ] == [
         {
             "id": pid,
             "name": "测试商品",
@@ -154,6 +177,10 @@ def test_permissions_are_normalized_and_work_on_automated_products(
             "view_policy": "repeat",
         }
     ]
+    assert all(
+        isinstance(row["parameters"], list) and isinstance(row["outputs"], list)
+        for row in rows
+    )
     assert SECRET not in response.text and "webhook_url" not in response.text
     assert owner.get("/api/manage/jobs").status_code == 403
 
@@ -791,9 +818,8 @@ def test_product_editor_preserves_hidden_secret_and_cannot_sign_callbacks(
     "changes",
     (
         {"mode": "manual"},
-        {"delivery": "service"},
+        {"delivery": "service", "outputs": []},
         {"view_policy": "once"},
-        {"script": "welcome"},
         {"webhook_url": "https://example.com/replaced-hook"},
         {"webhook_secret": "a-new-private-webhook-secret-32-characters"},
         {"mode": "manual", "webhook_url": ""},
@@ -831,9 +857,7 @@ def test_full_product_manager_can_configure_fulfillment_before_cards_are_issued(
         json={
             **initial,
             "mode": "webhook",
-            "delivery": "service",
             "view_policy": "once",
-            "script": "welcome",
             "webhook_url": "https://example.com/approved-hook",
             "webhook_secret": SECRET,
             "allow_retry": False,
@@ -842,13 +866,24 @@ def test_full_product_manager_can_configure_fulfillment_before_cards_are_issued(
     )
     assert response.status_code == 200, response.text
     assert response.json()["mode"] == "webhook"
-    assert response.json()["delivery"] == "service"
+    assert response.json()["delivery"] == "content"
     assert response.json()["view_policy"] == "once"
-    assert response.json()["script"] == "welcome"
+    assert response.json()["script"] == ""
     assert response.json()["webhook_secret"] == SECRET
     assert response.json()["allow_retry"] is False
     assert response.json()["max_attempts"] == 5
     configured = owner.get("/api/manage/product").json()
+    response = owner.put(
+        "/api/manage/product", json={**configured, "delivery": "service", "outputs": []}
+    )
+    assert response.status_code == 200, response.text
+    assert response.json()["delivery"] == "service" and response.json()["outputs"] == []
+    response = owner.put(
+        "/api/manage/product",
+        json={**response.json(), "delivery": "content", "outputs": initial["outputs"]},
+    )
+    assert response.status_code == 200, response.text
+    configured = response.json()
     assert configured["webhook_secret"] == SECRET
     assert (
         owner.post(
@@ -859,10 +894,15 @@ def test_full_product_manager_can_configure_fulfillment_before_cards_are_issued(
     before = snapshot("products", "audit")
     for changes in (
         {"mode": "manual"},
-        {"delivery": "content"},
+        {"delivery": "service", "outputs": []},
         {"view_policy": "repeat"},
-        {"script": "other-script"},
         {"webhook_secret": "another-private-webhook-secret-32-characters"},
+        {"parameters": [{"key": "name", "label": {"zh-CN": "姓名"}}]},
+        {
+            "outputs": [
+                {"key": "content", "label": {"zh-CN": "交付内容"}, "type": "text"}
+            ]
+        },
     ):
         response = owner.put("/api/manage/product", json={**configured, **changes})
         assert response.status_code == 409, response.text
@@ -946,3 +986,254 @@ def test_fulfillment_configuration_is_fully_validated_before_writing(owner, chan
     response = owner.put("/api/manage/product", json={**config, **changes})
     assert response.status_code == 422, response.text
     assert snapshot("products", "audit") == before
+
+
+@pytest.mark.parametrize("processor_id,private_config", PROCESSOR_CONFIGS)
+def test_product_editor_preserves_masked_official_processor_configuration(
+    owner, processor_id, private_config
+):
+    response = owner.post(
+        "/api/admin/products",
+        json={
+            "name": "官方处理器商品",
+            "mode": "script",
+            "processor_id": processor_id,
+            "processor_config": private_config,
+        },
+    )
+    assert response.status_code == 200, response.text
+    pid = response.json()["id"]
+    assert (
+        owner.post("/api/admin/cards", json={"product_id": pid, "count": 1}).status_code
+        == 200
+    )
+    editor = create_link(owner, pid, ["product.edit"])
+    manager = create_link(owner, pid, ["product.edit", "fulfillment.configure"])
+    login_link(owner, editor)
+    response = owner.get("/api/manage/product")
+    assert response.status_code == 200, response.text
+    config = response.json()
+    assert config["processor_config"] == {}
+    assert all(value not in response.text for value in private_config.values())
+    response = owner.put(
+        "/api/manage/product",
+        json={**config, "name": "仅修改商品名称", "description": "公开的商品说明"},
+    )
+    assert response.status_code == 200, response.text
+    assert response.json()["name"] == "仅修改商品名称"
+    assert response.json()["processor_config"] == {}
+    assert all(value not in response.text for value in private_config.values())
+    with db() as c:
+        stored = json.loads(
+            c.execute("SELECT config FROM products WHERE id=?", (pid,)).fetchone()[0]
+        )
+    assert stored["processor_config"] == private_config
+    assert stored["processor_id"] == processor_id
+    changed_config = (
+        {
+            "resource_url": "https://example.com/replaced-private-resource",
+            "message": "新的私有说明",
+        }
+        if processor_id == "resource_link"
+        else {"template": "未经授权的配置变更：$name"}
+    )
+    before = snapshot("products", "audit")
+    response = owner.put(
+        "/api/manage/product", json={**config, "processor_config": changed_config}
+    )
+    assert response.status_code == 403, response.text
+    assert snapshot("products", "audit") == before
+    specifications = {
+        spec["id"]: spec for spec in owner.get("/api/manage/processors").json()
+    }
+    other_id, other_config = next(
+        item for item in PROCESSOR_CONFIGS if item[0] != processor_id
+    )
+    response = owner.put(
+        "/api/manage/product",
+        json={
+            **config,
+            "processor_id": other_id,
+            "processor_config": other_config,
+            "parameters": specifications[other_id]["parameters"],
+            "outputs": specifications[other_id]["outputs"],
+        },
+    )
+    assert response.status_code == 403, response.text
+    assert snapshot("products", "audit") == before
+    login_link(owner, manager)
+    response = owner.get("/api/manage/product")
+    assert response.status_code == 200, response.text
+    assert response.json()["processor_config"] == private_config
+    response = owner.put(
+        "/api/manage/product",
+        json={**response.json(), "processor_config": changed_config},
+    )
+    assert response.status_code == 200, response.text
+    assert response.json()["processor_config"] == changed_config
+
+
+@pytest.mark.parametrize("processor_id,private_config", PROCESSOR_CONFIGS)
+def test_full_manager_selects_approved_processor_and_cannot_change_it_after_issuing_cards(
+    owner, processor_id, private_config
+):
+    response = owner.post("/api/admin/products", json={"name": "待选择官方处理器"})
+    assert response.status_code == 200, response.text
+    pid = response.json()["id"]
+    manager = create_link(owner, pid, sorted(ALL_PERMISSIONS))
+    login_link(owner, manager)
+    specifications = {
+        spec["id"]: spec for spec in owner.get("/api/manage/processors").json()
+    }
+    config = owner.get("/api/manage/product").json()
+    config = {
+        key: value
+        for key, value in config.items()
+        if key not in ("parameters", "outputs")
+    }
+    response = owner.put(
+        "/api/manage/product",
+        json={
+            **config,
+            "mode": "script",
+            "processor_id": processor_id,
+            "processor_config": private_config,
+        },
+    )
+    assert response.status_code == 200, response.text
+    config = response.json()
+    assert config["script"] == ""
+    assert (
+        config["processor_id"] == processor_id
+        and config["processor_config"] == private_config
+    )
+    assert config["parameters"] == specifications[processor_id]["parameters"]
+    assert config["outputs"] == specifications[processor_id]["outputs"]
+    assert (
+        owner.post(
+            "/api/manage/cards", json={"product_id": pid, "count": 1}
+        ).status_code
+        == 200
+    )
+    other_id, other_config = next(
+        item for item in PROCESSOR_CONFIGS if item[0] != processor_id
+    )
+    before = snapshot("products", "audit")
+    response = owner.put(
+        "/api/manage/product",
+        json={
+            **config,
+            "processor_id": other_id,
+            "processor_config": other_config,
+            "parameters": specifications[other_id]["parameters"],
+            "outputs": specifications[other_id]["outputs"],
+        },
+    )
+    assert response.status_code == 409, response.text
+    assert snapshot("products", "audit") == before
+
+
+@pytest.mark.parametrize(
+    "permissions", (["product.edit"], ["product.edit", "fulfillment.configure"])
+)
+def test_arbitrary_processor_filenames_are_rejected_even_with_configuration_permission(
+    owner, setup_product, permissions
+):
+    pid, _ = setup_product()
+    link = create_link(owner, pid, permissions)
+    login_link(owner, link)
+    config = owner.get("/api/manage/product").json()
+    before = snapshot("products", "audit")
+    response = owner.put("/api/manage/product", json={**config, "script": "welcome"})
+    assert response.status_code == 422, response.text
+    assert snapshot("products", "audit") == before
+
+
+def test_official_processor_catalog_requires_product_edit_permission(
+    owner, setup_product
+):
+    pid, _ = setup_product()
+    viewer = create_link(owner, pid, ["queue.view"])
+    editor = create_link(owner, pid, ["product.edit"])
+    login_link(owner, viewer)
+    assert owner.get("/api/manage/processors").status_code == 403
+    login_link(owner, editor)
+    response = owner.get("/api/manage/processors")
+    assert response.status_code == 200, response.text
+    assert {spec["id"] for spec in response.json()} == {
+        "resource_link",
+        "personalized_text",
+    }
+    assert owner.get("/api/admin/processors").status_code == 401
+    owner.cookies.clear()
+    assert owner.get("/api/manage/processors").status_code == 401
+
+
+@pytest.mark.parametrize("field", ("parameters", "outputs"))
+@pytest.mark.parametrize(
+    "attribute,value", (("key", "replacement"), ("type", "text"), ("required", False))
+)
+def test_issued_manual_product_input_and_output_schema_cannot_change(
+    owner, setup_product, field, attribute, value
+):
+    pid, _ = setup_product()
+    manager = create_link(owner, pid, ["product.edit", "fulfillment.configure"])
+    login_link(owner, manager)
+    config = owner.get("/api/manage/product").json()
+    changed = [{**item, attribute: value} for item in config[field]]
+    before = snapshot("products", "audit")
+    response = owner.put("/api/manage/product", json={**config, field: changed})
+    assert response.status_code == 409, response.text
+    assert snapshot("products", "audit") == before
+
+
+def test_issued_manual_product_field_labels_and_tutorials_remain_editable(
+    owner, setup_product
+):
+    pid, code = setup_product()
+    _, task = redeem(owner, code)
+    editor = create_link(owner, pid, ["product.edit"])
+    worker = create_link(owner, pid)
+    login_link(owner, editor)
+    config = owner.get("/api/manage/product").json()
+    changes = {
+        field: [
+            {
+                **item,
+                "label": {"zh-CN": "更新后的显示名称"},
+                "description": {"zh-CN": "**更新后的教程**"},
+                "collapsed": False,
+            }
+            for item in config[field]
+        ]
+        for field in ("parameters", "outputs")
+    }
+    response = owner.put("/api/manage/product", json={**config, **changes})
+    assert response.status_code == 200, response.text
+    for field in changes:
+        assert response.json()[field] == changes[field]
+    assert owner.get("/api/manage/jobs").status_code == 403
+    login_link(owner, worker)
+    response = owner.get("/api/manage/jobs")
+    assert response.status_code == 200, response.text
+    queued = next(row for row in response.json() if row["id"] == task["id"])
+    assert queued["params"] == {"email": "user@example.com"}
+    assert (
+        owner.post(
+            "/api/manage/batch",
+            json={"product_id": pid, "ids": [task["id"]], "action": "claim"},
+        ).status_code
+        == 200
+    )
+    assert (
+        owner.post(
+            "/api/manage/batch",
+            json={
+                "product_id": pid,
+                "ids": [task["id"]],
+                "action": "succeed",
+                "content": "按新的说明完成交付",
+            },
+        ).status_code
+        == 200
+    )

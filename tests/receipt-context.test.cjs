@@ -8,10 +8,44 @@ const source = fs
   .readFileSync(path.join(__dirname, "../extore/static/app.js"), "utf8")
   .replace(/start\(\);\s*$/, "");
 
-function page() {
+function page(language = "zh-CN") {
   const nodes = new Map();
   const requests = [];
   const timers = new Map();
+  const preferenceListeners = new Set();
+  const preferenceSettings = { theme: "auto", language: "auto" };
+  const preferenceResolved = { theme: "light", language };
+  const notifyPreferences = () => {
+    for (const listener of preferenceListeners)
+      listener({
+        settings: { ...preferenceSettings },
+        resolved: { ...preferenceResolved },
+      });
+  };
+  const preferences = {
+    get settings() {
+      return { ...preferenceSettings };
+    },
+    get resolved() {
+      return { ...preferenceResolved };
+    },
+    setTheme(value) {
+      if (preferenceSettings.theme === value) return;
+      preferenceSettings.theme = value;
+      preferenceResolved.theme = value === "auto" ? "light" : value;
+      notifyPreferences();
+    },
+    setLanguage(value) {
+      if (preferenceSettings.language === value) return;
+      preferenceSettings.language = value;
+      preferenceResolved.language = value === "auto" ? "zh-CN" : value;
+      notifyPreferences();
+    },
+    subscribe(callback) {
+      preferenceListeners.add(callback);
+      return () => preferenceListeners.delete(callback);
+    },
+  };
   let nextTimer = 0;
   let adapter;
   function node(selector) {
@@ -21,8 +55,12 @@ function page() {
         textContent: "",
         value: "",
         style: {},
+        attributes: {},
         isConnected: true,
         addEventListener() {},
+        setAttribute(name, value) {
+          this.attributes[name] = value;
+        },
         remove() {
           this.removed = true;
         },
@@ -44,6 +82,7 @@ function page() {
     document: { querySelector: node, querySelectorAll: () => [] },
     window: {
       addEventListener() {},
+      ExtorePreferences: preferences,
       ExtoreWebMCP: {
         configure(value) {
           adapter = value;
@@ -114,6 +153,7 @@ function page() {
     receipt,
     requests,
     timers,
+    preferences,
     getContext: () => adapter.getContext(),
   };
 }
@@ -241,14 +281,63 @@ test("successful destruction does not refresh another receipt or report refresh 
   assert.equal(await destroying, result);
   assert.equal(p.requests.length, 1);
   assert.equal(p.node("#app").innerHTML, "Current receipt: Product B");
+  assert.equal(p.node("#content").innerHTML, "Current content: Product B");
+  assert.notEqual(p.node("#reveal").removed, true);
+  assert.notEqual(p.node("#destroy").removed, true);
 
+  p.node("#content").innerHTML = "Visible private delivery for B";
   const activeDestroy = p.context.destroyReceipt();
   p.requests[1].respond(result);
   for (let i = 0; i < 10 && p.requests.length < 3; i++) await Promise.resolve();
   assert.equal(p.requests[2].body.token, "tokenB");
+  // The successful delete must clear visible secrets before any refresh finishes.
+  assert.equal(p.node("#content").innerHTML, "");
+  assert.equal(p.node("#reveal").removed, true);
+  assert.equal(p.node("#destroy").removed, true);
   p.requests[2].reject(new Error("Offline"));
   assert.equal(await activeDestroy, result);
+  assert.equal(p.node("#content").innerHTML, "");
   assert.match(p.node("#toast").textContent, /已销毁/);
+});
+
+test("structured delivery displays localized output labels and escapes all returned text", async () => {
+  for (const [language, expectedLabel] of [
+    ["zh-CN", "领取账号 &lt;img src=x onerror=alert(1)&gt;"],
+    ["en", "Account &lt;img src=x onerror=alert(1)&gt;"],
+  ]) {
+    const p = page(language);
+    const product = p.receipt("tokenA", "Product A");
+    product.outputs = [
+      {
+        key: "email",
+        label: {
+          "zh-CN": "领取账号 <img src=x onerror=alert(1)>",
+          en: "Account <img src=x onerror=alert(1)>",
+        },
+      },
+      {
+        key: "access_code",
+        label: { "zh-CN": "访问代码", en: "Access code" },
+      },
+    ];
+    const result = {
+      output: {
+        email: "buyer@example.com",
+        access_code: '</pre><script>alert("delivery")</script>',
+        '<svg onload="alert(2)">': "Fallback output",
+      },
+    };
+    const revealing = p.context.revealReceipt();
+    p.requests[0].respond(result);
+    assert.equal(await revealing, result);
+    const markup = p.node("#content").innerHTML;
+    assert.ok(markup.includes("<h3>" + expectedLabel + "</h3>"));
+    assert.match(markup, /buyer@example\.com/);
+    assert.match(markup, /&lt;\/pre&gt;&lt;script&gt;alert\(&quot;delivery&quot;\)&lt;\/script&gt;/);
+    assert.match(markup, /&lt;svg onload=&quot;alert\(2\)&quot;&gt;/);
+    assert.match(markup, /Fallback output/);
+    assert.doesNotMatch(markup, /<(?:script|img|svg)\b/i);
+  }
 });
 
 test("polling ignores stale timers and late responses from another receipt", async () => {
@@ -272,4 +361,37 @@ test("polling ignores stale timers and late responses from another receipt", asy
   await polling;
   assert.equal(p.node("#app").innerHTML, "Current receipt: Product B");
   assert.equal(p.getContext().product.name, "Product B");
+});
+
+test("changing the appearance preserves the receipt and its pending delivery", async () => {
+  const p = page();
+  const product = p.receipt("tokenA", "Product A");
+  const revealing = p.context.revealReceipt();
+  p.preferences.setTheme("dark");
+  assert.equal(p.requests.length, 1);
+  assert.equal(p.getContext().currentToken, "tokenA");
+  assert.equal(p.getContext().product, product);
+  assert.equal(p.node("#app").innerHTML, "Current receipt: Product A");
+  assert.equal(p.node("#theme").value, "dark");
+  p.requests[0].respond({ content: "Private delivery for A" });
+  await revealing;
+  assert.match(p.node("#content").innerHTML, /Private delivery for A/);
+});
+
+test("changing the language reloads the same receipt and updates its controls", async () => {
+  const p = page();
+  const product = p.receipt("tokenA", "Product A");
+  p.preferences.setLanguage("en");
+  assert.equal(p.requests[0].url, "/api/auth/status");
+  assert.equal(p.node("#language").value, "en");
+  assert.equal(p.node("#language").attributes["aria-label"], "Language");
+  p.requests[0].respond({ configured: true, role: null, password_enabled: false });
+  for (let i = 0; i < 10 && p.requests.length < 2; i++) await Promise.resolve();
+  assert.equal(p.requests[1].url, "/api/receipt");
+  assert.equal(p.requests[1].body.token, "tokenA");
+  p.requests[1].respond({ product, job: job() });
+  for (let i = 0; i < 10; i++) await Promise.resolve();
+  assert.equal(p.getContext().currentToken, "tokenA");
+  assert.equal(p.getContext().product, product);
+  assert.match(p.node("#app").innerHTML, /Redemption progress/);
 });

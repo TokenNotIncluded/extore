@@ -1,0 +1,3 @@
+[submodule "processors/official"]
+	path = processors/official
+	url = https://github.com/TokenNotIncluded/extore-processors.git

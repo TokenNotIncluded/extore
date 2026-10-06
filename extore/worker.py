@@ -5,14 +5,18 @@ import json
 import os
 import socket
 import sys
+import tempfile
 import time
+from pathlib import Path
 from urllib.parse import urlsplit
 
 import httpx
+from fastapi import HTTPException
 
-from .config import DATA, SCRIPT_DIR
+from .config import DATA
 from .db import db, init
 from .models import JobUpdate
+from .processors import normalize_product
 from .security import sign, token
 from .service import apply_update, job, product
 
@@ -105,32 +109,40 @@ async def outbox_once():
 
 
 async def execute_script(row, p):
-    path = (SCRIPT_DIR / (p["script"] + ".py")).resolve()
-    if path.parent != SCRIPT_DIR or not path.is_file():
-        raise ValueError("服务器上未安装此脚本")
+    # A product selects a catalog ID, never an arbitrary executable or filename.
+    import extore_processors
+
+    p = normalize_product(p, allow_incomplete=False)
+    with tempfile.TemporaryDirectory(prefix="extore-processor-") as scratch:
+        return await _execute_processor(row, p, scratch, extore_processors)
+
+
+async def _execute_processor(row, p, scratch, processor_package):
     proc = await asyncio.create_subprocess_exec(
         sys.executable,
-        str(path),
+        "-m",
+        "extore_processors",
+        p["processor_id"],
         stdin=asyncio.subprocess.PIPE,
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.DEVNULL,
-        cwd=SCRIPT_DIR,
+        cwd=scratch,
         env={
             "PATH": os.environ.get("PATH", ""),
-            "PYTHONPATH": str(
-                __import__("pathlib").Path(__file__).resolve().parent.parent
+            "PYTHONPATH": os.pathsep.join(
+                (
+                    str(Path(__file__).resolve().parent.parent),
+                    str(Path(processor_package.__file__).resolve().parent.parent),
+                )
             ),
             "PYTHONUNBUFFERED": "1",
-            **{k: v for k, v in os.environ.items() if k.startswith("EXTORE_SCRIPT_")},
         },
         limit=150000,
         start_new_session=True,
     )
     payload = {
-        "id": row["id"],
-        "product_id": row["product_id"],
-        "attempt": row["attempt"],
         "params": json.loads(row["params"]),
+        "configuration": p["processor_config"],
     }
     result = None
     total = 0
@@ -146,7 +158,7 @@ async def execute_script(row, p):
                 break
             total += len(line)
             if total > 1000000:
-                raise ValueError("脚本输出超过限制")
+                raise ValueError("处理器输出超过限制")
             value = json.loads(line)
             if result is not None:
                 raise ValueError("结果后不能继续输出")
@@ -164,13 +176,13 @@ async def execute_script(row, p):
                     )
             elif value.get("kind") == "result":
                 if value.get("state") not in ("succeeded", "failed"):
-                    raise ValueError("脚本必须返回终态")
+                    raise ValueError("处理器必须返回终态")
                 result = JobUpdate.model_validate({**value, "attempt": row["attempt"]})
             else:
-                raise ValueError("脚本输出格式错误")
+                raise ValueError("处理器输出格式错误")
         await proc.wait()
         if proc.returncode or result is None:
-            raise ValueError("脚本未正常完成")
+            raise ValueError("处理器未正常完成")
         return result
 
     try:
@@ -238,7 +250,7 @@ async def job_once():
         result = JobUpdate(
             state="failed",
             attempt=selected["attempt"],
-            message="脚本未正常完成，待商家核实是否已交付",
+            message="处理器未正常完成，待商家核实是否已交付",
             retryable=False,
         )
     with db() as c:
@@ -247,7 +259,21 @@ async def job_once():
             current["state"] == "processing"
             and current["attempt"] == selected["attempt"]
         ):
-            apply_update(c, selected["id"], result)
+            try:
+                apply_update(c, selected["id"], result)
+            except HTTPException:
+                # A reviewed handler can still contain a bug. Reject malformed
+                # results immediately instead of leaving the job on its lease.
+                apply_update(
+                    c,
+                    selected["id"],
+                    JobUpdate(
+                        state="failed",
+                        attempt=selected["attempt"],
+                        message="处理器返回的结果不符合商品定义，待商家核实",
+                        retryable=False,
+                    ),
+                )
     return True
 
 

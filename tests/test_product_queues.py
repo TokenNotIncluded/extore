@@ -32,7 +32,17 @@ def test_queue_product_list_is_minimal_and_requires_login(owner, setup_product):
         webhook_url="https://example.com/secret-hook",
         webhook_secret="a-private-signing-secret-32-characters",
     )
-    assert owner.get("/api/manage/products").json() == [
+    response = owner.get("/api/manage/products")
+    assert response.status_code == 200, response.text
+    rows = response.json()
+    assert [
+        {
+            key: value
+            for key, value in row.items()
+            if key not in ("parameters", "outputs")
+        }
+        for row in rows
+    ] == [
         {
             "id": pid,
             "name": "人工服务",
@@ -48,6 +58,15 @@ def test_queue_product_list_is_minimal_and_requires_login(owner, setup_product):
             "view_policy": "repeat",
         },
     ]
+    assert all(
+        set(row)
+        == {"id", "name", "mode", "delivery", "view_policy", "parameters", "outputs"}
+        for row in rows
+    )
+    assert all(row["parameters"][0]["key"] == "email" for row in rows)
+    assert rows[0]["outputs"] == []
+    assert rows[1]["outputs"][0]["key"] == "content"
+    assert "secret-hook" not in response.text and "signing-secret" not in response.text
     owner.cookies.clear()
     assert owner.get("/api/manage/products").status_code == 401
 

@@ -5,7 +5,6 @@ from urllib.parse import urlsplit
 DATA = Path(os.environ.get("EXTORE_DATA", "data")).resolve()
 ORIGIN = os.environ.get("EXTORE_ORIGIN", "http://localhost:8000").rstrip("/")
 RP_ID = urlsplit(ORIGIN).hostname
-SCRIPT_DIR = Path(os.environ.get("EXTORE_SCRIPTS", "scripts")).resolve()
 COOKIE_SECURE = urlsplit(ORIGIN).scheme == "https"
 
 

@@ -7,6 +7,17 @@
   --white: #fffefa;
   --red: #9a342e;
   --warm: #ede9dc;
+  --button-hover: #173d33;
+  --warm-hover: #e2ddcb;
+  --danger-bg: #f4e1dc;
+  --status-bg: #e2ece3;
+  --input-line: #abb9ae;
+  --placeholder: #69756e;
+  --scroll-thumb: #a8b7ac;
+  --dashed-line: #bac6bb;
+  --selection: #c7dfce;
+  --selection-ink: #243c35;
+  color-scheme: light;
   font-family: "Noto Sans CJK SC", "PingFang SC", "Microsoft YaHei", sans-serif;
   color: var(--ink);
   background: var(--paper);
@@ -20,8 +31,8 @@ body {
   margin: 0;
 }
 ::selection {
-  background: #c7dfce;
-  color: var(--ink);
+  background: var(--selection);
+  color: var(--selection-ink);
 }
 button,
 input,
@@ -50,7 +61,7 @@ button {
   transition: background 0.18s;
 }
 button:hover {
-  background: #173d33;
+  background: var(--button-hover);
 }
 button:disabled {
   opacity: 0.55;
@@ -61,10 +72,10 @@ button.secondary {
   color: var(--ink);
 }
 button.secondary:hover {
-  background: #e2ddcb;
+  background: var(--warm-hover);
 }
 button.danger {
-  background: #f4e1dc;
+  background: var(--danger-bg);
   color: var(--red);
 }
 a {
@@ -76,7 +87,7 @@ textarea,
 select {
   color: var(--ink);
   background: var(--white);
-  border: 1px solid #abb9ae;
+  border: 1px solid var(--input-line);
   border-radius: 7px;
   padding: 12px;
   width: 100%;
@@ -84,7 +95,7 @@ select {
 }
 input::placeholder,
 textarea::placeholder {
-  color: #69756e;
+  color: var(--placeholder);
 }
 textarea {
   min-height: 130px;
@@ -137,6 +148,62 @@ header {
   background: transparent;
   border: 0;
   font-size: 13px;
+}
+.grid.cards-summary {
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+}
+.cards-metric {
+  padding: 18px;
+}
+.cards-metric p,
+.cards-metric h2 {
+  margin: 0;
+}
+.delivery-field + .delivery-field {
+  margin-top: 24px;
+}
+@media (max-width: 700px) {
+  .grid.cards-summary {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+  .card-inventory-table,
+  .card-inventory-table tbody,
+  .card-inventory-table tr,
+  .card-inventory-table td {
+    display: block;
+    width: auto;
+  }
+  .card-inventory-table thead {
+    display: none;
+  }
+  .card-inventory-table tbody {
+    display: grid;
+    gap: 20px;
+  }
+  .card-inventory-table tr {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+    gap: 12px 18px;
+    padding: 18px 0;
+    border-bottom: 1px dashed var(--line);
+  }
+  .card-inventory-table td {
+    padding: 0;
+    border: 0;
+  }
+  .card-inventory-table td:nth-child(1),
+  .card-inventory-table td:nth-child(2),
+  .card-inventory-table td:nth-child(5) {
+    grid-column: 1 / -1;
+  }
+  .card-inventory-table td::before {
+    content: attr(data-label);
+    display: block;
+    margin-bottom: 4px;
+    color: var(--muted);
+    font-family: inherit;
+    font-size: 12px;
+  }
 }
 main {
   max-width: 1160px;
@@ -407,13 +474,13 @@ summary {
 .status {
   font-size: 14px;
   display: inline-block;
-  background: #e2ece3;
+  background: var(--status-bg);
   color: var(--green);
   padding: 4px 10px;
   border-radius: 5px;
 }
 .status.failed {
-  background: #f4e1dc;
+  background: var(--danger-bg);
   color: var(--red);
 }
 .status.destroyed {
@@ -613,7 +680,7 @@ td pre {
   height: 8px;
 }
 ::-webkit-scrollbar-thumb {
-  background: #a8b7ac;
+  background: var(--scroll-thumb);
   border-radius: 6px;
 }
 ::-webkit-scrollbar-track {
@@ -825,7 +892,7 @@ footer {
 .empty,
 td,
 th {
-  border-color: #bac6bb;
+  border-color: var(--dashed-line);
   border-style: dashed;
   border-left: 0;
   border-right: 0;
@@ -908,5 +975,46 @@ th {
 @media (max-width: 760px) {
   .permission-grid {
     grid-template-columns: 1fr;
+  }
+}
+
+:root[data-theme="dark"] {
+  --paper: #171e1b;
+  --ink: #e2e9df;
+  --muted: #a9b7ad;
+  --green: #9dc8af;
+  --line: #3d5147;
+  --white: #23312a;
+  --red: #f4a99c;
+  --warm: #334137;
+  --button-hover: #b2d7bf;
+  --warm-hover: #415448;
+  --danger-bg: #472d2a;
+  --status-bg: #334b3e;
+  --input-line: #577262;
+  --placeholder: #9bac9f;
+  --scroll-thumb: #617569;
+  --dashed-line: #577262;
+  --selection: #9dc8af;
+  --selection-ink: #171e1b;
+  color-scheme: dark;
+}
+.header-right select option {
+  color: var(--ink);
+  background: var(--white);
+}
+@media (max-width: 480px) {
+  header {
+    flex-wrap: wrap;
+    gap: 14px;
+  }
+  .header-right {
+    gap: 6px;
+    flex-wrap: wrap;
+    justify-content: flex-end;
+    max-width: 100%;
+  }
+  .header-right select {
+    padding: 9px 8px;
   }
 }

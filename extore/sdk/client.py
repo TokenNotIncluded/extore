@@ -45,6 +45,7 @@ class Client:
         progress=0,
         message="",
         content=None,
+        output=None,
         retryable=False,
     ):
         body = json.dumps(
@@ -54,6 +55,7 @@ class Client:
                 progress=progress,
                 message=message,
                 content=content,
+                output=output,
                 retryable=retryable,
             ),
             ensure_ascii=False,

@@ -56,11 +56,12 @@ def test_signed_callback_replay_stale_and_terminal(owner, setup_product):
     )
 
 
-def test_script_sdk_end_to_end(owner, setup_product):
+def test_official_processor_end_to_end(owner, setup_product):
     pid, code = setup_product(
         mode="script",
-        script="welcome",
-        parameters=[{"key": "name", "label": {"zh-CN": "昵称"}}],
+        processor_id="personalized_text",
+        processor_config={"template": "你好，$name！欢迎领取商品。"},
+        parameters=[],
     )
     t = owner.post("/api/exchange", json={"code": code}).json()["token"]
     assert (
