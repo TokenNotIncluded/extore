@@ -338,6 +338,7 @@ def _customer_action(operation, body, request):
             "start": task_flow.start,
             "answer": task_flow.answer,
             "continue": task_flow.continue_display,
+            "cancel": task_flow.cancel,
         }[operation]
         if operation == "answer":
             effect = fn(c, row, body.values, epoch, revision)
@@ -346,6 +347,11 @@ def _customer_action(operation, body, request):
                 fail("此操作不能提交字段值")
             effect = fn(c, row, epoch, revision)
         updated = finalize(c, effect)
+        if operation == "cancel":
+            from .files import purge_job_files
+
+            purge_job_files(c, row["id"])
+            task_flow.destroy(c, updated)
         expired = effect.get("expired", False)
         audit(c, "customer", "task_flow." + operation, row["id"])
         response = job_view(c, updated)
@@ -367,3 +373,8 @@ def answer(body: FlowAction, request: Request):
 @router.post("/api/task-flow/continue")
 def continue_flow(body: FlowAction, request: Request):
     return _customer_action("continue", body, request)
+
+
+@router.post("/api/task-flow/cancel")
+def cancel(body: FlowAction, request: Request):
+    return _customer_action("cancel", body, request)

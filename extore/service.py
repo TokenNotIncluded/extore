@@ -290,7 +290,15 @@ def job_product(c, row):
             "UPDATE jobs SET schema_snapshot=? WHERE id=? AND schema_snapshot IS NULL",
             (raw, row["id"]),
         )
-    return {**p, **json.loads(raw)}
+    result = {**p, **json.loads(raw)}
+    from . import task_flow
+
+    if task_flow.is_flow(c, row):
+        execution = task_flow.execution(c, row)
+        if execution:
+            result["parameters"] = execution["parameters"]
+            result["outputs"] = execution["outputs"]
+    return result
 
 
 def progress_snapshot(c, row):
