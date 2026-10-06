@@ -22,6 +22,7 @@ dependencies = [
     "cryptography>=50.0.2",
     "fastapi>=0.142.2",
     "httpx>=0.28.1",
+    "pillow>=12.3.0",
     "python-multipart>=0.0.22",
     "uvicorn[standard]>=0.54.0",
     "webauthn>=3.0.1",

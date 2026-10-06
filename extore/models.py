@@ -192,6 +192,7 @@ class Product(BaseModel):
     script: str = Field(default="", max_length=100, pattern=r"^[a-zA-Z0-9_-]*$")
     processor_id: str = Field(default="", max_length=100, pattern=r"^[a-zA-Z0-9_-]*$")
     processor_config: dict[str, str] = Field(default_factory=dict, max_length=30)
+    task_flow: dict | None = None
 
     @field_validator("support_email")
     @classmethod
@@ -275,6 +276,10 @@ class Product(BaseModel):
                 urlsplit(value).scheme != "https" or not urlsplit(value).hostname
             ):
                 raise ValueError("商品图片必须是 HTTPS 地址")
+        if self.task_flow is not None:
+            from .task_flow_definition import validate_definition
+
+            self.task_flow = validate_definition(self.task_flow, self.model_dump())
         return self
 
 
@@ -323,6 +328,8 @@ class JobUpdate(BaseModel):
     output: dict[str, str] | None = None
     retryable: bool = False
     attempt: int = Field(ge=1)
+    flow_epoch: int | None = Field(default=None, ge=1)
+    action_id: str | None = Field(default=None, max_length=100)
 
     @field_validator("completed_steps")
     @classmethod
@@ -352,6 +359,8 @@ class BatchUpdate(BaseModel):
     content: str | None = Field(default=None, max_length=100000)
     output: dict[str, str] | None = None
     retryable: bool = False
+    flow_epoch: int | None = Field(default=None, ge=1)
+    action_id: str | None = Field(default=None, max_length=100)
     retry_mode: Literal["revise", "reuse"] = "revise"
     reason_type: Literal["customer_input", "external", "processor"] = "customer_input"
 

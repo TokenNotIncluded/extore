@@ -22,6 +22,7 @@ def product(c, pid):
     config["variants"] = resolve_product_variants(config)
     config.setdefault("processor_id", "")
     config.setdefault("processor_config", {})
+    config.setdefault("task_flow", None)
     # Old products predate explicit result schemas. Keep their existing receipts
     # and callbacks compatible without rewriting stored merchant configuration.
     config.setdefault(
@@ -45,7 +46,7 @@ def product(c, pid):
 
 
 def public_product(p):
-    return {
+    result = {
         k: v
         for k, v in p.items()
         if k
@@ -60,8 +61,30 @@ def public_product(p):
             "processor_profile_id",
             "processor_binding",
             "configured_fields",
+            "task_flow",
         )
     }
+    if p.get("task_flow"):
+        from .flow_adapter import preview
+
+        result["task_flow_view"] = preview(p)
+    return result
+
+
+def card_product(c, card):
+    """Issued optional flows and instant text keep their issuance semantics."""
+    from . import task_flow, text_cards
+
+    snapshot = task_flow.card_snapshot(c, card["id"])
+    if snapshot is not None:
+        return snapshot.get("product", snapshot)
+    p = product(c, card["product_id"])
+    # An old card must not acquire a flow merely because its product was edited.
+    p["task_flow"] = None
+    frozen = text_cards.card_definition(c, card["id"])
+    if frozen:
+        p.update(frozen)
+    return p
 
 
 def issue_cards(c, pid, count, label="", expires=None, variant_id="default"):
@@ -88,6 +111,10 @@ def issue_cards(c, pid, count, label="", expires=None, variant_id="default"):
         )
         if p["mode"] == "script":
             freeze_card_binding(c, card_id, pid, binding)
+        if p.get("task_flow"):
+            from .task_flow import freeze_card
+
+            freeze_card(c, card_id, p)
         codes.append(code)
     record_issue(
         c,
@@ -225,7 +252,8 @@ def freeze_product_schemas(c, pid, p):
 
 
 def job_product(c, row):
-    p = product(c, row["product_id"])
+    card = c.execute("SELECT * FROM cards WHERE id=?", (row["card_id"],)).fetchone()
+    p = card_product(c, card)
     raw = row["schema_snapshot"]
     if raw is None:
         raw = c.execute(
@@ -368,10 +396,15 @@ def submit(c, card, params):
 
     require_enabled_product(c, card["product_id"])
     ensure_card_usable(c, card)
+    from .flow_adapter import submit_flow
+
+    flow_row = submit_flow(c, card, params)
+    if flow_row is not None:
+        return flow_row
     row = c.execute("SELECT * FROM jobs WHERE card_id=?", (card["id"],)).fetchone()
     if row and row["state"] == "rejected":
         fail("此任务已被拒绝，不能重新提交", 409)
-    p = job_product(c, row) if row else product(c, card["product_id"])
+    p = job_product(c, row) if row else card_product(c, card)
     clean = validate_params(p, params)
     if (
         row
@@ -427,7 +460,27 @@ def submit(c, card, params):
     return row
 
 
+def finalize_task_flow(c, effect):
+    from .flow_adapter import finalize
+
+    return finalize(c, effect)
+
+
 def apply_update(c, jid, update: JobUpdate):
+    from . import task_flow
+
+    row = job(c, jid)
+    if task_flow.is_flow(c, row):
+        if update.flow_epoch is None:
+            fail("流程处理必须指定当前步骤的 flow_epoch", 409)
+        return finalize_task_flow(
+            c,
+            task_flow.process_update(c, row, update, update.flow_epoch),
+        )
+    return _apply_simple_update(c, jid, update)
+
+
+def _apply_simple_update(c, jid, update: JobUpdate, *, product_override=None):
     from .files import bind_outputs, validate_output_files
 
     row = job(c, jid)
@@ -437,7 +490,7 @@ def apply_update(c, jid, update: JobUpdate):
         return row  # idempotent completion, never overwrite a result
     if row["state"] not in ("queued", "processing"):
         fail("任务已经结束，不能覆盖结果", 409)
-    p = job_product(c, row)
+    p = product_override or job_product(c, row)
     plan, previous = progress_snapshot(c, row)
     step_ids = [step["id"] for step in plan]
     completed = previous if update.completed_steps is None else update.completed_steps
