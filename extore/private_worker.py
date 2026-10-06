@@ -440,6 +440,14 @@ async def result(product_id: str, job_id: str, request: Request):
         from . import task_flow
         from .service import finalize_task_flow
 
+        phase = c.execute(
+            "SELECT phase FROM task_flow_runs WHERE job_id=?", (scope.job_id,)
+        ).fetchone()
+        if phase is not None and phase[0] == "queued":
+            # A dispatch is not a claim: a worker may still be queued when its
+            # OTP expires, before the cleanup sweep runs. Only an already
+            # started process can finish without reopening its erased inputs.
+            _active(c, row, scope)
         effect = task_flow.process_update(c, row, update, scope.flow_epoch)
         finalize_task_flow(c, effect)
         if effect.get("expired"):

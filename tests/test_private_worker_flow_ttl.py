@@ -15,10 +15,11 @@ SECRET = "s" * 40
 
 
 @pytest.fixture
-def running_private_flow(owner, monkeypatch):
+def queued_private_flow(owner, monkeypatch):
     now = [time.time()]
     monkeypatch.setattr(task_flow, "time", SimpleNamespace(time=lambda: now[0]))
     monkeypatch.setattr(flow_adapter, "time", SimpleNamespace(time=lambda: now[0]))
+    monkeypatch.setattr(private_worker, "time", SimpleNamespace(time=lambda: now[0]))
     definition = graph(1)
     definition["nodes"][0]["fields"][0].update(sensitive=True, sensitive_ttl_seconds=1)
     definition["nodes"][1]["outputs"].append(
@@ -28,14 +29,21 @@ def running_private_flow(owner, monkeypatch):
     with db() as c:
         entered = answer_current(c, "001234")
         context = task_flow.execution(c, entered["row"])
+    return private_worker.WorkerScope.from_context(context), now, card_id
+
+
+@pytest.fixture
+def running_private_flow(queued_private_flow):
+    scope, now, card_id = queued_private_flow
+    with db() as c:
         flow_adapter.finalize(
             c,
             task_flow.claim(
-                c, entered["row"], "synthetic-worker", context["flow_epoch"]
+                c, job(c, scope.job_id), "synthetic-worker", scope.flow_epoch
             ),
         )
         assert task_flow.execution(c, job(c, "task"))["params"] == {"answer": "001234"}
-    return private_worker.WorkerScope.from_context(context), now, card_id
+    return scope, now, card_id
 
 
 def post(owner, scope, *, state="succeeded", output=None, result_id="completed"):
@@ -74,6 +82,76 @@ def expire_input(scope, clock):
         )
 
 
+@pytest.mark.parametrize("state", ["processing", "succeeded", "failed"])
+def test_unstarted_private_dispatch_cannot_bypass_expired_input_before_sweep(
+    owner, queued_private_flow, state
+):
+    scope, clock, card_id = queued_private_flow
+    clock[0] += 2
+    response = post(
+        owner,
+        scope,
+        state=state,
+        output={"answer": "too late"} if state == "succeeded" else None,
+    )
+    assert response.status_code == 409, response.text
+    with db() as c:
+        assert job(c, scope.job_id)["state"] == "queued"
+        run = c.execute(
+            "SELECT * FROM task_flow_runs WHERE job_id=?", (scope.job_id,)
+        ).fetchone()
+        assert run["phase"] == "queued" and run["flow_epoch"] == scope.flow_epoch
+        assert (
+            c.execute("SELECT count(*) FROM private_worker_receipts").fetchone()[0] == 0
+        )
+        assert (
+            c.execute("SELECT state FROM cards WHERE id=?", (card_id,)).fetchone()[0]
+            != "used"
+        )
+        effects = task_flow.expire_due(c)
+        assert len(effects) == 1 and effects[0]["input_expired"]
+        flow_adapter.finalize(c, effects[0])
+        assert effects[0]["flow"]["phase"] == "await_start"
+        assert effects[0]["flow"]["flow_epoch"] > scope.flow_epoch
+
+
+def test_real_queued_dispatch_starts_then_accepts_output_after_input_expiry(
+    owner, queued_private_flow, monkeypatch
+):
+    scope, clock, _ = queued_private_flow
+    assert (
+        post(owner, scope, state="processing", result_id="started").status_code == 200
+    )
+    expire_input(scope, clock)
+
+    def never_open_inputs(*args, **kwargs):
+        pytest.fail("An already started result must not reopen expired parameters")
+
+    monkeypatch.setattr(task_flow, "_inputs", never_open_inputs)
+    assert post(owner, scope, output={"answer": "completed"}).status_code == 200
+
+
+def test_queued_process_deadline_is_committed_even_before_input_sweep(
+    owner, queued_private_flow
+):
+    scope, clock, card_id = queued_private_flow
+    clock[0] += 61
+    assert post(owner, scope, output={"answer": "too late"}).status_code == 409
+    with db() as c:
+        assert job(c, scope.job_id)["state"] == "failed"
+        run = c.execute(
+            "SELECT * FROM task_flow_runs WHERE job_id=?", (scope.job_id,)
+        ).fetchone()
+        assert run["phase"] == "ended" and run["flow_epoch"] > scope.flow_epoch
+        assert (
+            c.execute("SELECT count(*) FROM private_worker_receipts").fetchone()[0] == 0
+        )
+        assert (
+            c.execute("SELECT state FROM cards WHERE id=?", (card_id,)).fetchone()[0]
+            != "used"
+        )
+
+
 def test_processing_input_expiry_accepts_progress_then_completion_and_stable_ack(
     owner, running_private_flow
 ):
@@ -104,9 +182,12 @@ def test_processing_input_expiry_accepts_progress_then_completion_and_stable_ack
 
 
 def test_processing_input_expiry_allows_scoped_output_upload_without_reopening_params(
-    owner, running_private_flow, monkeypatch
+    owner, queued_private_flow, monkeypatch
 ):
-    scope, clock, _ = running_private_flow
+    scope, clock, _ = queued_private_flow
+    assert (
+        post(owner, scope, state="processing", result_id="started").status_code == 200
+    )
     expire_input(scope, clock)
 
     def never_open_inputs(*args, **kwargs):
