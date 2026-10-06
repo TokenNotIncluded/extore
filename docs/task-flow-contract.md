@@ -168,7 +168,10 @@ when the answer is received and is capped by the input deadline. Current claimed
 processing may read an unexpired value, while later processes cannot reuse it.
 Completion, timeout, cancellation, retry/rejection and destruction clear raw
 private step values. A persisted `input_expires_at` lets the bounded sweep erase
-expired values without scanning every encrypted task. A queued process whose
+expired values without scanning every encrypted task. This clock follows all
+remaining sensitive values across intermediate input, display and Start-waiting
+nodes; those user steps keep their original deadlines. Retention cleanup also
+runs when the shop/card no longer has execution authorization. A queued process whose
 sensitive input expired returns to that source input in `await_start` with a new
 epoch; it does not change the whole job attempt. Once external processing has
 started, TTL cleanup only erases the input and preserves the original process

@@ -592,6 +592,35 @@ def _sensitive_sources(c, run, snapshot, node):
     return sources
 
 
+def _sensitive_expiry(c, run, snapshot, *, erase=False, now=None):
+    """Track the earliest secret across intermediate input/display nodes too."""
+    now = time.time() if now is None else now
+    earliest = None
+    for step in c.execute(
+        "SELECT * FROM task_flow_steps WHERE job_id=? AND attempt=? AND kind='input'",
+        (run["job_id"], run["attempt"]),
+    ).fetchall():
+        payload = _payload(c, snapshot, step)
+        changed = False
+        for field in _nodes(snapshot)[step["node_id"]]["fields"]:
+            key = field["key"]
+            if not field.get("sensitive") or not payload.get("input", {}).get(key):
+                continue
+            expiry = payload.get("sensitive_until", {}).get(key)
+            if expiry is None or expiry <= now:
+                if erase:
+                    payload["input"].pop(key, None)
+                    payload.get("sensitive_until", {}).pop(key, None)
+                    payload.get("consumed_by", {}).pop(key, None)
+                    changed = True
+                    continue
+                expiry = now if expiry is None else expiry
+            earliest = expiry if earliest is None else min(earliest, expiry)
+        if changed:
+            _write_payload(c, snapshot, step, payload)
+    return earliest
+
+
 def _activate(c, row, run, snapshot, target, *, initial=False):
     if run["transition_count"] >= MAX_TRANSITIONS:
         run = _mutate_run(c, run, phase="ended", deadline=None)
@@ -631,10 +660,14 @@ def _activate(c, row, run, snapshot, target, *, initial=False):
     }[kind]
     epoch = run["flow_epoch"] + 1
     sources = _sensitive_sources(c, run, snapshot, node) if kind == "process" else []
-    input_expires_at = (
+    process_expiry = (
         min(source["expiry"] if source["valid"] else now for source in sources)
         if sources
         else None
+    )
+    expiry_candidates = (process_expiry, _sensitive_expiry(c, run, snapshot))
+    input_expires_at = min(
+        (expiry for expiry in expiry_candidates if expiry is not None), default=None
     )
     run = _mutate_run(
         c,
@@ -1099,7 +1132,7 @@ def expire_due(c, now=None, limit=100):
     effects = []
     rows = c.execute(
         "SELECT jobs.* FROM jobs JOIN task_flow_runs ON task_flow_runs.job_id=jobs.id "
-        "WHERE task_flow_runs.phase IN ('input','display','queued','processing') "
+        "WHERE task_flow_runs.phase IN ('await_start','input','display','queued','processing') "
         "AND ((task_flow_runs.deadline IS NOT NULL AND task_flow_runs.deadline<=?) "
         "OR (task_flow_runs.input_expires_at IS NOT NULL AND task_flow_runs.input_expires_at<=?)) "
         "ORDER BY COALESCE(task_flow_runs.input_expires_at,task_flow_runs.deadline),jobs.id LIMIT ?",
@@ -1108,9 +1141,22 @@ def expire_due(c, now=None, limit=100):
     from fastapi import HTTPException
 
     for row in rows:
+        run = _run(c, row)
+        ttl_due = run["input_expires_at"] is not None and run["input_expires_at"] <= now
+        # Retention cleanup is not permission to execute work. Even a disabled
+        # shop or revoked card must not keep expired raw secrets indefinitely.
+        remaining_expiry = (
+            _sensitive_expiry(
+                c, run, card_snapshot(c, row["card_id"]), erase=True, now=now
+            )
+            if ttl_due
+            else None
+        )
         try:
             current, run, snapshot = _guard(c, row)
         except HTTPException:
+            if ttl_due:
+                _mutate_run(c, run, input_expires_at=remaining_expiry)
             continue
         if run["deadline"] is not None and run["deadline"] <= now:
             effects.append(_timeout(c, current, run, snapshot))
@@ -1127,6 +1173,8 @@ def expire_due(c, now=None, limit=100):
                     None,
                 )
                 if invalid is None:
+                    _mutate_run(c, run, input_expires_at=remaining_expiry)
+                    effects.append(_effect(c, current, input_expired=True))
                     continue
                 c.execute(
                     "UPDATE task_flow_steps SET state='cancelled',completed_at=? WHERE job_id=? AND flow_epoch=?",
@@ -1144,8 +1192,8 @@ def expire_due(c, now=None, limit=100):
             else:
                 # A worker may already have started an external action. Erase
                 # expired values without restarting it or changing its timer.
-                _clear_sensitive(c, run, snapshot, node)
-                _mutate_run(c, run, input_expires_at=None)
+                # Intermediate user steps also keep their original deadline.
+                _mutate_run(c, run, input_expires_at=remaining_expiry)
                 effects.append(_effect(c, current, input_expired=True))
     return effects
 

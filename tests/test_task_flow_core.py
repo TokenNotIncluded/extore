@@ -783,3 +783,112 @@ def test_ended_destroyed_and_rejected_flows_have_no_execution_but_no_hidden_auth
         with pytest.raises(HTTPException):
             flow.frozen_authority(c, row, 2, 1)
         assert ended["terminal"]["state"] == "succeeded"
+
+
+@pytest.mark.parametrize("intermediate", ["input", "display", "await_start"])
+def test_sensitive_ttl_is_erased_during_intermediate_user_steps_without_extending_timers(
+    owner, monkeypatch, intermediate
+):
+    now = [1000.0]
+    monkeypatch.setattr(flow, "time", SimpleNamespace(time=lambda: now[0]))
+    definition = graph(1)
+    definition["nodes"][0]["fields"][0].update(sensitive=True, sensitive_ttl_seconds=2)
+    definition["nodes"][0]["next"] = "middle"
+    if intermediate == "display":
+        middle = {
+            "id": "middle",
+            "kind": "display",
+            "content": {"en": "Wait"},
+            "next": "p1",
+            "timeout_seconds": 30,
+            "timeout_next": "failed",
+        }
+    else:
+        middle = {
+            "id": "middle",
+            "kind": "input",
+            "fields": [field("extra")],
+            "question": {"en": "Additional details"},
+            "next": "p1",
+            "start_policy": "automatic" if intermediate == "input" else "confirm",
+            "timeout_seconds": 30,
+            "timeout_next": "failed",
+        }
+    definition["nodes"].insert(1, middle)
+    setup(owner, definition)
+    with db() as c:
+        entered = answer_current(c, "000123")
+        assert entered["flow"]["phase"] == intermediate
+        before_epoch = entered["flow"]["flow_epoch"]
+        before_deadline = entered["flow"]["deadline"]
+        now[0] += 2
+        effects = flow.expire_due(c)
+        assert len(effects) == 1 and effects[0]["input_expired"]
+        assert effects[0]["flow"]["flow_epoch"] == before_epoch
+        assert effects[0]["flow"]["deadline"] == before_deadline
+        assert effects[0]["flow"]["phase"] == intermediate
+        assert flow.stage_values(c, effects[0]["row"], 1, "input")["values"] == {}
+        assert flow.expire_due(c) == []
+        current = effects[0]
+        if intermediate == "await_start":
+            current = flow.start(
+                c,
+                current["row"],
+                current["flow"]["flow_epoch"],
+                current["flow"]["revision"],
+            )
+        if intermediate == "display":
+            queued = flow.continue_display(
+                c,
+                current["row"],
+                current["flow"]["flow_epoch"],
+                current["flow"]["revision"],
+            )
+        else:
+            queued = flow.answer(
+                c,
+                current["row"],
+                {"extra": "details"},
+                current["flow"]["flow_epoch"],
+                current["flow"]["revision"],
+            )
+        assert flow.execution(c, queued["row"]) is None
+        returned = flow.expire_due(c)[0]
+        assert returned["flow"]["current"]["id"] == "q1"
+        assert returned["flow"]["phase"] == "await_start"
+        assert returned["row"]["attempt"] == 1
+
+
+@pytest.mark.parametrize("blocked", ["shop_disabled", "card_revoked"])
+def test_sensitive_expiry_scrubs_blocked_scopes_without_restoring_execution(
+    owner, monkeypatch, blocked
+):
+    now = [1000.0]
+    monkeypatch.setattr(flow, "time", SimpleNamespace(time=lambda: now[0]))
+    definition = graph(1)
+    definition["nodes"][0]["fields"][0].update(sensitive=True, sensitive_ttl_seconds=1)
+    pid, cid, _ = setup(owner, definition)
+    with db() as c:
+        entered = answer_current(c, "012345")
+        if blocked == "shop_disabled":
+            c.execute(
+                "UPDATE shops SET enabled=0 WHERE id=(SELECT shop_id FROM products WHERE id=?)",
+                (pid,),
+            )
+        else:
+            c.execute("UPDATE cards SET state='revoked' WHERE id=?", (cid,))
+        now[0] += 1
+        assert flow.expire_due(c) == []
+        frozen = flow.card_snapshot(c, cid)
+        step = c.execute(
+            "SELECT * FROM task_flow_steps WHERE job_id='task' AND flow_epoch=1"
+        ).fetchone()
+        assert flow._payload(c, frozen, step).get("input", {}) == {}
+        assert (
+            c.execute(
+                "SELECT input_expires_at FROM task_flow_runs WHERE job_id='task'"
+            ).fetchone()[0]
+            is None
+        )
+        with pytest.raises(HTTPException):
+            flow.execution(c, entered["row"])
