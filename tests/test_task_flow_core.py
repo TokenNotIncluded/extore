@@ -701,3 +701,85 @@ def test_secret_equality_receipt_is_keyed_and_resource_bound(owner):
         assert flow.fingerprint(value, shop_id, "task:1") == flow.fingerprint(
             value, shop_id, "task:1"
         )
+
+
+def test_initial_display_waits_for_explicit_start_and_later_display_starts_on_entry(
+    owner, monkeypatch
+):
+    now = [1000.0]
+    monkeypatch.setattr(flow, "time", SimpleNamespace(time=lambda: now[0]))
+    definition = graph(1)
+    definition["entry"] = "intro"
+    definition["nodes"].insert(
+        0,
+        {
+            "id": "intro",
+            "kind": "display",
+            "content": {"en": "Intro"},
+            "next": "q1",
+            "timeout_seconds": 10,
+            "timeout_next": "failed",
+        },
+    )
+    definition["nodes"][1]["next"] = "read"
+    definition["nodes"].insert(
+        2,
+        {
+            "id": "read",
+            "kind": "display",
+            "content": {"en": "Read next"},
+            "next": "p1",
+            "timeout_seconds": 7,
+            "timeout_next": "failed",
+        },
+    )
+    _, cid, effect = setup(owner, definition)
+    assert effect["flow"]["phase"] == "await_start"
+    assert effect["flow"]["deadline"] is None
+    assert effect["flow"]["current"]["prompt"] == {"en": "Intro"}
+    with db() as c:
+        assert flow.preview(c, cid)["actions"] == ["start"]
+        now[0] += 50
+        started = flow.start(
+            c, effect["row"], effect["flow"]["flow_epoch"], effect["flow"]["revision"]
+        )
+        assert (
+            started["flow"]["phase"] == "display"
+            and started["flow"]["deadline"] == 1060
+        )
+        now[0] += 2
+        repeated = flow.start(
+            c,
+            started["row"],
+            started["flow"]["flow_epoch"],
+            started["flow"]["revision"],
+        )
+        assert repeated["flow"]["deadline"] == 1060
+        next_input = flow.continue_display(
+            c,
+            repeated["row"],
+            repeated["flow"]["flow_epoch"],
+            repeated["flow"]["revision"],
+        )
+        assert next_input["flow"]["current"]["id"] == "q1"
+        assert next_input["flow"]["phase"] == "await_start"
+        later = answer_current(c)
+        assert later["flow"]["phase"] == "display"
+        assert later["flow"]["current"]["id"] == "read"
+        assert later["flow"]["deadline"] == now[0] + 7
+
+
+def test_ended_destroyed_and_rejected_flows_have_no_execution_but_no_hidden_authority(
+    owner,
+):
+    setup(owner, graph(1))
+    with db() as c:
+        answer_current(c)
+        ended = finish_current(c)
+        c.execute("UPDATE jobs SET state='destroyed' WHERE id='task'")
+        row = job(c, "task")
+        assert flow.execution(c, row) is None
+        assert flow.view(c, row)["phase"] == "ended"
+        with pytest.raises(HTTPException):
+            flow.frozen_authority(c, row, 2, 1)
+        assert ended["terminal"]["state"] == "succeeded"

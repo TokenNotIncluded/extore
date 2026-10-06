@@ -417,7 +417,7 @@ def view(c, row, staff=False):
     shown = []
     if run["phase"] == "await_start":
         current.update(
-            prompt=node.get("prompt", {}),
+            prompt=node.get("prompt", node.get("content", {})),
             start_policy=node.get("start_policy", "confirm"),
         )
         actions = ["start"]
@@ -613,7 +613,9 @@ def _activate(c, row, run, snapshot, target, *, initial=False):
     kind = node["kind"]
     started = (
         now
-        if kind != "input" or node.get("start_policy") == "automatic" and not initial
+        if kind in ("process", "end")
+        or not initial
+        and (kind == "display" or node.get("start_policy") == "automatic")
         else None
     )
     deadline = (
@@ -624,7 +626,7 @@ def _activate(c, row, run, snapshot, target, *, initial=False):
     phase = {
         "input": "input" if started is not None else "await_start",
         "process": "queued",
-        "display": "display",
+        "display": "display" if started is not None else "await_start",
         "end": "ended",
     }[kind]
     epoch = run["flow_epoch"] + 1
@@ -744,7 +746,7 @@ def _expired(c, row, run, snapshot):
 def start(c, row, epoch, revision):
     row, run, snapshot = _guard(c, row)
     _expect(run, epoch)
-    if run["phase"] == "input":
+    if run["phase"] in ("input", "display"):
         return _expired(c, row, run, snapshot) or _effect(c, row)
     _expect(run, epoch, revision)
     if run["phase"] != "await_start":
@@ -756,7 +758,13 @@ def start(c, row, epoch, revision):
         if node.get("timeout_seconds") is not None
         else None
     )
-    _mutate_run(c, run, phase="input", started_at=now, deadline=deadline)
+    _mutate_run(
+        c,
+        run,
+        phase="display" if node["kind"] == "display" else "input",
+        started_at=now,
+        deadline=deadline,
+    )
     c.execute(
         "UPDATE task_flow_steps SET started_at=?,deadline=? WHERE job_id=? AND flow_epoch=?",
         (now, deadline, row["id"], epoch),
@@ -866,6 +874,9 @@ def _inputs(c, run, snapshot, node, *, consume=False):
 def execution(c, row):
     if not is_flow(c, row):
         return None
+    run = _run(c, row)
+    if run is None or run["phase"] not in ("queued", "processing"):
+        return None  # Safe terminal receipts never acquire processor authority.
     row, run, snapshot = _guard(c, row)
     if (
         run["phase"] not in ("queued", "processing")
