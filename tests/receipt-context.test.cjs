@@ -300,6 +300,71 @@ test("successful destruction does not refresh another receipt or report refresh 
   assert.match(p.node("#toast").textContent, /已销毁/);
 });
 
+test("destruction invalidates earlier reveal and receipt responses while refreshing", async () => {
+  const p = page();
+  const product = p.receipt("tokenA", "Product A");
+  const reading = p.context.readReceipt();
+  const revealing = p.context.revealReceipt();
+  const destroying = p.context.destroyReceipt();
+  p.requests[2].respond({ ok: true });
+  for (let i = 0; i < 10 && p.requests.length < 4; i++) await Promise.resolve();
+  assert.equal(p.requests[3].url, "/api/receipt");
+  assert.equal(p.node("#content").innerHTML, "");
+  const markup = p.node("#app").innerHTML;
+
+  p.requests[0].respond({
+    product: { ...product, name: "Stale product name" },
+    job: job(),
+  });
+  await reading;
+  p.requests[1].respond({ output: { content: "Destroyed private delivery" } });
+  await revealing;
+  assert.equal(p.node("#app").innerHTML, markup);
+  assert.equal(p.node("#content").innerHTML, "");
+  assert.equal(p.getContext().product, product);
+  assert.equal(p.node("#reveal").removed, true);
+
+  p.requests[3].respond({ product, job: job("destroyed") });
+  assert.deepEqual(await destroying, { ok: true });
+  assert.match(p.node("#app").innerHTML, /已销毁/);
+});
+
+test("pre-destruction responses cannot restore content after the refresh fails", async () => {
+  const p = page();
+  const product = p.receipt("tokenA", "Product A");
+  const revealing = p.context.revealReceipt();
+  const reading = p.context.readReceipt();
+  const destroying = p.context.destroyReceipt();
+  p.requests[2].respond({ ok: true });
+  for (let i = 0; i < 10 && p.requests.length < 4; i++) await Promise.resolve();
+  p.requests[3].reject(new Error("Offline"));
+  assert.deepEqual(await destroying, { ok: true });
+  const markup = p.node("#app").innerHTML;
+  assert.match(p.node("#toast").textContent, /已销毁/);
+
+  p.requests[0].respond({ content: "Destroyed legacy private delivery" });
+  await revealing;
+  p.requests[1].respond({ product, job: job() });
+  await reading;
+  assert.equal(p.node("#app").innerHTML, markup);
+  assert.equal(p.node("#content").innerHTML, "");
+  assert.equal(p.node("#reveal").removed, true);
+  assert.equal(p.node("#destroy").removed, true);
+});
+
+test("failed destruction preserves an earlier pending reveal", async () => {
+  const p = page();
+  p.receipt("tokenA", "Product A");
+  const revealing = p.context.revealReceipt();
+  const destroying = p.context.destroyReceipt();
+  p.requests[1].reject(new Error("Offline"));
+  await assert.rejects(destroying, /Offline/);
+  p.requests[0].respond({ output: { content: "Still available delivery" } });
+  await revealing;
+  assert.match(p.node("#content").innerHTML, /Still available delivery/);
+  assert.notEqual(p.node("#reveal").removed, true);
+});
+
 test("structured delivery displays localized output labels and escapes all returned text", async () => {
   for (const [language, expectedLabel] of [
     ["zh-CN", "领取账号 &lt;img src=x onerror=alert(1)&gt;"],

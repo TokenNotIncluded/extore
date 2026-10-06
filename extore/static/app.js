@@ -5,6 +5,7 @@ const preferences = window.ExtorePreferences;
 let lang = preferences.resolved.language,
   currentToken = "",
   currentProduct = null,
+  receiptGeneration = 0,
   timer = null,
   role = null,
   permissions = [],
@@ -179,9 +180,11 @@ function receiptRequestContext(options = {}) {
   const token = currentToken;
   const pathname = location.pathname;
   const hash = location.hash;
+  const generation = receiptGeneration;
   return {
     token,
     active: () =>
+      receiptGeneration === generation &&
       currentToken === token &&
       location.pathname === pathname &&
       location.hash === hash &&
@@ -257,6 +260,9 @@ async function destroyReceipt(options = {}) {
     options,
   );
   if (context.active()) {
+    // Invalidate responses issued before deletion, even on this same receipt.
+    receiptGeneration++;
+    const destroyedContext = receiptRequestContext(options);
     const content = $("#content");
     if (content) content.innerHTML = "";
     $("#reveal")?.remove();
@@ -264,7 +270,7 @@ async function destroyReceipt(options = {}) {
     try {
       await readReceipt(options);
     } catch {
-      if (context.active())
+      if (destroyedContext.active())
         toast(
           tr(
             "交付已销毁，状态刷新失败，请刷新页面。",
@@ -487,6 +493,39 @@ function productOptions() {
     .map((p) => `<option value="${p.id}">${esc(p.name)}</option>`)
     .join("");
 }
+async function writeClipboard(text) {
+  if (globalThis.isSecureContext === false || !navigator.clipboard?.writeText)
+    return false;
+  try {
+    await navigator.clipboard.writeText(String(text));
+    return true;
+  } catch {
+    return false;
+  }
+}
+window.ExtoreClipboard = Object.freeze({ writeText: writeClipboard });
+async function copyManagementLink(url, input, isCurrent = () => true) {
+  const copied = await writeClipboard(url);
+  if (!isCurrent()) return copied;
+  if (copied) {
+    toast(tr("链接已复制", "Link copied"));
+    return true;
+  }
+  if (input && input.isConnected !== false) {
+    input.focus();
+    input.select();
+    input.setSelectionRange?.(0, input.value.length);
+    toast(
+      tr(
+        "复制失败，已选中链接，请手动复制。",
+        "Could not copy. The link is selected; copy it manually.",
+      ),
+    );
+  } else {
+    toast(tr("复制失败，请手动复制链接。", "Could not copy. Copy the link manually."));
+  }
+  return false;
+}
 function productUIContext() {
   const loadId = queueLoadId;
   const pathname = location.pathname;
@@ -505,6 +544,7 @@ function productUIContext() {
       products = updated;
     },
     notify: toast,
+    copyManagementLink,
     refreshTools: () => window.ExtoreWebMCP?.refresh(),
   };
 }
@@ -658,9 +698,21 @@ async function renderCards() {
   });
 }
 async function renderStaff() {
-  const endpoint = role === "staff" ? "/manage/links" : "/admin/staff";
-  if (role === "staff") products = await api("/manage/products");
+  const generation = queueLoadId;
+  const pathname = location.pathname;
+  const renderRole = role;
+  const active = () =>
+    queueLoadId === generation &&
+    location.pathname === pathname &&
+    role === renderRole &&
+    tab === "staff";
+  const endpoint = renderRole === "staff" ? "/manage/links" : "/admin/staff";
+  const availableProducts =
+    renderRole === "staff" ? await api("/manage/products") : products;
+  if (!active()) return;
   const links = await api(endpoint);
+  if (!active()) return;
+  products = availableProducts;
   const availablePermissions = Object.keys(permissionLabels).filter(permitted);
   const remainingDays = managementExpires
     ? Math.max(0, (managementExpires * 1000 - Date.now()) / 86400000)
@@ -707,6 +759,14 @@ async function renderStaff() {
     }),
   );
   form(async () => {
+    const creationGeneration = queueLoadId;
+    const creationPath = location.pathname;
+    const creationRole = role;
+    const active = () =>
+      queueLoadId === creationGeneration &&
+      location.pathname === creationPath &&
+      role === creationRole &&
+      tab === "staff";
     const selected = [
       ...document.querySelectorAll('[name="link-permission"]:checked'),
     ].map((node) => node.value);
@@ -719,9 +779,15 @@ async function renderStaff() {
       days: +$("#staff-days").value,
       permissions: selected,
     });
+    if (!active()) return;
     await renderStaff();
+    if (!active()) return;
     $("#staff-link").innerHTML =
-      `<pre class="result">${esc(result.url)}</pre><p class="caption">链接只显示一次。请现在保存并私下交付。</p>`;
+      `<div class="field"><label for="created-management-link">${tr("商品管理链接", "Product management link")}</label><input id="created-management-link" type="text" value="${esc(result.url)}" readonly autocomplete="off" spellcheck="false"></div><button id="copy-management-link" type="button" class="secondary">${tr("复制链接", "Copy link")}</button><p class="caption">${tr("链接只显示一次。请现在保存并私下交付。", "This link is shown once. Save it now and share it privately.")}</p>`;
+    const input = $("#created-management-link");
+    on("#copy-management-link", () =>
+      copyManagementLink(result.url, input, () => active() && input.isConnected),
+    );
   });
   document.querySelectorAll("[data-revoke]").forEach((b) =>
     b.addEventListener("click", () =>

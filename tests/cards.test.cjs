@@ -21,9 +21,15 @@ const deferred = () => {
   return { promise, resolve, reject };
 };
 
-function fixture(handler) {
+function fixture(handler, { language = "zh-CN" } = {}) {
   const nodes = new Map();
   const requests = [];
+  const copied = [];
+  const clipboard = {
+    async writeText(value) {
+      copied.push(value);
+    },
+  };
   let confirmation = true;
   class Node {
     constructor(tag = "div", attributes = "") {
@@ -77,6 +83,15 @@ function fixture(handler) {
       this.listeners.get(event)?.({ preventDefault() {} });
     }
     scrollIntoView() {}
+    focus() {
+      this.focused = true;
+    }
+    select() {
+      this.selected = true;
+    }
+    setSelectionRange(start, end) {
+      this.selectionRange = [start, end];
+    }
     click() {
       this.fire("click");
     }
@@ -85,8 +100,10 @@ function fixture(handler) {
   const context = vm.createContext({
     window: {
       confirm: () => confirmation,
+      ExtorePreferences: { resolved: { language } },
     },
     document: { createElement: (tag) => new Node(tag) },
+    navigator: { clipboard },
     AbortController,
     Blob,
     URL,
@@ -127,10 +144,15 @@ function fixture(handler) {
     nodes,
     workspace,
     requests,
+    copied,
+    clipboard,
     options,
     module: context.window.ExtoreCards,
     setConfirmation(value) {
       confirmation = value;
+    },
+    setClipboardHelper(helper) {
+      context.window.ExtoreClipboard = helper;
     },
   };
 }
@@ -322,4 +344,128 @@ test("撤销必须确认，取消时不发送请求", async () => {
     0,
   );
   assert.equal(page.nodes.get("#cards-product").disabled, false);
+});
+
+const issueResponse = ({ url }) =>
+  Promise.resolve(
+    url.includes("card-stats")
+      ? { summary: {} }
+      : url.includes("card-inventory")
+        ? { items: [], total: 0 }
+        : { codes: ["FIRST-CARD-ABC123", "SECOND-CARD-DEF456"] },
+  );
+async function issue(page) {
+  await page.module.render(page.options);
+  page.nodes.get("#cards-issue").fire("submit");
+  await settle();
+}
+
+test("可一键复制整批或选中的单条，只用本次发行返回的原文", async () => {
+  const page = fixture(issueResponse);
+  await issue(page);
+  page.nodes.get("#cards-copy-all").click();
+  await settle();
+  assert.deepEqual(page.copied, ["FIRST-CARD-ABC123\nSECOND-CARD-DEF456"]);
+  assert.equal(
+    page.nodes.get("#cards-copy-feedback").textContent,
+    "已复制 2 条卡密。",
+  );
+  page.nodes.get("#cards-single").value = "1";
+  page.nodes.get("#cards-copy-single").click();
+  await settle();
+  assert.equal(page.copied[1], "SECOND-CARD-DEF456");
+  assert.equal(
+    page.nodes.get("#cards-copy-feedback").textContent,
+    "已复制第 2 条卡密。",
+  );
+  assert.equal(
+    page.requests.filter((request) => request.method === "POST").length,
+    1,
+  );
+});
+
+test("英文模式提供英文复制按钮及反馈，沿用主题样式", async () => {
+  const page = fixture(issueResponse, { language: "en" });
+  await issue(page);
+  const html = page.nodes.get("#cards-codes").innerHTML;
+  assert.match(html, /class="secondary">Copy all/);
+  assert.match(html, /Copy individual codes/);
+  assert.match(html, /Copy this code/);
+  page.nodes.get("#cards-copy-all").click();
+  await settle();
+  assert.equal(
+    page.nodes.get("#cards-copy-feedback").textContent,
+    "Copied 2 codes.",
+  );
+});
+
+test("剪贴板拒绝时选中对应原文，显示失败提示并允许再次复制", async () => {
+  const page = fixture(issueResponse);
+  await issue(page);
+  page.clipboard.writeText = async () => {
+    throw new Error("Clipboard permission denied");
+  };
+  page.nodes.get("#cards-single").value = "1";
+  page.nodes.get("#cards-copy-single").click();
+  await settle();
+  const generated = page.nodes.get("#cards-generated");
+  assert.equal(generated.focused, true);
+  assert.deepEqual(generated.selectionRange, [18, 36]);
+  assert.match(page.nodes.get("#cards-copy-feedback").textContent, /复制失败/);
+  assert.equal(page.nodes.get("#cards-copy-all").disabled, false);
+  assert.equal(page.nodes.get("#cards-copy-single").disabled, false);
+  page.clipboard.writeText = undefined;
+  page.nodes.get("#cards-copy-all").click();
+  await settle();
+  assert.equal(generated.selected, true);
+  assert.equal(page.nodes.get("#cards-copy-all").disabled, false);
+});
+
+test("切换商品后迟到的剪贴板结果不改写当前页面", async () => {
+  const page = fixture(issueResponse);
+  await issue(page);
+  const clipboard = deferred();
+  page.clipboard.writeText = () => clipboard.promise;
+  page.nodes.get("#cards-copy-all").click();
+  page.nodes.get("#cards-product").value = "product-b";
+  page.nodes.get("#cards-product").fire("change");
+  await settle();
+  page.nodes.get("#cards-copy-feedback").textContent = "当前商品提示";
+  clipboard.resolve();
+  await settle();
+  assert.equal(
+    page.nodes.get("#cards-copy-feedback").textContent,
+    "当前商品提示",
+  );
+  assert.equal(page.nodes.get("#cards-codes").innerHTML, "");
+});
+
+test("复用统一剪贴板 helper，false 仍提供原文选择与失败反馈", async () => {
+  const page = fixture(issueResponse);
+  await issue(page);
+  const values = [];
+  let supported = false;
+  page.setClipboardHelper({
+    async writeText(value) {
+      values.push(value);
+      return supported;
+    },
+  });
+  page.nodes.get("#cards-copy-all").click();
+  await settle();
+  assert.match(page.nodes.get("#cards-copy-feedback").textContent, /复制失败/);
+  assert.equal(page.nodes.get("#cards-generated").selected, true);
+  supported = true;
+  page.nodes.get("#cards-single").value = "1";
+  page.nodes.get("#cards-copy-single").click();
+  await settle();
+  assert.deepEqual(values, [
+    "FIRST-CARD-ABC123\nSECOND-CARD-DEF456",
+    "SECOND-CARD-DEF456",
+  ]);
+  assert.match(
+    page.nodes.get("#cards-copy-feedback").textContent,
+    /已复制第 2 条/,
+  );
+  assert.deepEqual(page.copied, []);
 });

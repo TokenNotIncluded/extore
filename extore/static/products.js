@@ -102,7 +102,7 @@
     const products = ctx.products;
     ctx.workspace.innerHTML = `<div class="section-head"><h2>商品</h2>${owner ? '<button id="new-product">新建商品</button>' : ""}</div>
       ${owner ? `<div class="form-divider"><div class="grid">${select("quick-template", "快速新建模板", [["random", "随机选择模板"]], "random")}<div class="field"><label for="quick-product">生成私有草稿与 AI 配置链接</label><button id="quick-product" class="secondary" disabled>随机快速新建</button></div></div><p class="caption">先创建一个私有商品，再把仅能配置这个商品的链接交给 AI 完善。配置链接有效期为 7 天。复制已有商品后，需重新填写私密发货配置。</p></div>` : ""}
-      ${createdLink ? `<div class="parameter" id="quick-created"><h3>商品已创建 · ${escape(createdLink.productName)}</h3><p class="caption">这个链接只允许编辑当前商品与发货配置。请复制保存；离开后完整链接不再显示。</p>${field("quick-management-link", "AI 商品配置链接", createdLink.url, "text", "readonly")}<div class="toolbar"><button id="copy-quick-link" class="secondary">复制配置链接</button><button id="edit-quick-product" class="secondary">继续配置商品</button></div></div>` : ""}
+      ${createdLink ? `<div class="parameter" id="quick-created"><h3>商品已创建 · ${escape(createdLink.productName)}</h3><p class="caption">这个链接只允许编辑当前商品与发货配置。请复制保存；离开后完整链接不再显示。</p>${field("quick-management-link", "AI 商品配置链接", createdLink.url, "text", "readonly")}<div class="toolbar"><button id="copy-quick-link" class="secondary">${ctx.lang === "en" ? "Copy link" : "复制链接"}</button><button id="edit-quick-product" class="secondary">继续配置商品</button></div></div>` : ""}
       ${products.length ? `<div class="product-list">${products.map((product) => `<article class="product-row">${product.logo ? `<img src="${escape(product.logo)}" alt="" loading="lazy" referrerpolicy="no-referrer">` : `<div class="product-icon">${icon}</div>`}<div class="product-info"><h3>${escape(product.name)}</h3><p>${product.public ? "公开展示" : "仅持卡可见"} · ${escape({ manual: "队列", webhook: "外部 Webhook", script: "官方处理器" }[product.mode] || product.mode)} · ${product.delivery === "service" ? "服务状态" : "内容交付"}</p><div class="mono muted">${escape(product.id)}</div></div><button class="secondary" data-edit="${escape(product.id)}">配置</button></article>`).join("")}</div>` : '<div class="empty">还没有商品。先创建商品，再生成卡密。</div>'}
       <div id="error" class="error" role="alert"></div>`;
     on("#new-product", "click", () => edit(ctx));
@@ -118,10 +118,14 @@
     if (createdLink) {
       on("#copy-quick-link", "click", async () => {
         const input = $("#quick-management-link");
-        if (navigator.clipboard?.writeText) {
+        if (ctx.copyManagementLink) {
+          await ctx.copyManagementLink(createdLink.url, input, active);
+          return;
+        }
+        if (globalThis.isSecureContext !== false && navigator.clipboard?.writeText) {
           try {
             await navigator.clipboard.writeText(createdLink.url);
-            if (active()) ctx.notify("配置链接已复制");
+            if (active()) ctx.notify(ctx.lang === "en" ? "Link copied" : "配置链接已复制");
             return;
           } catch {
             // A browser clipboard denial still allows manual copying.
@@ -130,7 +134,7 @@
         if (!active()) return;
         input.focus();
         input.select();
-        ctx.notify("请复制已选中的配置链接");
+        ctx.notify(ctx.lang === "en" ? "Could not copy. The link is selected; copy it manually." : "请复制已选中的配置链接");
       });
       on("#edit-quick-product", "click", () =>
         edit(

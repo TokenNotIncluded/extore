@@ -28,6 +28,8 @@
   const date = (value) =>
     value ? new Date(value * 1000).toLocaleString() : "—";
   const count = (value) => Number(value || 0).toLocaleString();
+  const tr = (cn, en) =>
+    window.ExtorePreferences?.resolved.language === "en" ? en : cn;
   const status = (value) => {
     const style = value.startsWith("failed")
       ? "failed"
@@ -51,6 +53,7 @@
     let read = null;
     let generation = 0;
     let historyGeneration = 0;
+    let codeGeneration = 0;
     let busy = false;
     let disposed = false;
     let selected = products.find((product) => product.id === productId)?.id;
@@ -287,6 +290,7 @@
       const nextProduct = node("#cards-product").value;
       if (!products.some((product) => product.id === nextProduct)) return;
       selected = nextProduct;
+      codeGeneration++;
       offset = 0;
       node("#cards-status").value = "";
       node("#cards-batch").value = "";
@@ -350,9 +354,72 @@
         );
         if (!current() || requestedProduct !== selected) return;
         const codes = Array.isArray(result.codes) ? result.codes : [];
+        const issuedGeneration = ++codeGeneration;
+        const codesCurrent = () =>
+          current() &&
+          issuedGeneration === codeGeneration &&
+          requestedProduct === selected;
         node("#cards-codes").innerHTML =
-          `<label for="cards-generated">本次生成 ${count(codes.length)} 张卡密，请立即保存</label><textarea id="cards-generated" readonly spellcheck="false"></textarea><div class="actions"><button id="cards-download" class="secondary">下载文本</button>${result.batch_id ? '<button id="cards-issued-batch" class="secondary">查看本次批次</button>' : ""}</div>`;
+          `<label for="cards-generated">${tr(`本次生成 ${count(codes.length)} 张卡密，请立即保存`, `${count(codes.length)} codes generated. Save them now.`)}</label><textarea id="cards-generated" readonly spellcheck="false"></textarea><div class="actions"><button id="cards-copy-all" type="button" class="secondary">${tr("复制全部", "Copy all")}</button><button id="cards-download" class="secondary">${tr("下载文本", "Download text")}</button>${result.batch_id ? `<button id="cards-issued-batch" class="secondary">${tr("查看本次批次", "View this batch")}</button>` : ""}</div><details><summary>${tr("逐条复制", "Copy individual codes")}</summary><div class="field"><label for="cards-single">${tr("选择一条卡密", "Choose a code")}</label><select id="cards-single">${codes.map((code, index) => `<option value="${index}">${tr(`第 ${index + 1} 条`, `Code ${index + 1}`)} · ····${escape(String(code).slice(-6))}</option>`).join("")}</select></div><div class="actions"><button id="cards-copy-single" type="button" class="secondary">${tr("复制这一条", "Copy this code")}</button></div></details><p id="cards-copy-feedback" class="caption" role="status" aria-live="polite"></p>`;
         node("#cards-generated").value = codes.join("\n");
+        let copying = false;
+        const copy = async (index = null) => {
+          if (!codesCurrent() || copying || !codes.length) return;
+          if (
+            index !== null &&
+            (!Number.isInteger(index) || index < 0 || index >= codes.length)
+          )
+            throw new Error(tr("请选择一条卡密", "Choose a code"));
+          copying = true;
+          const buttons = [node("#cards-copy-all"), node("#cards-copy-single")];
+          buttons.forEach((button) => disable(button, true));
+          node("#cards-copy-feedback").textContent = "";
+          try {
+            const value = index === null ? codes.join("\n") : codes[index];
+            const clipboard = window.ExtoreClipboard;
+            if (typeof clipboard?.writeText === "function") {
+              if (!(await clipboard.writeText(value)))
+                throw new Error("Clipboard unavailable");
+            } else {
+              if (!globalThis.navigator?.clipboard?.writeText)
+                throw new Error("Clipboard unavailable");
+              await navigator.clipboard.writeText(value);
+            }
+            if (codesCurrent())
+              node("#cards-copy-feedback").textContent =
+                index === null
+                  ? tr(
+                      `已复制 ${count(codes.length)} 条卡密。`,
+                      `Copied ${count(codes.length)} ${codes.length === 1 ? "code" : "codes"}.`,
+                    )
+                  : tr(
+                      `已复制第 ${index + 1} 条卡密。`,
+                      `Copied code ${index + 1}.`,
+                    );
+          } catch {
+            if (!codesCurrent()) return;
+            const generated = node("#cards-generated");
+            generated.focus?.();
+            if (index === null) generated.select?.();
+            else {
+              const start =
+                codes.slice(0, index).join("\n").length + (index ? 1 : 0);
+              generated.setSelectionRange?.(start, start + codes[index].length);
+            }
+            node("#cards-copy-feedback").textContent = tr(
+              "复制失败。请手动复制已选中的卡密，或下载文本。",
+              "Copy failed. Copy the selected code text manually, or download it.",
+            );
+          } finally {
+            copying = false;
+            if (codesCurrent())
+              buttons.forEach((button) => disable(button, false));
+          }
+        };
+        listen("#cards-copy-all", "click", () => copy());
+        listen("#cards-copy-single", "click", () =>
+          copy(Number(node("#cards-single").value)),
+        );
         listen("#cards-download", "click", () => {
           const url = URL.createObjectURL(
             new Blob([codes.join("\n")], { type: "text/plain;charset=utf-8" }),
