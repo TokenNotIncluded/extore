@@ -30,7 +30,7 @@ Input and process `next` accept a target ID or ordered branches:
 
 Operations are `eq`, `in` and `exists`. No expression/code evaluation occurs.
 Entry is input or display; a fresh redemption never immediately runs a process.
-The initial input always waits for an explicit Start, including batch redemption.
+The initial input or display always waits for an explicit Start, including batch redemption.
 A run has at most 256 lifetime node activations, including retries and backjumps.
 
 `task_flow.freeze_card(c, card_id, product)` is called inside card issuance after
@@ -77,10 +77,10 @@ raw graph and all historical values must never be returned from an HTTP route.
 | Function | Contract |
 | --- | --- |
 | `is_flow(c, row)` | True only for an issued card binding. |
-| `initialize(c, row)` | Create a waiting run without starting its first input timer; idempotent. |
+| `initialize(c, row)` | Create a waiting run without starting its entry input/display timer; idempotent. |
 | `preview(c, card_id)` | Safe card-specific initial preview with epoch/revision 0. |
 | `view(c, row, staff=False)` | Safe current schema, selected shown results and metadata-only history. |
-| `start(c, row, epoch, revision)` | Start current input once; repeats preserve the original deadline. |
+| `start(c, row, epoch, revision)` | Start current input or initial display once; repeats preserve the original deadline. |
 | `answer(c, row, values, epoch, revision)` | Validate string values, store encrypted input and activate next node. Same-answer retry is idempotent. |
 | `continue_display(c, row, epoch, revision)` | Complete a display node and activate its target. |
 | `execution(c, row)` | Active unexpired process context, or `None` for legacy/nonprocess/invalid input. Never fall back to legacy execution for a flow card. |
@@ -128,7 +128,7 @@ remains behind the existing reveal/destroy policy.
 
 `public_product.task_flow_view` uses the issued card's `preview(c, card_id)`.
 Each batch card starts independently; creating/submitting a batch does not start
-any input timer. Aladdin's first input uses `confirm`, later inputs use
+the entry input/display timer. Aladdin's first input uses `confirm`, later inputs use
 `automatic`, and `show_from` exposes the prior process answer alongside the next
 question without an additional Continue click.
 
