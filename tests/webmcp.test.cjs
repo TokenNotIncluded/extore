@@ -132,7 +132,7 @@ async function harness(t, options = {}) {
       const view = filters.get("view") || "active";
       return selected.filter((job) => view === "all" || (view === "processed"
         ? ["succeeded", "rejected", "destroyed"].includes(job.state)
-        : ["queued", "processing", "needs_input", "failed"].includes(job.state)));
+        : ["waiting", "queued", "processing", "needs_input", "failed"].includes(job.state)));
     }
     if (url === "/manage/batch") return { updated: 1 };
     if (["/admin/cards", "/manage/cards"].includes(url) && method === "POST") return { codes: ["CODE-PRIVATE"], digest: "HASH-PRIVATE" };
@@ -164,11 +164,344 @@ async function harness(t, options = {}) {
 }
 
 const mutations = (h) => h.calls.filter((c) => c.type === "api" && c.method !== "GET");
+const flowProjection = (overrides = {}) => ({
+  enabled: true, flow_epoch: 1, revision: 2, phase: "input", deadline: 2000, server_time: 1000,
+  current: { id: "requirements", kind: "input", label: { en: "Requirements" },
+    question: { en: "Describe your requirements" }, fields: [outputField("request"),
+      outputField("password", { sensitive: true, sensitive_ttl_seconds: 120 })] },
+  actions: ["answer", "cancel"], shown: [{ key: "previous", label: { en: "Previous" }, type: "text", value: "PREVIOUS-VALUE" }],
+  history: [{ node_id: "hidden", values: { secret: "HISTORY-SECRET" } }],
+  definition: { nodes: [{ code: "PRIVATE-GRAPH" }] }, ...overrides,
+});
+const flowProcessingJob = (overrides = {}) => ({
+  id: "j1", product_id: "p1", state: "processing", claimed_by: "owner", attempt: 2,
+  delivery: "content", outputs: [outputField("content", { type: "textarea" })],
+  flow_epoch: 3, action_id: "action-three",
+  task_flow: flowProjection({ flow_epoch: 3, revision: 5, phase: "processing",
+    current: { id: "create", kind: "process", label: { en: "Create document" } }, actions: [] }),
+  ...overrides,
+});
 function rejected(result, code = "invalid_arguments") {
   assert.equal(result.ok, false);
   assert.equal(result.isError, true);
   assert.equal(result.error.code, code);
 }
+
+test("flow discovery exposes current-step tools without ordinary redemption, graph, history or previous values", async (t) => {
+  const flow = flowProjection();
+  const p = product({ task_flow_view: flow, task_flow: { nodes: [{ key: "SECRET-GRAPH" }] } });
+  const h = await harness(t, { context: { page: "receipt", currentToken: "RECEIPT-CREDENTIAL", product: p, flow },
+    receipt: { product: p, job: { id: "j1", task_flow: flow } } });
+  for (const name of ["flow_view", "flow_reveal", "flow_answer", "flow_cancel"]) assert.ok(h.names().includes("extore_" + name));
+  for (const name of ["flow_start", "flow_continue", "flow_restart", "redemption_submit", "redemption_retry", "redemption_retry_original", "product_parameters"])
+    assert.equal(h.names().includes("extore_" + name), false, name);
+  assert.equal(h.tool("flow_view").annotations.readOnlyHint, true);
+  assert.equal(h.tool("flow_answer").annotations.consequentialHint, true);
+  const view = await h.call("flow_view", {});
+  assert.equal(view.ok, true);
+  assert.equal(view.data.current.fields[1].sensitive, true);
+  for (const hidden of ["PREVIOUS-VALUE", "HISTORY-SECRET", "PRIVATE-GRAPH", "RECEIPT-CREDENTIAL"])
+    assert.equal(JSON.stringify(view).includes(hidden), false, hidden);
+  const status = await h.call("receipt_status", {});
+  assert.equal(status.data.job.task_flow.flow_epoch, 1);
+  assert.equal(Object.hasOwn(status.data.job.task_flow, "shown"), false);
+  const context = await h.call("context", {});
+  assert.equal(JSON.stringify(context).includes("SECRET-GRAPH"), false);
+});
+
+test("malformed customer flow projections cannot fall back to ordinary redemption or advertise mutations", async (t) => {
+  const flow = flowProjection({ current: { id: "requirements", kind: "input", fields: [outputField("bad", { type: "unknown" })] } });
+  const p = product({ task_flow_view: flow });
+  const h = await harness(t, { context: { page: "receipt", currentToken: "receipt-private", product: p, flow } });
+  for (const name of ["flow_answer", "flow_cancel", "redemption_submit", "redemption_retry"])
+    assert.equal(h.names().includes("extore_" + name), false);
+  rejected(await h.call("flow_view", {}), "unavailable");
+});
+
+test("flow start uses only confirmation and private adapter options for the initial epoch", async (t) => {
+  const flow = flowProjection({ flow_epoch: 0, revision: 0, phase: "await_start", actions: ["start"],
+    current: { id: "requirements", kind: "input", prompt: { en: "Start only when ready" } } });
+  const p = product({ task_flow_view: flow });
+  const signal = new AbortController().signal;
+  let forwarded;
+  const h = await harness(t, { context: { page: "receipt", currentToken: "RECEIPT-CREDENTIAL", product: p, flow },
+    actions: { flow: async (operation, values, options) => {
+      forwarded = { operation, values, options };
+      return { id: "j1", state: "waiting", task_flow: flowProjection(), token: "RECEIPT-CREDENTIAL" };
+    } } });
+  rejected(await h.call("flow_start", {}));
+  rejected(await h.call("flow_start", { confirm: true, token: "FORGED" }));
+  assert.equal(h.calls.length, 0);
+  const started = await h.call("flow_start", { confirm: true }, { signal });
+  assert.equal(started.ok, true);
+  assert.equal(forwarded.operation, "start");
+  assert.deepEqual(plain(forwarded.values), {});
+  assert.equal(forwarded.options.flow_epoch, 0);
+  assert.equal(forwarded.options.expected_revision, 0);
+  assert.equal(forwarded.options.signal, signal);
+  assert.equal(Object.hasOwn(forwarded.options, "token"), false);
+  assert.equal(JSON.stringify(started).includes("RECEIPT-CREDENTIAL"), false);
+});
+
+test("flow answers forward sensitive strings privately and return only safe progress metadata", async (t) => {
+  const flow = flowProjection();
+  const p = product({ parameters: [outputField("obsolete")], task_flow_view: flow });
+  const h = await harness(t, { context: { page: "receipt", currentToken: "receipt-private", product: p, flow },
+    receipt: { product: p, job: { id: "j1", task_flow: flow } },
+    actions: { flow: async (operation, values, options) => {
+      assert.equal(operation, "answer");
+      assert.equal(values.password, "PASSWORD-PRIVATE");
+      assert.equal(options.flow_epoch, 1);
+      assert.equal(options.expected_revision, 2);
+      return { id: "j1", state: "queued", progress: 12, params: values, message: "Unexpected echo: " + values.password,
+        task_flow: flowProjection({ phase: "queued", current: { id: "work", kind: "process" }, actions: [],
+          shown: [{ key: "password", value: "PASSWORD-PRIVATE" }], history: [{ values }] }) };
+    } } });
+  const result = await h.call("flow_answer", { values: { request: "Please create a document", password: "PASSWORD-PRIVATE" }, confirm: true });
+  assert.equal(result.ok, true);
+  assert.equal(result.data.progress, 12);
+  assert.equal(JSON.stringify(result).includes("PASSWORD-PRIVATE"), false);
+  assert.equal(Object.hasOwn(result.data, "params"), false);
+  assert.equal(Object.hasOwn(result.data.task_flow, "shown"), false);
+});
+
+test("flow reveal requires explicit confirmation and exposes only non-sensitive declared shown values", async (t) => {
+  const flow = flowProjection({ phase: "display", actions: ["continue"], current: { id: "review", kind: "display",
+    content: { en: "Review before continuing /receipt#PRIVATE-LINK" } }, shown: [
+      { key: "text", label: { en: "Text" }, type: "textarea", value: "VISIBLE-TEXT" },
+      { key: "secret", type: "text", sensitive: true, value: "PROTECTED-VALUE" },
+      { key: "image", type: "image", value: "IMAGE-ID-PRIVATE" },
+    ] });
+  const p = product({ task_flow_view: flow });
+  const h = await harness(t, { context: { page: "receipt", currentToken: "receipt-private", product: p, flow } });
+  rejected(await h.call("flow_reveal", {}));
+  assert.equal(h.calls.length, 0);
+  const view = await h.call("flow_view", {});
+  assert.equal(view.data.current.content.en.includes("Review before continuing"), true);
+  assert.equal(JSON.stringify(view).includes("PRIVATE-LINK"), false);
+  assert.equal(JSON.stringify(view).includes("VISIBLE-TEXT"), false);
+  const revealed = await h.call("flow_reveal", { confirm: true });
+  assert.equal(revealed.data.shown.length, 1);
+  assert.equal(revealed.data.shown[0].value, "VISIBLE-TEXT");
+  for (const hidden of ["PROTECTED-VALUE", "IMAGE-ID-PRIVATE", "HISTORY-SECRET", "PRIVATE-GRAPH"])
+    assert.equal(JSON.stringify(revealed).includes(hidden), false, hidden);
+});
+
+test("flow operations reject old fields, forged identity and missing confirmation before forwarding", async (t) => {
+  const flow = flowProjection(), p = product({ task_flow_view: flow });
+  const h = await harness(t, { context: { page: "receipt", currentToken: "receipt-private", product: p, flow } });
+  for (const input of [
+    { values: { request: "Request", password: "Private" } },
+    { values: { request: "Request" }, confirm: true },
+    { values: { request: "Request", password: "Private", obsolete: "Old value" }, confirm: true },
+    { values: { request: "Request", password: "Private" }, flow_epoch: 999, confirm: true },
+    { values: { request: "Request", password: "Private" }, expected_revision: 999, confirm: true },
+    { values: { request: "Request", password: "Private" }, node_id: "old", confirm: true },
+    { values: { request: "Request", password: false }, confirm: true },
+  ]) rejected(await h.call("flow_answer", input));
+  assert.equal(h.calls.length, 0);
+});
+
+test("flow operations re-read the receipt and reject changed epochs, revisions, nodes or schemas", async (t) => {
+  const flow = flowProjection(), p = product({ task_flow_view: flow });
+  for (const changed of [
+    { flow_epoch: 2 }, { revision: 3 }, { phase: "display", current: { id: "display", kind: "display" }, actions: ["continue"] },
+    { current: { ...flow.current, id: "another" } },
+    { current: { ...flow.current, fields: [outputField("new_field")] } },
+  ]) {
+    const h = await harness(t, { context: { page: "receipt", currentToken: "receipt-private", product: p, flow },
+      receipt: { product: p, job: { id: "j1", task_flow: { ...flow, ...changed } } } });
+    rejected(await h.call("flow_answer", { values: { request: "Request", password: "Private" }, confirm: true }), "stale_context");
+    assert.equal(h.calls.some((call) => call.name === "flow"), false);
+  }
+  const h = await harness(t, { context: { page: "receipt", currentToken: "receipt-private", product: p, flow } });
+  const saved = h.tool("flow_answer");
+  h.state.flow = { ...flow, revision: 3 };
+  rejected(await saved.execute({ values: { request: "Request", password: "Private" }, confirm: true }), "stale_context");
+  assert.equal(h.calls.length, 0);
+});
+
+test("flow errors redact all forwarded values even when field codes do not suggest a secret", async (t) => {
+  const flow = flowProjection(), p = product({ task_flow_view: flow });
+  const h = await harness(t, { context: { page: "receipt", currentToken: "receipt-private", product: p, flow },
+    actions: { flow: async (_, values) => { throw new Error("Rejected " + values.password + " " + values.request); } } });
+  const result = await h.call("flow_answer", { values: { request: "CUSTOMER-PRIVATE", password: "PASSWORD-PRIVATE" }, confirm: true });
+  rejected(result, "operation_failed");
+  assert.equal(JSON.stringify(result).includes("CUSTOMER-PRIVATE"), false);
+  assert.equal(JSON.stringify(result).includes("PASSWORD-PRIVATE"), false);
+});
+
+test("flow batch selection forwards the selected card internally and rejects absent or foreign card scope", async (t) => {
+  const flow = flowProjection(), p = product({ task_flow_view: flow });
+  const receipt = { batch: true, product: p, items: [{ card_id: "c1", product: p, job: { id: "j1", task_flow: flow } }] };
+  const h = await harness(t, { context: { page: "receipt", currentToken: "batch-private", product: p, flow, batch: true, cardId: "c1" }, receipt,
+    actions: { flow: async (_, values, options) => { assert.equal(options.card_id, "c1"); return { id: "j1", state: "queued" }; } } });
+  assert.equal((await h.call("flow_answer", { values: { request: "Request", password: "Private" }, confirm: true })).ok, true);
+  h.state.cardId = "";
+  await h.refresh();
+  rejected(await h.call("flow_view", {}), "invalid_state");
+  h.state.cardId = "outside";
+  await h.refresh();
+  rejected(await h.call("flow_cancel", { confirm: true }), "forbidden");
+});
+
+test("flow input upload uses current fields, exact epoch and revision and the real input job ID", async (t) => {
+  const flow = flowProjection({ current: { id: "source", kind: "input", fields: [outputField("document", { type: "file" })] } });
+  const p = product({ parameters: [outputField("old_document", { type: "file" })], task_flow_view: flow });
+  const h = await harness(t, { context: { page: "receipt", currentToken: "receipt-private", product: p, flow },
+    receipt: { product: p, job: { id: "j1", can_retry: false, task_flow: flow } },
+    actions: { uploadFile: async (definition) => {
+      assert.equal(definition.flow_epoch, 1);
+      assert.equal(definition.expected_revision, 2);
+      assert.equal(definition.node_id, "source");
+      return attachment({ job_id: "j1", kind: "input", flow_epoch: 1, node_id: "source" });
+    } } });
+  const input = { field_key: "document", filename: "hello.txt", base64: "aGVsbG8=", confirm: true };
+  const result = await h.call("redemption_file_upload", input);
+  assert.equal(result.ok, true);
+  assert.equal(result.data.job_id, "j1");
+  assert.equal(result.data.kind, "input");
+  assert.equal(result.data.flow_epoch, 1);
+  rejected(await h.call("redemption_file_upload", { ...input, field_key: "old_document" }));
+  h.setReceipt({ product: p, job: { id: "j1", task_flow: { ...flow, revision: 3 } } });
+  rejected(await h.call("redemption_file_upload", input), "stale_context");
+  assert.equal(h.calls.filter((call) => call.name === "uploadFile").length, 1);
+});
+
+test("native management batches derive each flow job's scope and filter protected queue values", async (t) => {
+  const jobs = [flowProcessingJob({ params: { prompt: "READABLE", credential: "PROTECTED", also_hidden: "FIELD-PROTECTED" },
+    protected_fields: ["credential"], parameters: [outputField("prompt"), outputField("also_hidden", { sensitive: true })] }),
+    flowProcessingJob({ id: "j2", flow_epoch: 7, action_id: "action-seven", attempt: 4,
+      task_flow: flowProjection({ flow_epoch: 7, revision: 9, phase: "processing", current: { id: "next", kind: "process" }, actions: [] }) })];
+  const h = await harness(t, { context: { page: "admin", role: "admin", tab: "jobs", queueProductId: "p1" }, jobs });
+  const listed = await h.call("jobs_list", { product_id: "p1" });
+  assert.equal(listed.data[0].params.prompt, "READABLE");
+  for (const hidden of ["PROTECTED", "FIELD-PROTECTED", "PREVIOUS-VALUE", "HISTORY-SECRET", "PRIVATE-GRAPH"])
+    assert.equal(JSON.stringify(listed).includes(hidden), false, hidden);
+  assert.equal((await h.call("jobs_progress", { product_id: "p1", ids: ["j1", "j2"], progress: 20, confirm: true })).ok, true);
+  assert.deepEqual(mutations(h)[0].body.flow_scopes, {
+    j1: { flow_epoch: 3, action_id: "action-three", attempt: 2 },
+    j2: { flow_epoch: 7, action_id: "action-seven", attempt: 4 },
+  });
+});
+
+test("native queue discovery includes waiting flow steps and supports their explicit state filter", async (t) => {
+  const job = { id: "j1", product_id: "p1", state: "waiting", task_flow: flowProjection() };
+  const h = await harness(t, { context: { page: "admin", role: "admin", tab: "jobs", queueProductId: "p1" }, jobs: [job] });
+  assert.equal(h.tool("jobs_list").inputSchema.properties.state.enum.includes("waiting"), true);
+  assert.equal((await h.call("jobs_list", { product_id: "p1" })).data[0].state, "waiting");
+  const result = await h.call("jobs_list", { product_id: "p1", state: "waiting" });
+  assert.equal(result.ok, true);
+  assert.equal(result.data[0].task_flow.phase, "input");
+  assert.equal(h.calls.some((call) => {
+    const url = new URL(call.url, "https://example.test");
+    return url.pathname === "/manage/jobs" && url.searchParams.get("view") === "active"
+      && url.searchParams.get("product_id") === "p1" && url.searchParams.get("state") === "waiting";
+  }), true);
+  assert.equal(Object.hasOwn(result.data[0].task_flow, "history"), false);
+});
+
+test("missing or malformed management flow identities reject the whole batch before mutation", async (t) => {
+  for (const patch of [
+    { flow_epoch: undefined }, { flow_epoch: 99 }, { action_id: undefined }, { action_id: "../action" }, { attempt: undefined },
+    { task_flow: undefined }, { task_flow: {} }, { task_flow: flowProjection() },
+  ]) {
+    const h = await harness(t, { context: { page: "admin", role: "admin", tab: "jobs", queueProductId: "p1" },
+      jobs: [flowProcessingJob(), flowProcessingJob({ id: "j2", ...patch })] });
+    rejected(await h.call("jobs_progress", { product_id: "p1", ids: ["j1", "j2"], progress: 20, confirm: true }), "unavailable");
+    assert.equal(mutations(h).length, 0);
+  }
+});
+
+test("authorized terminal flow retry binds only the failed attempt without inventing an active step identity", async (t) => {
+  const failed = flowProcessingJob({ state: "failed", action_id: undefined, flow_epoch: undefined,
+    task_flow: flowProjection({ flow_epoch: 8, revision: 9, phase: "ended", current: { id: "failed", kind: "end" }, actions: ["restart"] }) });
+  const h = await harness(t, { context: staffContext({ permissions: ["queue.view", "queue.retry"] }), jobs: [failed] });
+  assert.equal((await h.call("jobs_allow_retry", { product_id: "p1", ids: ["j1"], confirm: true })).ok, true);
+  assert.deepEqual(mutations(h)[0].body.flow_scopes, { j1: { attempt: 2 } });
+  assert.equal(Object.hasOwn(mutations(h)[0].body, "flow_epoch"), false);
+  assert.equal(Object.hasOwn(mutations(h)[0].body.flow_scopes.j1, "action_id"), false);
+});
+
+test("flow delivery file upload uses the shop account actor and current processing identity", async (t) => {
+  const job = flowProcessingJob({ claimed_by: "account:store-owner", outputs: [outputField("document", { type: "file" })] });
+  const h = await harness(t, { context: { page: "admin", role: "admin", actor: "fallback-actor", tab: "jobs", queueProductId: "p1" },
+    api: attachmentAPI(job, [], { role: "admin", actor: "account:store-owner" }),
+    actions: { uploadFile: async (definition) => {
+      assert.equal(definition.flow_epoch, 3);
+      assert.equal(definition.action_id, "action-three");
+      assert.equal(definition.attempt, 2);
+      return attachment({ kind: "output", flow_epoch: 3, node_id: "create" });
+    } } });
+  assert.equal((await h.call("jobs_file_upload", { product_id: "p1", job_id: "j1", field_key: "document", filename: "hello.txt", base64: "aGVsbG8=", confirm: true })).ok, true);
+});
+
+test("wrapped redemption credentials use only the private pasted-input action and never return through native tools", async (t) => {
+  const wrapper = "EXR1.PRIVATE-CREDENTIAL.SECRET-SIGNATURE";
+  const h = await harness(t, { actions: { exchangePasted: async (options) => {
+    assert.deepEqual(Object.keys(options), ["signal"]);
+    return { product: product({ description: wrapper }), token: "RECEIPT-CREDENTIAL", raw_code: wrapper, job: null };
+  } } });
+  assert.deepEqual(Object.keys(h.tool("redeem_pasted_code").inputSchema.properties), ["confirm"]);
+  rejected(await h.call("redeem_pasted_code", {}));
+  rejected(await h.call("redeem_pasted_code", { confirm: true, code: wrapper }));
+  rejected(await h.call("code_verify", { code: wrapper }));
+  for (const separator of [";", "；", "，", ",", " ", "\n"])
+    rejected(await h.call("code_verify", { code: "LEGACY" + separator + "exr999.PRIVATE-CREDENTIAL.FUTURE-VERSION" }));
+  assert.equal(h.calls.length, 0);
+  const verified = await h.call("redeem_pasted_code", { confirm: true });
+  assert.equal(verified.ok, true);
+  assert.equal(h.calls.filter((call) => call.name === "exchangePasted").length, 1);
+  assert.equal(JSON.stringify(verified).includes(wrapper), false);
+  assert.equal(JSON.stringify(verified).includes("RECEIPT-CREDENTIAL"), false);
+  assert.equal(h.calls.some((call) => call.name === "exchange"), false);
+});
+
+test("private pasted-input routing returns only public route metadata and counts", async (t) => {
+  const wrapper = "EXR1.PRIVATE-CREDENTIAL.SECRET-SIGNATURE";
+  const group = { route_id: "route-one", name: "Issuer", origin: "https://issuer.example.test", path: "/", count: 2 };
+  const h = await harness(t, { actions: { exchangePasted: async () => ({ routing: true, code: wrapper, groups: [
+    { ...group, issuer_id: "private-detail", public_key: "extra-key", codes: [wrapper], payload: wrapper },
+  ] }) } });
+  const routed = await h.call("redeem_pasted_code", { confirm: true });
+  assert.equal(routed.ok, true);
+  assert.deepEqual(plain(routed.data), { routing: true, groups: [group] });
+  assert.equal(JSON.stringify(routed).includes(wrapper), false);
+});
+
+test("flow file discovery and reading expose only current authorized inputs and current-stage output drafts", async (t) => {
+  const ids = ["11111111-1111-4111-8111-111111111111", "22222222-2222-4222-8222-222222222222", "33333333-3333-4333-8333-333333333333", "44444444-4444-4444-8444-444444444444", "55555555-5555-4555-8555-555555555555"];
+  const job = flowProcessingJob({ parameters: [outputField("source", { type: "file" }), outputField("private_file", { type: "file" })],
+    params: { source: ids[0], private_file: ids[1] }, protected_fields: ["private_file"],
+    outputs: [outputField("document", { type: "file" })] });
+  const files = [
+    attachment({ id: ids[0], field_key: "source", flow_epoch: 1, node_id: "source" }),
+    attachment({ id: ids[1], field_key: "private_file", flow_epoch: 1, node_id: "source" }),
+    attachment({ id: ids[2], kind: "output", field_key: "document", flow_epoch: 3, node_id: "create" }),
+    attachment({ id: ids[3], kind: "output", field_key: "document", flow_epoch: 2, node_id: "past" }),
+    attachment({ id: ids[4], field_key: "source", flow_epoch: 1, node_id: "source" }),
+  ];
+  const h = await harness(t, { context: { page: "admin", role: "admin", tab: "jobs", queueProductId: "p1" },
+    api: attachmentAPI(job, files), actions: { readFile: async (definition) => {
+      assert.equal(definition.file_id, ids[0]);
+      return { file_id: ids[0], size: 5, base64: "aGVsbG8=" };
+    } } });
+  const listed = await h.call("jobs_files_list", { product_id: "p1", job_id: "j1" });
+  assert.equal(listed.ok, true);
+  assert.deepEqual(plain(listed.data.map((file) => file.id)), [ids[0], ids[2]]);
+  for (const id of [ids[1], ids[3], ids[4]]) rejected(await h.call("jobs_file_read", { product_id: "p1", job_id: "j1", file_id: id }), "not_found");
+  assert.equal(h.calls.some((call) => call.name === "readFile"), false);
+  assert.equal((await h.call("jobs_file_read", { product_id: "p1", job_id: "j1", file_id: ids[0] })).ok, true);
+});
+
+test("errors from privately pasted wrapped credentials redact the complete wrapper", async (t) => {
+  const wrapper = "EXR1.PRIVATE-CREDENTIAL.SECRET-SIGNATURE";
+  const h = await harness(t, { actions: { exchangePasted: async () => { throw new Error("Could not parse " + wrapper); } } });
+  const result = await h.call("redeem_pasted_code", { confirm: true });
+  rejected(result, "operation_failed");
+  assert.equal(JSON.stringify(result).includes(wrapper), false);
+  assert.equal(JSON.stringify(result).includes("PRIVATE-CREDENTIAL"), false);
+});
 
 test("unsupported browsers get no invented document or navigator WebMCP API", async (t) => {
   const h = await harness(t, { native: false });
@@ -279,7 +612,7 @@ test("refresh during asynchronous native registration rebuilds the complete tool
   release();
   await Promise.all([configure, refresh]);
   assert.deepEqual([...native.tools.keys()].sort(), [
-    "extore_code_verify", "extore_context", "extore_product_get", "extore_products_list", "extore_ui_navigate",
+    "extore_code_verify", "extore_context", "extore_product_get", "extore_products_list", "extore_redeem_pasted_code", "extore_ui_navigate",
   ]);
   assert.equal(native.signals[0].aborted, true, "The obsolete partial generation is removed");
   assert.equal(native.signals.slice(-5).some((signal) => signal.aborted), false);
@@ -1496,7 +1829,8 @@ test("switching a selected queue to automatic delivery withdraws manual-processi
 });
 
 test("queue selection checks fresh authorized products and updates visible context before new tools are advertised", async (t) => {
-  const h = await harness(t, { context: { page: "admin", role: "admin", tab: "jobs", queueProductId: "p1" }, products: [product(), product({ id: "p2" })] });
+  const h = await harness(t, { context: { page: "admin", role: "admin", tab: "jobs", queueProductId: "p1" }, products: [product(), product({ id: "p2" })],
+    jobs: [{ id: "j1", product_id: "p1", state: "queued" }, { id: "j2", product_id: "p2", state: "queued" }] });
   const saved = h.tool("jobs_claim");
   const result = await h.call("queue_select", { product_id: "p2" });
   assert.equal(result.ok, true);
