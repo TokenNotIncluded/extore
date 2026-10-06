@@ -13,6 +13,7 @@
   const accepted = (item) => item.accepted !== false && Boolean(item.card_id && item.product);
   const flowOf = (item) => item.job?.task_flow || item.product?.task_flow_view || null;
   const fieldsOf = (item) => flowOf(item)?.enabled ? [] : item.product?.parameters || [];
+  const attachment = (field) => ["file", "image", "images"].includes(field.type);
   const pending = (item) => accepted(item) && !item.job;
 
   // A matching key/type alone is insufficient: a frozen label, tutorial,
@@ -29,7 +30,7 @@
       }
       const fields = fieldsOf(item);
       const saved = { ...(item.job?.params || {}), ...(drafts.get(item.card_id) || {}) };
-      const defaults = Object.fromEntries(fields.filter((field) => field.type !== "file")
+      const defaults = Object.fromEntries(fields.filter((field) => !attachment(field))
         .map((field) => [field.key, saved[field.key] || ""]));
       const signature = canonical([fields, defaults, flowOf(item)?.definition_hash || null]);
       let group = productGroup.groups.find((entry) => entry.signature === signature);
@@ -166,14 +167,14 @@
       .filter((item) => deps.$(`#batch-select-${item.card_id}`)?.checked);
     const started = (data.items || []).filter((item) => accepted(item) && item.job);
     const pendingCount = groups.reduce((count, group) => count + group.items.length, 0);
-    deps.app.innerHTML = `<div class="narrow"><h1>${tr("批量兑换", "Batch redemption")}</h1><p class="caption">${tr(`已验证 ${pendingCount} 张待兑换卡密，按商品和规格整理如下。`, `${pendingCount} codes are ready, grouped by product and variant.`)}</p><section class="panel"><div class="section-head"><h2>${tr("确认兑换信息", "Confirm your details")}</h2>${started.length ? `<button id="batch-overview" type="button" class="secondary">${tr("查看全部进度", "View all progress")}</button>` : ""}</div><p class="caption">${tr("同一商品、相同要求只填一次。附件始终按卡密分别上传；取消勾选的卡密不会提交。", "Fill compatible fields once within each product. Upload files separately for each code. Unchecked codes are not submitted.")}</p><form id="form" novalidate>${products.map(({ product, groups: schemas }) => `<section class="batch-started"><h3>${esc(product.name)}</h3>${schemas.length > 1 ? `<p class="caption">${tr("这些卡密的填写要求或已保存内容不同，已分开填写。", "These codes have different frozen requirements or saved details, so their fields are separate.")}</p>` : ""}${schemas.map((group) => `<section class="batch-card">${group.flow ? `<p>${tr("这是分步流程。确认兑换只准备任务；你可稍后逐张点击开始，填写当时出现的题目。", "This is a step-by-step flow. Confirming prepares the tasks. Start each code separately later and answer the questions shown then.")}</p>` : group.fields.filter((field) => field.type !== "file").map((field) => deps.parameterFields(`batch-param-${group.index}-`, field, group.defaults[field.key])).join("")}${group.variants.map((variant) => `${variant.name ? `<h4>${esc(variant.name)}</h4>` : ""}${variant.items.map((item) => {
+    deps.app.innerHTML = `<div class="narrow"><h1>${tr("批量兑换", "Batch redemption")}</h1><p class="caption">${tr(`已验证 ${pendingCount} 张待兑换卡密，按商品和规格整理如下。`, `${pendingCount} codes are ready, grouped by product and variant.`)}</p><section class="panel"><div class="section-head"><h2>${tr("确认兑换信息", "Confirm your details")}</h2>${started.length ? `<button id="batch-overview" type="button" class="secondary">${tr("查看全部进度", "View all progress")}</button>` : ""}</div><p class="caption">${tr("同一商品、相同要求只填一次。附件始终按卡密分别上传；取消勾选的卡密不会提交。", "Fill compatible fields once within each product. Upload files separately for each code. Unchecked codes are not submitted.")}</p><form id="form" novalidate>${products.map(({ product, groups: schemas }) => `<section class="batch-started"><h3>${esc(product.name)}</h3>${schemas.length > 1 ? `<p class="caption">${tr("这些卡密的填写要求或已保存内容不同，已分开填写。", "These codes have different frozen requirements or saved details, so their fields are separate.")}</p>` : ""}${schemas.map((group) => `<section class="batch-card">${group.flow ? `<p>${tr("这是分步流程。确认兑换只准备任务；你可稍后逐张点击开始，填写当时出现的题目。", "This is a step-by-step flow. Confirming prepares the tasks. Start each code separately later and answer the questions shown then.")}</p>` : group.fields.filter((field) => !attachment(field)).map((field) => deps.parameterFields(`batch-param-${group.index}-`, field, group.defaults[field.key])).join("")}${group.variants.map((variant) => `${variant.name ? `<h4>${esc(variant.name)}</h4>` : ""}${variant.items.map((item) => {
       const saved = state.drafts.get(item.card_id) || {};
       const checked = state.selected.get(item.card_id) !== false;
-      return `<section class="batch-card"><div class="checks"><label for="batch-select-${esc(item.card_id)}"><input id="batch-select-${esc(item.card_id)}" type="checkbox" ${checked ? "checked" : ""}> ${tr("兑换这张", "Redeem this code")} ···${esc(item.suffix || "????")}</label></div>${group.fields.filter((field) => field.type === "file").map((field) => deps.parameterFields(`batch-file-${item.card_id}-`, field, saved[field.key] || "")).join("")}<p id="batch-upload-error-${esc(item.card_id)}" class="error" role="status"></p></section>`;
+      return `<section class="batch-card"><div class="checks"><label for="batch-select-${esc(item.card_id)}"><input id="batch-select-${esc(item.card_id)}" type="checkbox" ${checked ? "checked" : ""}> ${tr("兑换这张", "Redeem this code")} ···${esc(item.suffix || "????")}</label></div>${group.fields.filter((field) => attachment(field)).map((field) => deps.parameterFields(`batch-file-${item.card_id}-`, field, saved[field.key] || "")).join("")}<p id="batch-upload-error-${esc(item.card_id)}" class="error" role="status"></p></section>`;
     }).join("")}`).join("")}</section>`).join("")}</section>`).join("")}<button type="submit" class="full">${tr("确认兑换所选卡密", "Redeem selected codes")}</button><div id="error" class="error" role="alert"></div></form>${issuesMarkup(data, deps, state)}${started.length ? `<section class="batch-started"><h3>${tr("已提交的卡密", "Submitted codes")}</h3>${cardsMarkup(started, deps)}</section>` : ""}</section>${receiptLink(deps)}</div>`;
     bindCommon(data, deps);
-    if (groups.some((group) => group.fields.some((field) => field.type === "file"))) void deps.uploadFileLimit();
-    for (const group of groups) for (const field of group.fields.filter((field) => field.type !== "file")) {
+    if (groups.some((group) => group.fields.some((field) => attachment(field)))) void deps.uploadFileLimit();
+    for (const group of groups) for (const field of group.fields.filter((field) => !attachment(field))) {
       deps.$(`#batch-param-${group.index}-${field.key}`)?.addEventListener("input", (event) => {
         for (const item of group.items) state.drafts.set(item.card_id, {
           ...(state.drafts.get(item.card_id) || {}), [field.key]: event.target.value,
@@ -196,7 +197,7 @@
         if (!cards.length) continue;
         const common = {};
         let valid = true;
-        for (const field of group.fields.filter((field) => field.type !== "file")) {
+        for (const field of group.fields.filter((field) => !attachment(field))) {
           const input = deps.$(`#batch-param-${group.index}-${field.key}`);
           common[field.key] = input?.value || "";
           if (!input?.reportValidity()) valid = false;
@@ -208,25 +209,32 @@
           if (errorNode) errorNode.textContent = "";
           try {
             if (!valid) throw new Error(tr("请检查这件商品的必填内容", "Check this product's required fields"));
-            for (const field of group.fields.filter((field) => field.type === "file")) {
+            for (const field of group.fields.filter((field) => attachment(field))) {
               const input = deps.$(`#batch-file-${item.card_id}-${field.key}`);
-              const file = input?.files?.[0];
+              const files = deps.fieldFiles(input, field);
               const uploadKey = `${item.card_id}:${field.key}`;
-              const previous = file ? state.uploads.get(file)?.get(uploadKey) : null;
               const retained = deps.$(`#batch-file-${item.card_id}-${field.key}-retained`)?.value || old[field.key] || "";
-              if (!file && field.required && !retained) {
+              if (!files.length && field.required && !retained) {
                 input?.reportValidity();
                 throw new Error(tr("请选择这张卡密需要的附件", "Choose this code's required file"));
               }
-              params[field.key] = file
-                ? previous || (await deps.uploadMultipart("/files/upload", {
+              const ids = [];
+              for (const file of files) {
+                if (!context.active()) return;
+                let id = state.uploads.get(file)?.get(uploadKey);
+                if (!id) {
+                  id = (await deps.uploadMultipart("/files/upload", {
                     token: context.token, card_id: item.card_id, field_key: field.key,
-                  }, file)).id
-                : retained;
-              if (file) {
-                if (!state.uploads.has(file)) state.uploads.set(file, new Map());
-                state.uploads.get(file).set(uploadKey, params[field.key]);
+                  }, file, { isCurrent: context.active })).id;
+                  if (!context.active()) return;
+                  if (!state.uploads.has(file)) state.uploads.set(file, new Map());
+                  state.uploads.get(file).set(uploadKey, id);
+                }
+                ids.push(id);
               }
+              params[field.key] = files.length
+                ? field.type === "images" ? JSON.stringify(ids) : ids[0]
+                : retained || (field.type === "images" ? "[]" : "");
               state.drafts.set(item.card_id, { ...params });
               if (!context.active()) return;
             }

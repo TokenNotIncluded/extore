@@ -152,7 +152,7 @@ function batchRedemptionOptions() {
     token: currentToken,
     receiptURL: location.origin + "/receipt#" + currentToken,
     context: receiptRequestContext,
-    uploadMultipart, uploadFileLimit,
+    uploadMultipart, uploadFileLimit, fieldFiles: selectedFieldFiles,
     submit: (items, errors) => submitRedemption(items, { batchUploadErrors: errors }),
     open: openBatchCard,
     refresh: readReceipt,
