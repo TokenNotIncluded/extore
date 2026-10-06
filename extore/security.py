@@ -24,6 +24,23 @@ def card_digest(value):
     return digest(value.strip().upper().replace("-", "").replace(" ", ""))
 
 
+def split_codes(value):
+    """Split a pasted list, keeping the first copy of each normalized code."""
+    import re
+
+    seen = set()
+    codes = []
+    for part in re.split(r"[\s,，;；]+", str(value or "").strip()):
+        if not part:
+            continue
+        key = part.strip().upper().replace("-", "").replace(" ", "")
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        codes.append(part.strip())
+    return codes
+
+
 def new_card():
     # 160 bits of entropy, no modulo bias; ASCII base32 alphabet.
     import base64
@@ -243,6 +260,39 @@ def grant(c, value):
     if not r:
         fail("兑换凭证无效或已过期，请重新输入卡密", 404)
     return r
+
+
+def batch_cards(c, value):
+    rows = c.execute(
+        "SELECT cards.* FROM receipt_batches "
+        "JOIN receipt_batch_cards ON receipt_batch_cards.digest=receipt_batches.digest "
+        "JOIN cards ON cards.id=receipt_batch_cards.card_id "
+        "WHERE receipt_batches.digest=? AND receipt_batches.expires>? "
+        "ORDER BY receipt_batch_cards.position",
+        (digest(value), time.time()),
+    ).fetchall()
+    return rows
+
+
+def resolve_customer_card(c, value, card_id=None):
+    """Authorize one card from a single grant or from one link covering several codes."""
+    single = c.execute(
+        "SELECT cards.* FROM grants JOIN cards ON cards.id=grants.card_id WHERE grants.digest=? AND grants.expires>?",
+        (digest(value), time.time()),
+    ).fetchone()
+    if single:
+        if card_id and card_id != single["id"]:
+            fail("这张卡密不在此领取链接中", 404)
+        return single
+    rows = batch_cards(c, value)
+    if not rows:
+        fail("兑换凭证无效或已过期，请重新输入卡密", 404)
+    if not card_id:
+        fail("请选择一张卡密", 400)
+    found = next((row for row in rows if row["id"] == card_id), None)
+    if not found:
+        fail("这张卡密不在此领取链接中", 404)
+    return found
 
 
 def sign(secret, timestamp, nonce, body):

@@ -81,15 +81,33 @@
     });
     document.addEventListener("visibilitychange", visibilityChanged);
     transitions.set(app, run);
-    const animate = (element, frames, duration) => {
+    const animate = (element, frames, duration, easing = "cubic-bezier(0.16, 1, 0.3, 1)") => {
       const animation = element.animate(frames, {
         duration,
-        easing: "cubic-bezier(0.16, 1, 0.3, 1)",
+        easing,
         fill: "forwards",
       });
       animations.push(animation);
       return animation.finished?.catch(() => {});
     };
+    const tearFrames = (lift) => [
+      {
+        transform: "translate3d(0, 0, 0) rotateX(0deg) rotateZ(0deg)",
+        opacity: 1,
+        easing: "cubic-bezier(0.33, 0, 0.2, 1)",
+      },
+      {
+        transform: `translate3d(${lift ? -4 : 5}px, ${lift ? -8 : 9}px, 0) rotateX(${lift ? 8 : -7}deg) rotateZ(${lift ? -0.6 : 0.7}deg)`,
+        opacity: 1,
+        offset: 0.36,
+        easing: "cubic-bezier(0.16, 1, 0.3, 1)",
+      },
+      {
+        transform: `translate3d(${lift ? -16 : 18}px, ${lift ? -48 : 56}px, 0) rotateX(${lift ? 24 : -20}deg) rotateZ(${lift ? -2.6 : 3}deg)`,
+        opacity: 0,
+        offset: 1,
+      },
+    ];
     try {
       if (!valid()) return false;
       source = app.querySelector(".exchange");
@@ -134,19 +152,7 @@
         source.style.visibility = "hidden";
         try {
           await Promise.all(
-            halves.map((half, index) =>
-              animate(
-                half,
-                [
-                  { transform: "translateY(0) rotate(0deg)", opacity: 1 },
-                  {
-                    transform: `translateY(${index ? 34 : -28}px) rotate(${index ? 1.1 : -0.8}deg)`,
-                    opacity: 0,
-                  },
-                ],
-                350,
-              ),
-            ),
+            halves.map((half, index) => animate(half, tearFrames(index === 0), 350, "linear")),
           );
         } catch {
           // Rendering remains available when a browser declines WAAPI effects.
@@ -169,10 +175,10 @@
           await animate(
             arriving,
             [
-              { transform: "translateY(8px)", opacity: 0.65 },
-              { transform: "translateY(0)", opacity: 1 },
+              { transform: "translate3d(0, 16px, 0) scale(0.985)", opacity: 0 },
+              { transform: "translate3d(0, 0, 0) scale(1)", opacity: 1 },
             ],
-            180,
+            240,
           );
         } catch {
           // The new page is already visible without an arrival effect.
@@ -286,6 +292,73 @@
     let cards = [];
     let active = "";
     let disposed = false;
+    let slipTimer = 0;
+    let slipNode = null;
+    let slipMotion = null;
+    let slipCard = null;
+    const slipTimers = [];
+    const clearSlip = () => {
+      if (slipTimer) window.clearTimeout(slipTimer);
+      slipTimer = 0;
+      for (const timer of slipTimers) window.clearTimeout(timer);
+      slipTimers.length = 0;
+      slipMotion?.cancel();
+      slipMotion = null;
+      slipNode?.remove();
+      slipNode = null;
+      slipCard?.classList.remove("paper-caught");
+      slipCard = null;
+    };
+    const scheduleSlip = () => {
+      clearSlip();
+      if (
+        disposed ||
+        document.hidden ||
+        reducedMotion?.matches ||
+        typeof document.querySelector !== "function" ||
+        typeof document.createElement !== "function"
+      ) return;
+      slipTimer = window.setTimeout(() => {
+        slipTimer = 0;
+        if (disposed || document.hidden || reducedMotion?.matches || !stack?.isConnected) return;
+        const logo = document.querySelector(".brand img");
+        const card = cards.find((node) => node.dataset.homePaper === "redeem");
+        if (!logo || !card || !inViewport(card)) return;
+        const from = logo.getBoundingClientRect();
+        const to = card.getBoundingClientRect();
+        const startX = from.left + from.width * 0.68;
+        const startY = from.top + from.height * 0.68;
+        const dx = to.right - 22 - startX;
+        const dy = to.bottom + 4 - startY;
+        const above = to.top - 18 - startY;
+        slipCard = card;
+        slipNode = document.createElement("i");
+        slipNode.className = "counter-slip";
+        slipNode.setAttribute("aria-hidden", "true");
+        Object.assign(slipNode.style, { left: `${startX}px`, top: `${startY}px` });
+        document.body.append(slipNode);
+        if (typeof slipNode.animate === "function") {
+          slipMotion = slipNode.animate(
+            [
+              { transform: "translate3d(0, 0, 0) rotate(-16deg) scale(0.2)", opacity: 0 },
+              { transform: "translate3d(8px, -22px, 0) rotate(7deg) scale(0.86)", opacity: 1, offset: 0.14 },
+              { transform: `translate3d(${dx}px, ${above}px, 0) rotate(-8deg) scale(1)`, opacity: 1, offset: 0.52 },
+              { transform: `translate3d(${dx}px, ${dy}px, 0) rotate(2deg) scale(0.78)`, opacity: 0 },
+            ],
+            { duration: 760, easing: "linear", fill: "forwards" },
+          );
+          slipMotion.finished?.then(() => {
+            if (slipNode?.isConnected) slipNode.remove();
+            if (slipMotion) slipMotion = null;
+            slipNode = null;
+          }).catch(() => {});
+        }
+        slipTimers.push(window.setTimeout(() => {
+          if (slipCard?.isConnected) slipCard.classList.add("paper-caught");
+        }, 560));
+        slipTimers.push(window.setTimeout(() => slipCard?.classList.remove("paper-caught"), 980));
+      }, 460);
+    };
     const mobile = (() => {
       try {
         return window.matchMedia?.("(max-width: 760px)") || null;
@@ -295,6 +368,7 @@
     })();
     const isMobile = () => mobile ? mobile.matches : window.innerWidth <= 760;
     const show = (name, { scroll = true, animate = true } = {}) => {
+      clearSlip();
       if (disposed || app.isConnected === false || !stack || stack.isConnected === false) return false;
       const card = cards.find((node) => node.dataset.homePaper === name);
       if (!card) return false;
@@ -317,6 +391,7 @@
       return true;
     };
     const click = (event) => {
+      clearSlip();
       if (event.defaultPrevented || event.target?.closest?.("button, a, input, select, textarea, label, summary, [contenteditable], [role=button]")) return;
       const card = event.target?.closest?.("[data-home-paper]");
       if (card && cards.includes(card) && show(card.dataset.homePaper))
@@ -348,6 +423,11 @@
     const modeChanged = () => {
       if (isMobile()) show(active || "redeem", { animate: false });
     };
+    const slipInterrupted = () => {
+      if (document.hidden || reducedMotion?.matches) clearSlip();
+    };
+    const removeSlipMedia = mediaListener(slipInterrupted);
+    document.addEventListener("visibilitychange", slipInterrupted);
     const detach = () => {
       stack?.removeEventListener("click", click);
       stack?.removeEventListener("focusin", focus);
@@ -363,6 +443,7 @@
         const next = app.querySelector(".home-paper-stack");
         if (next === stack) return;
         detach();
+        clearSlip();
         stack = next;
         active = "";
         cards = stack ? [...stack.querySelectorAll("[data-home-paper]")] : [];
@@ -372,11 +453,15 @@
         stack?.addEventListener("keydown", keydown);
         stack?.addEventListener("scroll", scrolled, { passive: true });
         if (isMobile()) show("redeem", { animate: false });
+        scheduleSlip();
       },
       dispose() {
         if (disposed) return;
         disposed = true;
         detach();
+        clearSlip();
+        removeSlipMedia();
+        document.removeEventListener("visibilitychange", slipInterrupted);
         if (mobile?.removeEventListener) mobile.removeEventListener("change", modeChanged);
         else mobile?.removeListener?.(modeChanged);
         homeMounts.delete(app);

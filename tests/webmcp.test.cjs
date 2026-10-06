@@ -126,8 +126,13 @@ async function harness(t, options = {}) {
     if (url === "/manage/product" && method === "GET") return products.find((p) => p.id === state.productId);
     if (url.startsWith("/manage/jobs")) {
       const filters = new URL("https://extore.test" + url).searchParams;
-      return jobs.filter((job) => job.product_id === filters.get("product_id") &&
-        (!filters.has("job_id") || job.id === filters.get("job_id")));
+      const selected = jobs.filter((job) => job.product_id === filters.get("product_id"));
+      if (filters.has("job_id")) return selected.filter((job) => job.id === filters.get("job_id"));
+      if (filters.has("state")) return selected.filter((job) => job.state === filters.get("state"));
+      const view = filters.get("view") || "active";
+      return selected.filter((job) => view === "all" || (view === "processed"
+        ? ["succeeded", "destroyed"].includes(job.state)
+        : ["queued", "processing", "failed"].includes(job.state)));
     }
     if (url === "/manage/batch") return { updated: 1 };
     if (["/admin/cards", "/manage/cards"].includes(url) && method === "POST") return { codes: ["CODE-PRIVATE"], digest: "HASH-PRIVATE" };
@@ -710,12 +715,39 @@ test("job reads and batch writes require the selected product ID and cannot cros
   assert.equal(h.calls.some((c) => c.url?.startsWith("/manage/")), false);
   const jobs = await h.call("jobs_list", { product_id: "p1", state: "queued", limit: 20 });
   assert.equal(jobs.ok, true);
-  assert.ok(h.calls.some((c) => c.url === "/manage/jobs?product_id=p1&state=queued&limit=20"));
+  assert.ok(h.calls.some((c) => c.url === "/manage/jobs?product_id=p1&state=queued&view=active&limit=20"));
   const done = await h.call("jobs_complete", { product_id: "p1", ids: ["j1"], content: "same content", confirm: true });
   assert.equal(done.ok, true);
   const batch = mutations(h).find((c) => c.url === "/manage/batch");
   assert.deepEqual(batch.body, { product_id: "p1", ids: ["j1"], content: "same content", action: "succeed" });
   assert.equal(Object.hasOwn(batch.body, "confirm"), false);
+});
+
+test("queue discovery defaults to active tasks and exposes processed or all history only when requested", async (t) => {
+  const jobs = ["queued", "processing", "failed", "succeeded", "destroyed"].map((state, index) => ({
+    id: "j" + index, product_id: "p1", state,
+  }));
+  jobs.push({ id: "other", product_id: "p2", state: "processing" });
+  const h = await harness(t, {
+    context: { page: "admin", role: "admin", tab: "jobs", queueProductId: "p1" }, jobs,
+  });
+  const tool = h.tool("jobs_list");
+  assert.equal(tool.inputSchema.properties.view.default, "active");
+  assert.deepEqual(plain(tool.inputSchema.properties.view.enum), ["active", "processed", "all"]);
+  assert.equal(tool.annotations.readOnlyHint, true);
+  assert.match(tool.description, /omitting succeeded and destroyed history/);
+  assert.deepEqual(plain((await h.call("jobs_list", { product_id: "p1" })).data).map((job) => job.state), ["queued", "processing", "failed"]);
+  assert.ok(h.calls.some((call) => call.url === "/manage/jobs?product_id=p1&view=active"));
+  assert.deepEqual(plain((await h.call("jobs_list", { product_id: "p1", view: "processed" })).data).map((job) => job.state), ["succeeded", "destroyed"]);
+  assert.equal((await h.call("jobs_list", { product_id: "p1", view: "all" })).data.length, 5);
+  assert.deepEqual(plain((await h.call("jobs_list", { product_id: "p1", state: "succeeded" })).data).map((job) => job.state), ["succeeded"]);
+  assert.deepEqual(plain((await h.call("jobs_list", { product_id: "p1", state: "queued", view: "processed" })).data).map((job) => job.state), ["queued"]);
+  const callsBeforeInvalid = h.calls.length;
+  for (const view of ["", "history", null, 1, false])
+    rejected(await h.call("jobs_list", { product_id: "p1", view }));
+  assert.equal(h.calls.length, callsBeforeInvalid);
+  rejected(await h.call("jobs_list", { product_id: "p2", view: "all" }), "queue_scope");
+  assert.equal(mutations(h).length, 0);
 });
 
 test("completion registration accepts bounded output while execution enforces target snapshots and forwards values to the batch API", async (t) => {
@@ -2127,6 +2159,42 @@ test("file reads reject mismatched attachments and downloaded byte counts before
   rejected(await h.call("jobs_file_read", input), "unavailable");
   rejected(await h.call("jobs_file_read", { ...input, file_id: "33333333-3333-4333-8333-333333333333" }), "not_found");
   rejected(await h.call("jobs_file_read", { ...input, file_id: "../file" }));
+});
+
+test("exact file task lookups still reach processed history without requesting the whole history view", async (t) => {
+  for (const state of ["succeeded", "destroyed"]) {
+    const job = { id: "j1", product_id: "p1", state };
+    const file = attachment({ consumed: state === "destroyed" ? 1 : 0 });
+    const h = await harness(t, {
+      context: { page: "admin", role: "admin", tab: "jobs", queueProductId: "p1" },
+      api: async (url) => {
+        if (url === "/auth/status") return { role: "admin" };
+        if (url.startsWith("/manage/jobs?")) {
+          const filters = new URL("https://extore.test" + url).searchParams;
+          assert.equal(filters.get("product_id"), "p1");
+          if (!filters.has("job_id")) {
+            assert.equal(filters.get("view"), "active");
+            return [];
+          }
+          assert.equal(filters.get("job_id"), "j1");
+          assert.equal(filters.get("limit"), "1");
+          assert.equal(filters.has("view"), false, "Precise history access must not retrieve unrelated history");
+          return [job];
+        }
+        if (url === "/manage/files?job_id=j1") return [file];
+        assert.fail("Unexpected historical file request: " + url);
+      },
+      actions: { readFile: async () => ({ file_id: attachmentId, size: 5, base64: "aGVsbG8=" }) },
+    });
+    assert.deepEqual(plain((await h.call("jobs_list", { product_id: "p1" })).data), []);
+    const listed = await h.call("jobs_files_list", { product_id: "p1", job_id: "j1" });
+    assert.equal(listed.ok, true);
+    assert.equal(listed.data[0].id, attachmentId);
+    const read = await h.call("jobs_file_read", { product_id: "p1", job_id: "j1", file_id: attachmentId });
+    if (state === "succeeded") assert.equal(read.data.base64, "aGVsbG8=");
+    else rejected(read, "invalid_state");
+    assert.equal(mutations(h).length, 0);
+  }
 });
 
 test("output file uploads require fresh processing authority, a claimed job and a declared file field", async (t) => {

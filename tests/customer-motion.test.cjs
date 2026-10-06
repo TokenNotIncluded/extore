@@ -254,6 +254,7 @@ test("桌面初始双卡没有预选，第一次点击纸卡内容即切换并�
   for (const event of ["click", "focusin", "keydown", "scroll"])
     assert.equal(cards.stack.listeners.get(event).size, 0);
   assert.equal(page.mobileMedia.listeners.get("change").size, 0);
+  assert.equal(page.document.listeners.get("visibilitychange").size, 0);
 });
 
 test("表单与商品控制通过聚焦切换视觉焦点，点击不抢走输入或链接焦点", () => {
@@ -376,13 +377,22 @@ test("真实首页模板移除切换按钮，纸卡与纵向商品列表可键�
   let list = [{ name: '<img src=x onerror="alert(1)">', logo: "", delivery: "content", mode: "manual" }];
   let mounts = 0;
   let refreshes = 0;
+  const controls = [];
+  const code = { addEventListener: (event, handler) => {
+    assert.equal(event, "input");
+    assert.equal(typeof handler, "function");
+  } };
   const context = {
     queueLoadId: 0, receiptMotion: null, receiptViewKey: "old", currentToken: "old",
+    currentBatch: {}, batchSelection: "old-card", batchRetryOnly: true,
     currentProduct: {}, currentVariant: {}, app,
     api: async (route) => { assert.equal(route, "/products"); return list; },
     tr: (zh) => zh,
     esc: (value) => String(value).replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;").replaceAll('"', "&quot;"),
     icon: "<svg></svg>", form: (handler) => assert.equal(typeof handler, "function"),
+    on: (selector, handler) => { controls.push(selector); assert.equal(typeof handler, "function"); },
+    pasteCodes: async () => {}, updateCodeCount: () => {},
+    $: (selector) => { assert.equal(selector, "#code"); return code; },
     window: { ExtoreMotion: { mountHome: (target) => { assert.equal(target, app); mounts++; } }, ExtoreWebMCP: { refresh: () => refreshes++ } },
     document: { querySelectorAll: () => [] },
   };
@@ -395,6 +405,10 @@ test("真实首页模板移除切换按钮，纸卡与纵向商品列表可键�
   assert.match(app.innerHTML, /&lt;img src=x onerror=&quot;alert\(1\)&quot;&gt;/);
   assert.match(app.innerHTML, /<form id="form">/);
   assert.equal(context.currentToken, "");
+  assert.equal(context.currentBatch, null);
+  assert.equal(context.batchSelection, "");
+  assert.equal(context.batchRetryOnly, false);
+  assert.equal(controls[0], "#paste-code");
   list = [];
   await render();
   assert.match(app.innerHTML, /<h1>暂无公开商品<\/h1>/);

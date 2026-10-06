@@ -56,11 +56,16 @@ def test_legacy_staff_links_migrate_without_escalating_permissions(
         database.init()
         database.init()
         with database.db() as c:
-            assert c.execute("PRAGMA user_version").fetchone()[0] == 7
+            assert c.execute("PRAGMA user_version").fetchone()[0] == 8
             assert "result_json" in {
                 row["name"] for row in c.execute("PRAGMA table_info(jobs)")
             }
-            assert {"card_meta", "card_batches"} <= {
+            assert {
+                "card_meta",
+                "card_batches",
+                "receipt_batches",
+                "receipt_batch_cards",
+            } <= {
                 row["name"]
                 for row in c.execute(
                     "SELECT name FROM sqlite_master WHERE type='table'"

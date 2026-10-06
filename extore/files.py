@@ -14,7 +14,13 @@ from starlette.formparsers import MultiPartException, MultiPartParser
 
 from .card_tracking import ensure_card_usable
 from .db import db
-from .security import authorize_management, fail, grant, rate_limit, session
+from .security import (
+    authorize_management,
+    fail,
+    rate_limit,
+    resolve_customer_card,
+    session,
+)
 
 router = APIRouter()
 MAX_FILE_BYTES = 20 * 1024 * 1024
@@ -31,6 +37,7 @@ _METADATA = (
 class FileDownload(BaseModel):
     token: str = Field(max_length=100)
     file_id: str = Field(min_length=1, max_length=100)
+    card_id: str | None = Field(default=None, max_length=80)
 
 
 def init_schema(c):
@@ -153,7 +160,7 @@ def _output_scope(c, s, jid, field_key):
     return row
 
 
-async def _multipart(request, expected):
+async def _multipart(request, expected, optional=()):
     """Count the raw stream before the multipart parser can spool an unbounded file."""
     content_type = request.headers.get("content-type", "")
     if not content_type.lower().startswith("multipart/form-data;"):
@@ -180,7 +187,7 @@ async def _multipart(request, expected):
         request.headers,
         bounded(),
         max_files=1,
-        max_fields=len(expected) - 1,
+        max_fields=len(expected) + len(optional) - 1,
         max_part_size=512,
     )
     try:
@@ -195,11 +202,15 @@ async def _multipart(request, expected):
             "上传文件超过 20 MiB 限制" if too_large else "上传请求格式不正确",
             413 if too_large else 400,
         )
-    if set(form) != set(expected) or any(len(form.getlist(key)) != 1 for key in form):
+    allowed = set(expected) | set(optional)
+    if not set(expected) <= set(form) <= allowed or any(
+        len(form.getlist(key)) != 1 for key in form
+    ):
         await form.close()
         fail("上传请求包含重复或未定义的字段")
+    text_keys = [key for key in (*expected, *optional) if key != "file" and key in form]
     if not isinstance(form["file"], UploadFile) or any(
-        not isinstance(form[key], str) for key in expected if key != "file"
+        not isinstance(form[key], str) for key in text_keys
     ):
         await form.close()
         fail("上传请求格式不正确")
@@ -267,15 +278,17 @@ def _store(c, card_id, product_id, job_id, attempt, key, kind, upload, content):
 
 @router.post("/api/files/upload")
 async def upload_input(request: Request):
-    rate_limit(request, "files-upload", 20, 60)
-    form = await _multipart(request, ("token", "field_key", "file"))
+    rate_limit(request, "files-upload", 60, 60)
+    form = await _multipart(
+        request, ("token", "field_key", "file"), optional=("card_id",)
+    )
     try:
         with db() as c:
-            card = grant(c, form["token"])
+            card = resolve_customer_card(c, form["token"], form.get("card_id") or None)
             _input_scope(c, card, form["field_key"])
         content = await _contents(form["file"])
         with db() as c:
-            card = grant(c, form["token"])
+            card = resolve_customer_card(c, form["token"], form.get("card_id") or None)
             _, row = _input_scope(c, card, form["field_key"])
             return _store(
                 c,
@@ -468,7 +481,7 @@ def managed_download(file_id: str, request: Request):
 def customer_download(body: FileDownload, request: Request):
     rate_limit(request, "files-download", 60, 60)
     with db() as c:
-        card = grant(c, body.token)
+        card = resolve_customer_card(c, body.token, body.card_id)
         item = _file(c, body.file_id, content=True)
         if (
             item["card_id"] != card["id"]

@@ -285,16 +285,23 @@ class ManagementProduct(Product):
 
 
 class CodeInput(BaseModel):
-    code: str = Field(min_length=1, max_length=128)
+    code: str = Field(min_length=1, max_length=8000)
+
+
+class BatchRedemptionItem(BaseModel):
+    card_id: str = Field(min_length=1, max_length=80)
+    params: dict[str, str] = Field(default_factory=dict)
 
 
 class Redemption(BaseModel):
     token: str = Field(max_length=100)
     params: dict[str, str] = Field(default_factory=dict)
+    items: list[BatchRedemptionItem] = Field(default_factory=list, max_length=30)
 
 
 class TokenInput(BaseModel):
     token: str = Field(max_length=100)
+    card_id: str | None = Field(default=None, max_length=80)
 
 
 class IssueCards(BaseModel):

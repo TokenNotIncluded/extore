@@ -190,7 +190,9 @@ def test_same_product_batch_handles_duplicates_once(owner, setup_product):
         ).status_code
         == 200
     )
-    rows = owner.get("/api/manage/jobs", params={"product_id": pid}).json()
+    rows = owner.get(
+        "/api/manage/jobs", params={"product_id": pid, "view": "processed"}
+    ).json()
     assert len(rows) == 2 and all(row["state"] == "succeeded" for row in rows)
     with db() as c:
         assert (

@@ -161,7 +161,7 @@ window.ExtoreWebMCP.dispose();
 | `card_revoke` | `card_id` + confirm |
 | `staff_authorize` | `product_id`、`name`、`days`、`permissions`、`max_uses?` + confirm；name 为 1–100 字符且非空白，days 为大于 0 且不超过 90 的有限数字，可用小数；permissions 为上述 8 个权限中的非空、不重复数组，并满足权限依赖；max_uses 是 1–1000 的整数，默认 1 |
 | `staff_revoke` | `staff_id` + confirm |
-| `jobs_list` | `product_id`、`state?`、`limit?`；state 为 `queued` / `processing` / `succeeded` / `failed` / `destroyed`，limit 为 1–500 |
+| `jobs_list` | `product_id`、`view?`、`state?`、`limit?`；view 为 `active`（默认）/ `processed` / `all`；state 为 `queued` / `processing` / `succeeded` / `failed` / `destroyed`，limit 为 1–500 |
 | `jobs_files_list` | `product_id`、`job_id`；任务必须属于当前选择的商品队列 |
 | `jobs_file_read` | `product_id`、`job_id`、`file_id`；先验证任务和附件所属范围，再读取限量内容 |
 | `jobs_file_upload` | `product_id`、`job_id`、`field_key`、`filename`、`base64`、`content_type?` + confirm；必须为自己领取任务的输出快照中的文件字段 |
@@ -173,6 +173,8 @@ window.ExtoreWebMCP.dispose();
 | `event_retry` | `event_id` + confirm |
 
 任务 `message` 最多 1000 字符。未提供列表 `limit` 时使用后端默认值；不是无限查询。
+
+`jobs_list` 默认使用 `view=active`，仅返回排队、处理中和失败待核实任务；已完成及已销毁任务放在 `view=processed`，主动传 `view=all` 才读取全部历史。显式 `state` 优先，因此 `state=succeeded` 仍能精确查询已完成任务。文件工具通过 `job_id` 精确定位历史任务，仍可在相同商品权限下读取其安全附件信息。
 
 队列按商品独立。先调用 `queue_products` 查询当前身份允许处理的商品，再用 `queue_select` 选择队列。`jobs_list` 和所有任务批处理必须传入与当前 `queueProductId` 相同的 `product_id`；不能把不同商品的任务 ID 混入一批，也没有“所有商品混合队列”。`/api/manage/products` 只返回可处理的商品，`/api/manage/jobs` 与 `/api/manage/batch` 同样限定商品范围；管理链接即使伪造参数，也不能访问授权商品之外的队列。
 

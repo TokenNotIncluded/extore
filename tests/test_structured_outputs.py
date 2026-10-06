@@ -119,7 +119,7 @@ def test_multiple_outputs_are_stored_and_only_revealed_to_customer(
     assert json.loads(row["result_json"]) == OUTPUT
     public_status = owner.post("/api/receipt", json={"token": token}).json()
     managed_jobs = owner.get(
-        "/api/manage/jobs", params={"product_id": product_id}
+        "/api/manage/jobs", params={"product_id": product_id, "view": "processed"}
     ).json()
     with db() as c:
         events = [dict(r) for r in c.execute("SELECT * FROM events")]

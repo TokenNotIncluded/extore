@@ -29,6 +29,8 @@ def clean():
             "credentials",
             "sessions",
             "staff",
+            "receipt_batch_cards",
+            "receipt_batches",
             "grants",
             "jobs",
             "cards",

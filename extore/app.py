@@ -4,8 +4,9 @@ import time
 import uuid
 from contextlib import asynccontextmanager
 from pathlib import Path
+from typing import Literal
 
-from fastapi import FastAPI, Request, Response
+from fastapi import FastAPI, HTTPException, Request, Response
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
@@ -39,6 +40,7 @@ from .models import (
 from .processors import processor_catalog, public_configuration
 from .security import (
     authorize_management,
+    batch_cards,
     card_digest,
     create_session,
     digest,
@@ -46,7 +48,9 @@ from .security import (
     grant,
     link_descendant_ids,
     rate_limit,
+    resolve_customer_card,
     session,
+    split_codes,
     staff_authorization,
     token,
     verify_signature,
@@ -141,17 +145,17 @@ def public_products():
     return [p for p in rows if p["public"]]
 
 
-@app.post("/api/exchange")
-def exchange(body: CodeInput, request: Request):
-    rate_limit(request, "exchange", 20, 60)
-    with db() as c:
-        card = c.execute(
-            "SELECT * FROM cards WHERE digest=?", (card_digest(body.code),)
-        ).fetchone()
-        if not card or card["state"] == "revoked":
-            fail("卡密无效，请检查后重试", 404)
-        from .card_tracking import ensure_card_usable, record_verified
+def _screen_exchange_card(c, card, index=None):
+    from .card_tracking import ensure_card_usable
 
+    prefix = f"第 {index} 张：" if index else ""
+    try:
+        if not card or card["state"] == "revoked":
+            batch_revoked = card is not None and index is not None
+            fail(
+                "卡密已撤销" if batch_revoked else "卡密无效，请检查后重试",
+                410 if batch_revoked else 404,
+            )
         ensure_card_usable(c, card)
         row = c.execute("SELECT * FROM jobs WHERE card_id=?", (card["id"],)).fetchone()
         p = job_product(c, row) if row else product(c, card["product_id"])
@@ -163,25 +167,131 @@ def exchange(body: CodeInput, request: Request):
             )
         ):
             fail("卡密已使用，无法再次领取", 410)
-        value = token()
-        c.execute("DELETE FROM grants WHERE expires<?", (time.time(),))
-        c.execute(
-            "INSERT INTO grants VALUES (?,?,?)",
-            (digest(value), card["id"], time.time() + 30 * 86400),
+    except HTTPException as exc:
+        if prefix and isinstance(exc.detail, str):
+            fail(prefix + exc.detail, exc.status_code)
+        raise
+    return row, p
+
+
+def _batch_receipt(c, value):
+    cards = batch_cards(c, value)
+    if not cards:
+        fail("兑换凭证无效或已过期，请重新输入卡密", 404)
+    items = []
+    for card in cards:
+        row = c.execute("SELECT * FROM jobs WHERE card_id=?", (card["id"],)).fetchone()
+        meta = c.execute(
+            "SELECT code_suffix FROM card_meta WHERE card_id=?", (card["id"],)
+        ).fetchone()
+        items.append(
+            {
+                "card_id": card["id"],
+                "suffix": meta["code_suffix"] if meta and meta["code_suffix"] else "",
+                "variant": card_variant(c, card),
+                "product": public_product(
+                    job_product(c, row) if row else product(c, card["product_id"])
+                ),
+                "job": job_view(c, row) if row else None,
+            }
         )
-        record_verified(c, card["id"])
-        return {
-            "token": value,
-            "product": public_product(p),
-            "variant": card_variant(c, card),
-            "job": job_view(c, row) if row else None,
-        }
+    first = cards[0]
+    return {
+        "batch": True,
+        "product": public_product(product(c, first["product_id"])),
+        "items": items,
+    }
+
+
+@app.post("/api/exchange")
+def exchange(body: CodeInput, request: Request):
+    rate_limit(request, "exchange", 20, 60)
+    with db() as c:
+        from .card_tracking import record_verified
+
+        # Preserve the original single-code format, including spaces between
+        # its groups, before treating whitespace as a separator between codes.
+        single = c.execute(
+            "SELECT 1 FROM cards WHERE digest=?", (card_digest(body.code),)
+        ).fetchone()
+        codes = [body.code] if single else split_codes(body.code)
+        if not codes:
+            fail("请输入卡密")
+        if len(codes) > 30:
+            fail("一次最多兑换 30 张卡密")
+        loaded = []
+        for index, code in enumerate(codes, start=1):
+            card = c.execute(
+                "SELECT * FROM cards WHERE digest=?", (card_digest(code),)
+            ).fetchone()
+            row, p = _screen_exchange_card(c, card, index if len(codes) > 1 else None)
+            loaded.append((card, row, p))
+        if len({card["product_id"] for card, _, _ in loaded}) > 1:
+            fail("这些卡密不是同一件商品，请分开兑换")
+        value = token()
+        expires = time.time() + 30 * 86400
+        now = time.time()
+        c.execute("DELETE FROM grants WHERE expires<?", (now,))
+        # Existing installations have non-cascading foreign keys. Remove the
+        # children first rather than depending on a changed CREATE TABLE.
+        c.execute(
+            "DELETE FROM receipt_batch_cards WHERE digest IN "
+            "(SELECT digest FROM receipt_batches WHERE expires<?)",
+            (now,),
+        )
+        c.execute("DELETE FROM receipt_batches WHERE expires<?", (now,))
+        if len(loaded) == 1:
+            card, row, p = loaded[0]
+            c.execute(
+                "INSERT INTO grants VALUES (?,?,?)",
+                (digest(value), card["id"], expires),
+            )
+            record_verified(c, card["id"])
+            return {
+                "token": value,
+                "product": public_product(p),
+                "variant": card_variant(c, card),
+                "job": job_view(c, row) if row else None,
+            }
+        c.execute(
+            "INSERT INTO receipt_batches VALUES (?,?,?)",
+            (digest(value), expires, time.time()),
+        )
+        c.executemany(
+            "INSERT INTO receipt_batch_cards VALUES (?,?,?)",
+            [
+                (digest(value), card["id"], position)
+                for position, (card, _, _) in enumerate(loaded)
+            ],
+        )
+        for card, _, _ in loaded:
+            record_verified(c, card["id"])
+        result = _batch_receipt(c, value)
+        result["token"] = value
+        return result
 
 
 @app.post("/api/redeem")
 def redeem(body: Redemption, request: Request):
     rate_limit(request, "redeem", 20, 60)
     with db() as c:
+        cards = batch_cards(c, body.token)
+        if cards:
+            if not body.items:
+                fail("请为每张待兑换的卡密填写启动参数")
+            by_id = {card["id"]: card for card in cards}
+            seen = set()
+            for item in body.items:
+                if item.card_id in seen:
+                    fail("卡密重复提交")
+                seen.add(item.card_id)
+                card = by_id.get(item.card_id)
+                if not card:
+                    fail("这张卡密不在此领取链接中", 404)
+                submit(c, card, item.params)
+            return _batch_receipt(c, body.token)
+        if body.items:
+            fail("单张卡密请直接提交参数")
         card = grant(c, body.token)
         return job_view(c, submit(c, card, body.params))
 
@@ -189,6 +299,8 @@ def redeem(body: Redemption, request: Request):
 @app.post("/api/receipt")
 def receipt(body: TokenInput):
     with db() as c:
+        if batch_cards(c, body.token):
+            return _batch_receipt(c, body.token)
         card = grant(c, body.token)
         row = c.execute("SELECT * FROM jobs WHERE card_id=?", (card["id"],)).fetchone()
         return {
@@ -203,7 +315,7 @@ def receipt(body: TokenInput):
 @app.post("/api/receipt/reveal")
 def reveal(body: TokenInput):
     with db() as c:
-        card = grant(c, body.token)
+        card = resolve_customer_card(c, body.token, body.card_id)
         row = c.execute("SELECT * FROM jobs WHERE card_id=?", (card["id"],)).fetchone()
         if not row or row["state"] != "succeeded":
             fail("尚无可领取内容", 409)
@@ -241,7 +353,7 @@ def reveal(body: TokenInput):
 @app.post("/api/receipt/destroy")
 def destroy(body: TokenInput):
     with db() as c:
-        card = grant(c, body.token)
+        card = resolve_customer_card(c, body.token, body.card_id)
         row = c.execute("SELECT * FROM jobs WHERE card_id=?", (card["id"],)).fetchone()
         if not row or row["state"] not in ("succeeded", "destroyed"):
             fail("只能销毁已完成的交付", 409)
@@ -467,6 +579,7 @@ def revoke_card(cid: str, request: Request):
             fail("只能撤销尚未兑换的卡密", 409)
         c.execute("UPDATE cards SET state='revoked' WHERE id=?", (cid,))
         c.execute("DELETE FROM grants WHERE card_id=?", (cid,))
+        c.execute("DELETE FROM receipt_batch_cards WHERE card_id=?", (cid,))
         audit(c, "owner", "card.revoke", cid)
     return {"ok": True}
 
@@ -648,16 +761,32 @@ def jobs(
     product_id: str = "",
     limit: int = 100,
     job_id: str = "",
+    view: Literal["active", "processed", "all"] = "active",
 ):
     s = session(request, ("admin", "staff"))
     with db() as c:
         authorize_management(c, s, "queue.view")
         product_id = queue_product_id(s, product_id)
         product(c, product_id)
+        conditions = ["product_id=?"]
+        values = [product_id]
+        if state:
+            conditions.append("state=?")
+            values.append(state)
+        elif not job_id:
+            if view == "active":
+                conditions.append("state IN ('queued','processing','failed')")
+            elif view == "processed":
+                conditions.append("state IN ('succeeded','destroyed')")
+        if job_id:
+            conditions.append("id=?")
+            values.append(job_id)
+        values.append(max(1, min(limit, 500)))
         rows = c.execute(
-            "SELECT * FROM jobs WHERE product_id=? AND (?='' OR state=?) "
-            "AND (?='' OR id=?) ORDER BY created,id LIMIT ?",
-            (product_id, state, state, job_id, job_id, max(1, min(limit, 500))),
+            "SELECT * FROM jobs WHERE "
+            + " AND ".join(conditions)
+            + " ORDER BY created,id LIMIT ?",
+            values,
         ).fetchall()
         return [job_view(c, r, True) for r in rows]
 
@@ -846,6 +975,7 @@ def revoke_managed_card(cid: str, request: Request, product_id: str = ""):
             fail("只能撤销尚未兑换的卡密", 409)
         c.execute("UPDATE cards SET state='revoked' WHERE id=?", (cid,))
         c.execute("DELETE FROM grants WHERE card_id=?", (cid,))
+        c.execute("DELETE FROM receipt_batch_cards WHERE card_id=?", (cid,))
         audit(c, management_actor(s), "card.revoke", cid)
     return {"ok": True}
 

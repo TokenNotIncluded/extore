@@ -1892,6 +1892,7 @@
       const filters = {
         product_id: id,
         state: choice(states),
+        view: { ...choice(["active", "processed", "all"]), default: "active" },
         limit: integer(1, 500),
       };
       const scopedJob = async (input, signal) => {
@@ -1946,12 +1947,12 @@
         add(
           "jobs_list",
           "处理队列",
-          "List jobs with customer parameters and progress. Staff can only see their authorized product. Delivery content and receipt credentials are omitted.",
+          "List jobs with customer parameters and progress in the selected product queue. Default view:active returns only queued, processing and failed tasks, omitting succeeded and destroyed history to save context. Use view:processed for succeeded and destroyed tasks, or view:all for all history. An explicit state filter takes precedence over view. Staff can only see their authorized product. Delivery content and receipt credentials are omitted.",
           object(filters, ["product_id"]),
           (input, signal) => {
             assertQueue(input);
             return request(
-              query("/manage/jobs", input, Object.keys(filters)),
+              query("/manage/jobs", { view: "active", ...input }, Object.keys(filters)),
               undefined,
               "GET",
               signal,
