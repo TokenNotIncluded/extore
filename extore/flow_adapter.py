@@ -129,11 +129,40 @@ def finalize(c, effect):
     """Validate accepted step data, then finish at the one true end node."""
     from .service import _apply_simple_update, job
 
-    row = effect["row"]
+    previous = effect["row"]
+    row = job(c, previous["id"])
+    expected = effect.get("flow")
+    run = c.execute(
+        "SELECT * FROM task_flow_runs WHERE job_id=?", (row["id"],)
+    ).fetchone()
+    if (
+        run is None
+        or not isinstance(expected, dict)
+        or previous["card_id"] != row["card_id"]
+        or previous["product_id"] != row["product_id"]
+        or previous["attempt"] != row["attempt"]
+        or any(
+            type(expected.get(key)) is not int or expected[key] != run[key]
+            for key in ("attempt", "flow_epoch", "revision")
+        )
+        or run["attempt"] != row["attempt"]
+        or expected.get("phase") != run["phase"]
+        or expected.get("current", {}).get("id") != run["node_id"]
+    ):
+        fail("任务流程结果对应的状态已改变", 409)
+    terminal = effect.get("terminal")
+    if terminal:
+        if run["phase"] != "ended":
+            fail("只有结束的任务流程可以完成交付", 409)
+        if row["state"] in ("succeeded", "failed", "rejected", "destroyed"):
+            if row["state"] == terminal["state"]:
+                return row  # Do not bind files, rewrite content or emit another event.
+            fail("任务已经结束，不能覆盖结果", 409)
+        if row["state"] not in ("waiting", "queued", "processing"):
+            fail("当前任务状态不能完成流程交付", 409)
     accepted = effect.get("accepted")
     if accepted:
         validate_stage_files(c, row, accepted)
-    terminal = effect.get("terminal")
     if terminal:
         message = terminal.get("message", "")
         if isinstance(message, dict):
@@ -391,6 +420,8 @@ def _customer_action(operation, body, request):
         if operation == "restart":
             if body.values:
                 fail("重新开始不能提交字段值")
+            if row["state"] not in ("failed", "needs_input"):
+                fail("只有允许重试的失败任务可以重新开始", 409)
             current = task_flow.view(c, row)
             if current["flow_epoch"] != epoch or current["revision"] != revision:
                 fail("任务流程已改变，请刷新", 409)
