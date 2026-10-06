@@ -1149,7 +1149,22 @@ th {
   min-width: 0;
   filter: none;
   box-shadow: 0 18px 32px rgb(0 0 0 / 12%);
-  transition: transform 320ms cubic-bezier(0.16, 1, 0.3, 1), opacity 240ms;
+  transform-origin: center;
+  cursor: pointer;
+  transition: transform 440ms cubic-bezier(0.16, 1, 0.3, 1), opacity 280ms;
+}
+.home-paper-stack .public-card {
+  display: flex;
+  flex-direction: column;
+  max-height: clamp(400px, calc(100svh - 200px), 640px);
+}
+.home-paper-stack input,
+.home-paper-stack textarea {
+  cursor: text;
+}
+.home-paper-stack [data-home-paper]:focus-visible {
+  outline: 2px solid var(--green);
+  outline-offset: 7px;
 }
 .home-paper-stack .intro-copy {
   transform: translateY(12px) rotateY(4deg) rotateZ(-1deg);
@@ -1161,34 +1176,29 @@ th {
 .home-paper-stack.home-focus-redeem .exchange {
   z-index: 1;
   opacity: 1;
-  transform: translateZ(28px) rotateY(0) rotateZ(0) scale(1.03);
+  transform: translateZ(36px) rotateY(0) rotateZ(0) scale(1.08);
 }
 .home-paper-stack.home-focus-products .exchange {
-  opacity: 0.9;
-  transform: translateY(12px) rotateY(-5deg) rotateZ(1deg) scale(0.98);
+  opacity: 0.86;
+  transform: translateY(24px) translateZ(-36px) rotateY(-5deg) rotateZ(1deg) scale(0.82);
 }
 .home-paper-stack.home-focus-redeem .intro-copy {
-  opacity: 0.9;
-  transform: translateY(16px) rotateY(5deg) rotateZ(-1deg) scale(0.98);
+  opacity: 0.86;
+  transform: translateY(24px) translateZ(-36px) rotateY(5deg) rotateZ(-1deg) scale(0.82);
 }
 :root[data-theme="dark"] .home-paper-stack .intro-copy,
 :root[data-theme="dark"] .home-paper-stack .exchange {
   box-shadow: 0 18px 32px rgb(0 0 0 / 36%);
 }
-.home-paper-tabs {
-  display: flex;
-  gap: 10px;
-  margin-bottom: 24px;
-}
-.home-paper-tabs button {
-  min-height: 44px;
-}
-.home-paper-tabs button[aria-current="true"] {
-  background: var(--green);
-  color: var(--white);
-}
 .home-product-list {
   margin-top: 24px;
+  min-height: 0;
+  max-height: clamp(220px, calc(100svh - 390px), 440px);
+  overflow-y: auto;
+  overscroll-behavior-y: contain;
+  scrollbar-gutter: stable;
+  padding-right: 8px;
+  touch-action: auto;
 }
 .home-product-list .product-row {
   display: grid;
@@ -1234,17 +1244,24 @@ th {
     perspective: none;
     scroll-snap-type: x mandatory;
     scroll-padding-inline: 18px;
+    touch-action: auto;
   }
   .home-paper-stack .intro-copy,
-  .home-paper-stack .exchange,
-  .home-paper-stack.home-focus-products .intro-copy,
-  .home-paper-stack.home-focus-products .exchange,
-  .home-paper-stack.home-focus-redeem .intro-copy,
-  .home-paper-stack.home-focus-redeem .exchange {
+  .home-paper-stack .exchange {
     flex: 0 0 100%;
     opacity: 1;
     transform: none;
     scroll-snap-align: start;
+  }
+  .home-paper-stack.home-focus-products .intro-copy,
+  .home-paper-stack.home-focus-redeem .exchange {
+    opacity: 1;
+    transform: scale(1);
+  }
+  .home-paper-stack.home-focus-products .exchange,
+  .home-paper-stack.home-focus-redeem .intro-copy {
+    opacity: 0.86;
+    transform: scale(0.88);
   }
 }
 .motion-tear-half {

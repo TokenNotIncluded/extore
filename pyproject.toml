@@ -1,6 +1,10 @@
 [project]
 name = "extore"
 version = "0.4.0"
+description = "Single-merchant redemption and fulfillment with product queues, Passkeys, and native WebMCP"
+readme = "README.md"
+license = "MIT"
+license-files = ["LICENSE"]
 requires-python = ">=3.12"
 dependencies = [
     "argon2-cffi>=25.1.0",
@@ -11,6 +15,13 @@ dependencies = [
     "uvicorn[standard]>=0.54.0",
     "webauthn>=3.0.1",
 ]
+
+[project.urls]
+Homepage = "https://extore.lmm.best"
+Repository = "https://github.com/TokenNotIncluded/extore"
+Documentation = "https://github.com/TokenNotIncluded/extore/tree/main/docs"
+Issues = "https://github.com/TokenNotIncluded/extore/issues"
+Funding = "https://donate.lmm.best/?project=extore"
 
 [dependency-groups]
 dev = [

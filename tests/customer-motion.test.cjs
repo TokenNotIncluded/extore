@@ -5,6 +5,7 @@ const test = require("node:test");
 const vm = require("node:vm");
 
 const source = fs.readFileSync(path.join(__dirname, "../extore/static/customer-motion.js"), "utf8");
+const appSource = fs.readFileSync(path.join(__dirname, "../extore/static/app.js"), "utf8");
 const flush = async () => {
   for (let index = 0; index < 8; index++) await Promise.resolve();
 };
@@ -24,7 +25,7 @@ function fixture({ reduced = false, hidden = false, mobile = false, intersection
     }
   }
   class Element extends Events {
-    constructor(classes = []) {
+    constructor(classes = [], tagName = "div") {
       super();
       const names = new Set(classes);
       this.classList = {
@@ -41,15 +42,25 @@ function fixture({ reduced = false, hidden = false, mobile = false, intersection
       this.children = [];
       this.selectors = new Map();
       this.dataset = {};
+      this.tagName = tagName.toUpperCase();
+      this.parent = null;
       this.rect = { left: 50, top: 50, right: 450, bottom: 350, width: 400, height: 300 };
       this.offsetLeft = 0;
       this.offsetWidth = 350;
       this.scrollLeft = 0;
       this.clientWidth = 386;
       this.scrolls = [];
+      this.focuses = [];
     }
     querySelector(selector) { return this.selectors.get(selector) || null; }
     querySelectorAll(selector) { return this.selectors.get(selector) || []; }
+    closest(selector) {
+      if (selector === "[data-home-paper]") {
+        if (this.dataset.homePaper) return this;
+      } else if (["BUTTON", "A", "INPUT", "SELECT", "TEXTAREA", "LABEL", "SUMMARY"].includes(this.tagName)
+        || this.attributes.has("contenteditable") || this.attributes.get("role") === "button") return this;
+      return this.parent?.closest(selector) || null;
+    }
     getBoundingClientRect() { return this.rect; }
     setAttribute(name, value) { this.attributes.set(name, value); }
     removeAttribute(name) { this.attributes.delete(name); }
@@ -57,6 +68,7 @@ function fixture({ reduced = false, hidden = false, mobile = false, intersection
     remove() { this.isConnected = false; }
     cloneNode() { return new Element(); }
     scrollTo(options) { this.scrolls.push(options); this.scrollLeft = options.left; }
+    focus(options) { this.focuses.push(options); }
     animate(frames, options) {
       let resolve, reject;
       const finished = new Promise((ok, fail) => { resolve = ok; reject = fail; });
@@ -205,37 +217,107 @@ function home(page) {
   const stack = new page.Element(["home-paper-stack"]);
   const products = new page.Element();
   products.dataset.homePaper = "products";
+  products.parent = stack;
   products.offsetLeft = 18;
   const redeem = new page.Element();
   redeem.dataset.homePaper = "redeem";
+  redeem.parent = stack;
   redeem.offsetLeft = 388;
   stack.selectors.set("[data-home-paper]", [products, redeem]);
   page.app.selectors.set(".home-paper-stack", stack);
-  const productButton = new page.Element();
-  const redeemButton = new page.Element();
-  page.app.selectors.set("#home-show-products", productButton);
-  page.app.selectors.set("#home-show-redeem", redeemButton);
-  return { stack, products, redeem, productButton, redeemButton };
+  return { stack, products, redeem };
 }
 
-test("桌面纸卡保持初始双卡，点击或表单聚焦只更新焦点与导航状态", () => {
+test("桌面初始双卡没有预选，第一次点击纸卡内容即切换并聚焦该纸卡", () => {
   const page = fixture();
   const cards = home(page);
   const controller = page.module.mountHome(page.app);
   assert.equal(page.module.mountHome(page.app), controller);
   assert.equal(cards.stack.classList.contains("home-focus-products"), false);
   assert.equal(cards.stack.classList.contains("home-focus-redeem"), false);
-  controller.show("products");
-  assert.equal(cards.productButton.attributes.get("aria-current"), "true");
-  cards.stack.emit("focusin", { target: { closest: () => cards.redeem } });
+  assert.equal(cards.products.attributes.get("aria-current"), "false");
+  assert.equal(cards.redeem.attributes.get("aria-current"), "false");
+  const heading = new page.Element([], "h1");
+  heading.parent = cards.products;
+  cards.stack.emit("click", { target: heading });
+  assert.equal(cards.stack.classList.contains("home-focus-products"), true);
+  assert.equal(cards.products.attributes.get("aria-current"), "true");
+  assert.equal(cards.redeem.attributes.get("aria-current"), "false");
+  assert.equal(cards.products.focuses[0].preventScroll, true);
+  cards.stack.emit("click", { target: cards.redeem });
   assert.equal(cards.stack.classList.contains("home-focus-redeem"), true);
-  assert.equal(cards.redeemButton.attributes.get("aria-current"), "true");
+  assert.equal(cards.products.attributes.get("aria-current"), "false");
+  assert.equal(cards.redeem.attributes.get("aria-current"), "true");
+  assert.equal(cards.redeem.focuses[0].preventScroll, true);
   assert.equal(cards.stack.scrolls.length, 0);
   controller.dispose();
-  assert.equal(cards.stack.listeners.get("click").size, 0);
+  for (const event of ["click", "focusin", "keydown", "scroll"])
+    assert.equal(cards.stack.listeners.get(event).size, 0);
+  assert.equal(page.mobileMedia.listeners.get("change").size, 0);
 });
 
-test("手机默认兑换纸卡，原生滑动同步导航；降低动态时直接切换", () => {
+test("表单与商品控制通过聚焦切换视觉焦点，点击不抢走输入或链接焦点", () => {
+  const page = fixture({ mobile: true });
+  const cards = home(page);
+  const controller = page.module.mountHome(page.app);
+  const initialScrolls = cards.stack.scrolls.length;
+  for (const tag of ["button", "a", "input", "select", "textarea", "label", "summary"]) {
+    const control = new page.Element([], tag);
+    control.parent = cards.products;
+    const child = new page.Element();
+    child.parent = control;
+    cards.stack.emit("click", { target: child });
+    assert.equal(cards.stack.classList.contains("home-focus-redeem"), true, tag);
+    assert.equal(cards.products.focuses.length, 0, tag);
+    assert.equal(cards.stack.scrolls.length, initialScrolls, tag);
+  }
+  for (const attribute of [["contenteditable", "true"], ["role", "button"]]) {
+    const control = new page.Element();
+    control.setAttribute(...attribute);
+    control.parent = cards.products;
+    cards.stack.emit("click", { target: control });
+    assert.equal(cards.stack.classList.contains("home-focus-redeem"), true);
+  }
+  cards.stack.emit("click", { target: cards.products, defaultPrevented: true });
+  assert.equal(cards.stack.classList.contains("home-focus-redeem"), true);
+  const input = new page.Element([], "input");
+  input.parent = cards.products;
+  cards.stack.emit("focusin", { target: input });
+  assert.equal(cards.stack.classList.contains("home-focus-products"), true);
+  assert.equal(cards.products.focuses.length, 0);
+  assert.equal(cards.stack.scrolls.length, initialScrolls);
+  controller.dispose();
+});
+
+test("方向键只切换纸卡自身的焦点，输入和列表滚动键保留原生行为", () => {
+  const page = fixture();
+  const cards = home(page);
+  const controller = page.module.mountHome(page.app);
+  let prevented = 0;
+  const key = (target, value, extra = {}) => cards.stack.emit("keydown", {
+    target, key: value, preventDefault: () => prevented++, ...extra,
+  });
+  cards.stack.emit("focusin", { target: cards.products });
+  key(cards.products, "ArrowRight");
+  assert.equal(prevented, 1);
+  assert.equal(cards.redeem.attributes.get("aria-current"), "true");
+  assert.equal(cards.redeem.focuses[0].preventScroll, true);
+  key(cards.redeem, "ArrowLeft");
+  assert.equal(prevented, 2);
+  assert.equal(cards.products.attributes.get("aria-current"), "true");
+  const input = new page.Element([], "input");
+  input.parent = cards.redeem;
+  const list = new page.Element();
+  list.parent = cards.products;
+  for (const target of [input, list]) for (const value of ["ArrowLeft", "ArrowRight", "ArrowDown", " "]) key(target, value);
+  for (const modifier of ["altKey", "ctrlKey", "metaKey", "shiftKey"]) key(cards.products, "ArrowRight", { [modifier]: true });
+  key(cards.products, "Enter");
+  assert.equal(prevented, 2);
+  assert.equal(cards.products.attributes.get("aria-current"), "true");
+  controller.dispose();
+});
+
+test("手机默认兑换纸卡，原生横滑同步纸卡焦点；降低动态时直接切换", () => {
   const page = fixture({ mobile: true, reduced: true });
   const cards = home(page);
   const controller = page.module.mountHome(page.app);
@@ -243,9 +325,80 @@ test("手机默认兑换纸卡，原生滑动同步导航；降低动态时直�
   assert.equal(cards.stack.scrolls[0].left, 370);
   assert.equal(cards.stack.scrolls[0].behavior, "auto");
   cards.stack.scrollLeft = 0;
-  cards.stack.emit("scroll");
-  assert.equal(cards.productButton.attributes.get("aria-current"), "true");
+  cards.stack.emit("scroll", { target: cards.stack });
+  assert.equal(cards.products.attributes.get("aria-current"), "true");
+  assert.equal(cards.stack.scrolls.length, 1);
   controller.show("redeem");
   assert.equal(cards.stack.scrolls.at(-1).behavior, "auto");
   controller.dispose();
+});
+
+test("手机内层商品列表纵向滚动不触发横向纸卡选择，纸卡点击仍平滑定位", () => {
+  const page = fixture({ mobile: true });
+  const cards = home(page);
+  const controller = page.module.mountHome(page.app);
+  const list = new page.Element();
+  list.parent = cards.products;
+  cards.stack.scrollLeft = 0;
+  cards.stack.emit("scroll", { target: list });
+  assert.equal(cards.redeem.attributes.get("aria-current"), "true");
+  assert.equal(cards.stack.scrolls.length, 1);
+  cards.stack.emit("scroll", { target: cards.stack });
+  assert.equal(cards.products.attributes.get("aria-current"), "true");
+  cards.stack.emit("click", { target: cards.redeem });
+  assert.equal(cards.stack.scrolls.at(-1).left, 370);
+  assert.equal(cards.stack.scrolls.at(-1).behavior, "smooth");
+  controller.dispose();
+});
+
+test("首页重绘清理旧纸卡事件，断开的纸卡与已销毁控制器不能继续选择", () => {
+  const page = fixture();
+  const old = home(page);
+  const controller = page.module.mountHome(page.app);
+  const next = home(page);
+  assert.equal(page.module.mountHome(page.app), controller);
+  for (const event of ["click", "focusin", "keydown", "scroll"])
+    assert.equal(old.stack.listeners.get(event).size, 0);
+  old.stack.emit("click", { target: old.products });
+  assert.equal(next.products.attributes.get("aria-current"), "false");
+  assert.equal(controller.show("missing"), false);
+  next.stack.isConnected = false;
+  assert.equal(controller.show("products"), false);
+  next.stack.isConnected = true;
+  controller.dispose();
+  assert.equal(controller.show("products"), false);
+  assert.equal(controller.disposed, true);
+});
+
+test("真实首页模板移除切换按钮，纸卡与纵向商品列表可键盘聚焦", async () => {
+  const homeSource = appSource.slice(appSource.indexOf("async function home() {"), appSource.indexOf("function receiptRequestContext("));
+  const app = { innerHTML: "" };
+  let list = [{ name: '<img src=x onerror="alert(1)">', logo: "", delivery: "content", mode: "manual" }];
+  let mounts = 0;
+  let refreshes = 0;
+  const context = {
+    queueLoadId: 0, receiptMotion: null, receiptViewKey: "old", currentToken: "old",
+    currentProduct: {}, currentVariant: {}, app,
+    api: async (route) => { assert.equal(route, "/products"); return list; },
+    tr: (zh) => zh,
+    esc: (value) => String(value).replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;").replaceAll('"', "&quot;"),
+    icon: "<svg></svg>", form: (handler) => assert.equal(typeof handler, "function"),
+    window: { ExtoreMotion: { mountHome: (target) => { assert.equal(target, app); mounts++; } }, ExtoreWebMCP: { refresh: () => refreshes++ } },
+    document: { querySelectorAll: () => [] },
+  };
+  const render = vm.runInNewContext(`${homeSource}\nhome`, context);
+  await render();
+  assert.doesNotMatch(app.innerHTML, /home-paper-tabs|home-show-products|home-show-redeem|<nav/);
+  assert.match(app.innerHTML, /data-home-paper="products" tabindex="0" aria-label="公开商品"/);
+  assert.match(app.innerHTML, /data-home-paper="redeem" tabindex="0" aria-label="卡密兑换"/);
+  assert.match(app.innerHTML, /class="home-product-list" tabindex="0" role="region" aria-label="公开商品列表，可上下滚动"/);
+  assert.match(app.innerHTML, /&lt;img src=x onerror=&quot;alert\(1\)&quot;&gt;/);
+  assert.match(app.innerHTML, /<form id="form">/);
+  assert.equal(context.currentToken, "");
+  list = [];
+  await render();
+  assert.match(app.innerHTML, /<h1>暂无公开商品<\/h1>/);
+  assert.doesNotMatch(app.innerHTML, /class="home-product-list"/);
+  assert.equal(mounts, 2);
+  assert.equal(refreshes, 2);
 });

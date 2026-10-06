@@ -284,7 +284,6 @@
     }
     let stack = null;
     let cards = [];
-    let buttons = [];
     let active = "";
     let disposed = false;
     const mobile = (() => {
@@ -296,15 +295,15 @@
     })();
     const isMobile = () => mobile ? mobile.matches : window.innerWidth <= 760;
     const show = (name, { scroll = true, animate = true } = {}) => {
-      if (disposed || app.isConnected === false || !stack) return false;
+      if (disposed || app.isConnected === false || !stack || stack.isConnected === false) return false;
       const card = cards.find((node) => node.dataset.homePaper === name);
       if (!card) return false;
       if (active !== name) {
         active = name;
         stack.classList.toggle("home-focus-products", name === "products");
         stack.classList.toggle("home-focus-redeem", name === "redeem");
-        for (const button of buttons)
-          button.node.setAttribute("aria-current", String(button.name === name));
+        for (const node of cards)
+          node.setAttribute("aria-current", String(node === card));
       }
       if (scroll && isMobile()) {
         const left = Math.max(0, card.offsetLeft - 18);
@@ -318,14 +317,25 @@
       return true;
     };
     const click = (event) => {
-      const card = event.target.closest?.("[data-home-paper]");
-      if (card && cards.includes(card)) show(card.dataset.homePaper);
+      if (event.defaultPrevented || event.target?.closest?.("button, a, input, select, textarea, label, summary, [contenteditable], [role=button]")) return;
+      const card = event.target?.closest?.("[data-home-paper]");
+      if (card && cards.includes(card) && show(card.dataset.homePaper))
+        card.focus?.({ preventScroll: true });
     };
     const focus = (event) => {
-      const card = event.target.closest?.("[data-home-paper]");
-      if (card && cards.includes(card)) show(card.dataset.homePaper);
+      const card = event.target?.closest?.("[data-home-paper]");
+      if (card && cards.includes(card)) show(card.dataset.homePaper, { scroll: false });
     };
-    const scrolled = () => {
+    const keydown = (event) => {
+      if (!cards.includes(event.target) || event.altKey || event.ctrlKey || event.metaKey || event.shiftKey) return;
+      const index = event.key === "ArrowLeft" ? 0 : event.key === "ArrowRight" ? 1 : -1;
+      const card = cards[index];
+      if (!card || !show(card.dataset.homePaper)) return;
+      event.preventDefault();
+      card.focus?.({ preventScroll: true });
+    };
+    const scrolled = (event) => {
+      if (event?.target && event.target !== stack) return;
       if (!isMobile() || !cards.length) return;
       const center = stack.scrollLeft + stack.clientWidth / 2;
       const nearest = cards.reduce((previous, card) => {
@@ -341,9 +351,8 @@
     const detach = () => {
       stack?.removeEventListener("click", click);
       stack?.removeEventListener("focusin", focus);
+      stack?.removeEventListener("keydown", keydown);
       stack?.removeEventListener("scroll", scrolled);
-      for (const button of buttons)
-        button.node.removeEventListener("click", button.handler);
     };
     const controller = {
       get disposed() {
@@ -357,16 +366,10 @@
         stack = next;
         active = "";
         cards = stack ? [...stack.querySelectorAll("[data-home-paper]")] : [];
-        buttons = ["products", "redeem"].flatMap((name) => {
-          const node = app.querySelector(`#home-show-${name}`);
-          if (!node) return [];
-          const handler = () => show(name);
-          node.addEventListener("click", handler);
-          node.setAttribute("aria-current", "false");
-          return [{ name, node, handler }];
-        });
+        for (const card of cards) card.setAttribute("aria-current", "false");
         stack?.addEventListener("click", click);
         stack?.addEventListener("focusin", focus);
+        stack?.addEventListener("keydown", keydown);
         stack?.addEventListener("scroll", scrolled, { passive: true });
         if (isMobile()) show("redeem", { animate: false });
       },
