@@ -77,7 +77,11 @@ def card_product(c, card):
 
     snapshot = task_flow.card_snapshot(c, card["id"])
     if snapshot is not None:
-        return snapshot.get("product", snapshot)
+        return {
+            **product(c, card["product_id"]),
+            **snapshot["product"],
+            "task_flow": snapshot["definition"],
+        }
     p = product(c, card["product_id"])
     # An old card must not acquire a flow merely because its product was edited.
     p["task_flow"] = None
@@ -92,6 +96,8 @@ def issue_cards(c, pid, count, label="", expires=None, variant_id="default"):
 
     require_enabled_product(c, pid)
     p = product(c, pid)
+    if p["mode"] == "stock":
+        fail("一卡一文本商品请粘贴文本或导入文件生成卡密", 409)
     variant = next((v for v in p["variants"] if v["id"] == variant_id), None)
     if variant is None:
         fail("商品规格不存在", 400)
@@ -475,7 +481,15 @@ def submit(c, card, params):
         c.execute("UPDATE cards SET state='reserved' WHERE id=?", (card["id"],))
     row = job(c, jid)
     bind_inputs(c, row, clean)
-    event(c, "redemption.requested", p["id"], row)
+    if p["mode"] == "stock":
+        from .text_cards import assigned_payload, clear_assignment
+
+        row = _apply_simple_update(
+            c, jid, JobUpdate(state="succeeded", attempt=row["attempt"], output={"content": assigned_payload(c, card["id"])}),
+        )
+        clear_assignment(c, card["id"])
+    else:
+        event(c, "redemption.requested", p["id"], row)
     return row
 
 
@@ -494,7 +508,7 @@ def apply_update(c, jid, update: JobUpdate):
             fail("流程处理必须指定当前步骤的 flow_epoch", 409)
         return finalize_task_flow(
             c,
-            task_flow.process_update(c, row, update, update.flow_epoch),
+            task_flow.process_update(c, row, update, update.flow_epoch, actor=row["claimed_by"]),
         )
     return _apply_simple_update(c, jid, update)
 

@@ -88,7 +88,17 @@ def submit_flow(c, card, params):
 
             if not job_view(c, row)["can_retry"]:
                 fail("此任务不能重试，请联系商家", 409)
-            effect = task_flow.reset_attempt(c, row)
+            from .files import purge_job_files
+
+            purge_job_files(c, row["id"])
+            c.execute(
+                "UPDATE jobs SET attempt=attempt+1,state='waiting',params='{}',"
+                "content=NULL,result_json=NULL,claimed_by=NULL,lease=NULL,"
+                "progress=0,completed_steps='[]',retryable=0,updated=? WHERE id=?",
+                (time.time(), row["id"]),
+            )
+            c.execute("UPDATE cards SET state='reserved' WHERE id=?", (card["id"],))
+            effect = task_flow.reset_attempt(c, job(c, row["id"]))
             return finalize(c, effect)
         return row
     if card["state"] != "ready":
@@ -118,6 +128,9 @@ def finalize(c, effect):
         validate_stage_files(c, row, accepted)
     terminal = effect.get("terminal")
     if terminal:
+        message = terminal.get("message", "")
+        if isinstance(message, dict):
+            message = message.get("zh-CN") or next(iter(message.values()), "")
         from . import task_flow
 
         frozen = task_flow.card_snapshot(c, row["card_id"])
@@ -129,7 +142,7 @@ def finalize(c, effect):
             c.execute(
                 "UPDATE jobs SET state='rejected',message=?,content=NULL,result_json=NULL,"
                 "lease=NULL,claimed_by=NULL,retryable=0,updated=? WHERE id=?",
-                (terminal.get("message", ""), time.time(), row["id"]),
+                (message, time.time(), row["id"]),
             )
             c.execute("UPDATE cards SET state='rejected' WHERE id=?", (row["card_id"],))
             event(c, "fulfillment.rejected", row["product_id"], job(c, row["id"]))
@@ -143,7 +156,7 @@ def finalize(c, effect):
                 JobUpdate(
                     state=terminal["state"], attempt=row["attempt"],
                     output=terminal.get("output"),
-                    message=terminal.get("message", ""),
+                    message=message,
                     retryable=terminal.get("retryable", False),
                 ),
                 product_override=final_product,

@@ -82,6 +82,7 @@ from .service import (
     submit,
 )
 from .source import router as source_router
+from .text_cards import router as text_cards_router
 from .variants import card_variant, issued_variant_ids
 
 
@@ -106,6 +107,7 @@ app.include_router(scope_auth_router)
 app.include_router(owner_cli_router)
 app.include_router(processor_profiles_router)
 app.include_router(maintenance_router)
+app.include_router(text_cards_router)
 
 
 @app.middleware("http")
@@ -158,10 +160,16 @@ async def guard(request: Request, call_next):
     ):
         return JSONResponse({"detail": file_limit_message()}, status_code=413)
     if request.method not in ("GET", "HEAD") and not upload:
+        maximum_body = 256000
+        if request.url.path in ("/api/admin/cards/import-text", "/api/manage/cards/import-text"):
+            from .text_cards import MAX_IMPORT_BYTES
+
+            # JSON escape sequences can be six bytes per decoded character.
+            maximum_body = 6 * MAX_IMPORT_BYTES + 4096
         body = bytearray()
         async for chunk in request.stream():
             body.extend(chunk)
-            if len(body) > 256000:
+            if len(body) > maximum_body:
                 return JSONResponse({"detail": "请求过大"}, status_code=413)
         request._body = bytes(body)
         if (
@@ -451,6 +459,12 @@ def reveal(body: TokenInput):
             ),
         )
         event(c, "delivery.viewed", row["product_id"], job(c, row["id"]))
+        if p["view_policy"] == "once":
+            from . import task_flow
+            from .text_cards import discard_assignment
+
+            task_flow.destroy(c, row)
+            discard_assignment(c, card["id"])
         return {
             "content": content,
             "output": output,
@@ -468,6 +482,11 @@ def destroy(body: TokenInput):
         if row["state"] == "destroyed":
             return {"ok": True}
         purge_job_files(c, row["id"])
+        from . import task_flow
+        from .text_cards import discard_assignment
+
+        task_flow.destroy(c, row)
+        discard_assignment(c, card["id"])
         c.execute(
             "UPDATE jobs SET state='destroyed',content=NULL,result_json=NULL,params='{}',message='',updated=? WHERE id=?",
             (time.time(), row["id"]),
