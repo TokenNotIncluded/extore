@@ -428,7 +428,19 @@ def test_approval_logout_before_claim_cancels_pending_device(owner, clients):
 def test_schema13_additive_migration_preserves_old39_tables(owner):
     pid = product(owner)
     with db() as c:
+        # Remove later additions to reproduce an actual schema-11 database.
         for table in (
+            "proxy_routes",
+            "proxy_identities",
+            "automation_requests",
+            "private_worker_receipts",
+            "private_worker_nonces",
+            "task_flow_dispatches",
+            "task_flow_files",
+            "task_flow_steps",
+            "task_flow_runs",
+            "card_task_flows",
+            "text_card_payloads",
             "cli_scope_requests",
             "pipeline_bindings",
             "pipeline_authorizations",

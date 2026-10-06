@@ -16,6 +16,8 @@ event = verify_flow_event(
 # 在执行之前，持久检查传输 nonce 与 action_id，防止重复运行。
 scope = FlowScope.from_context(event["scope"])
 client = PrivateWorkerClient("https://extore.example", worker_secret)
+# 确认本步骤开始，输入仍有效时才会获得成功回执。
+client.update(scope, "started-1", state="processing")
 uploaded = client.upload(scope, "delivery_file", "delivery.docx", result_id="file-1")
 client.update(
     scope,

@@ -181,6 +181,7 @@ def test_sdk_actual_two_round_flow_files_and_result_recovery(
 
     source = tmp_path / "first.txt"
     source.write_bytes(b"first generated file")
+    sdk.update(scope, "started-one", state="processing")
     file_ack = sdk.upload(scope, "artifact", source, result_id="file-one")
     assert sdk.upload(scope, "artifact", source, result_id="file-one") == file_ack
     with db() as c:
@@ -218,6 +219,7 @@ def test_sdk_actual_two_round_flow_files_and_result_recovery(
     assert sdk.download(next_scope, "material", next_input) == b"second input"
     final_source = tmp_path / "final.txt"
     final_source.write_bytes(b"final generated file")
+    sdk.update(next_scope, "started-two", state="processing")
     final = sdk.upload(next_scope, "artifact", final_source, result_id="file-two")
     sdk.update(
         next_scope,
