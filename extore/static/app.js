@@ -14,6 +14,7 @@ let lang = preferences.resolved.language,
   receiptMotion = null,
   ownerCliApproval = null,
   deviceCliApproval = null,
+  pipelineAuthView = null,
   accountView = null,
   authStatus = {},
   waitingAnimationPaused = false,
@@ -424,7 +425,7 @@ window.addEventListener("popstate", start);
 window.addEventListener("hashchange", () => {
   if (location.pathname === "/cli/owner") start();
 });
-window.addEventListener("pagehide", () => { ownerCliApproval?.dispose(); deviceCliApproval?.dispose(); });
+window.addEventListener("pagehide", () => { ownerCliApproval?.dispose(); deviceCliApproval?.dispose(); pipelineAuthView?.dispose(); });
 
 async function home() {
   queueLoadId++;
@@ -974,6 +975,14 @@ function acceptAuth(auth) {
   managementMaxCLIUses = auth.max_cli_uses ?? 1;
   managementRemainingCLIUses = auth.remaining_cli_uses ?? Math.max(0, managementMaxCLIUses - (auth.cli_uses || 0));
   managementLinkId = auth.link_id || auth.staff_id || null;
+  if (location.pathname === "/admin" && role === "admin" && $("#management-identity")) $("#management-identity").textContent = managementIdentity();
+}
+function managementIdentity() {
+  if (role === "staff") return managementName + " · 只管理被授权的商品。";
+  if (window.ExtoreAccount?.rootScope(authStatus)) return "超级管理员 · 平台范围";
+  const name = typeof authStatus.shop_name === "string" && authStatus.shop_name.trim() ? authStatus.shop_name : tr("店铺", "Shop");
+  const email = typeof authStatus.shop_email === "string" ? authStatus.shop_email : "";
+  return name + (email ? " · " + email : "");
 }
 const permitted = (permission) =>
   role === "admin" || permissions.includes(permission);
@@ -987,7 +996,7 @@ function managementTabs() {
   ].filter(([, , permission]) => permitted(permission));
   items.push(["sessions", "会话与审计"]);
   if (role === "admin") {
-    items.push(["security", "账户安全"], ["profiles", "处理器账户"]);
+    items.push(["security", "账户安全"], ["profiles", "商品处理器配置"]);
     if (window.ExtoreAccount?.rootScope(authStatus)) items.push(["shops", "店铺"], ["mail", "邮箱服务器"]);
   }
   return items;
@@ -995,7 +1004,7 @@ function managementTabs() {
 function shell() {
   const items = managementTabs();
   if (!items.some(([key]) => key === tab)) tab = items[0]?.[0] || "";
-  app.innerHTML = `<div class="admin-top"><div><h1>${role === "staff" ? "商品管理" : "商家后台"}</h1><p class="muted">${role === "staff" ? esc(managementName) + " · 只管理被授权的商品。" : esc(window.ExtoreAccount?.rootScope(authStatus) ? "超级管理员 · 平台范围" : "店铺 · " + (authStatus.shop_id || "未确认范围"))}</p></div><button id="logout" class="secondary">退出登录</button></div><nav class="tabs" aria-label="管理导航">${items.map(([v, label]) => `<button data-tab="${v}" class="${tab === v ? "active" : ""}">${label}</button>`).join("")}</nav><div id="workspace"></div>`;
+  app.innerHTML = `<div class="admin-top"><div><h1>${role === "staff" ? "商品管理" : "商家后台"}</h1><p id="management-identity" class="muted">${esc(managementIdentity())}</p></div><button id="logout" class="secondary">退出登录</button></div><nav class="tabs" aria-label="管理导航">${items.map(([v, label]) => `<button data-tab="${v}" class="${tab === v ? "active" : ""}">${label}</button>`).join("")}</nav><div id="workspace"></div>`;
   on("#logout", async () => {
     await api("/auth/logout", {});
     navigate("/admin");
@@ -1009,6 +1018,8 @@ function shell() {
   );
 }
 async function renderTab() {
+  pipelineAuthView?.dispose();
+  pipelineAuthView = null;
   accountView?.dispose();
   accountView = null;
   queueLoadId++;
@@ -1063,7 +1074,8 @@ async function copyManagementLink(url, input, isCurrent = () => true) {
   return false;
 }
 async function copyCLIPrompt(options, host, isCurrent = () => true) {
-  const prompt = (options.owner ? window.ExtoreCliPrompts.buildOwner : window.ExtoreCliPrompts.build)({ language: lang, ...options, deviceCode: !options.owner });
+  const buildPrompt = options.processorWorkflow ? window.ExtoreCliPrompts.buildProcessorWorkflow : options.owner ? window.ExtoreCliPrompts.buildOwner : window.ExtoreCliPrompts.build;
+  const prompt = buildPrompt({ language: lang, ...options, deviceCode: !options.owner });
   if (!isCurrent()) return;
   host.innerHTML = `<div class="field"><label for="cli-ai-prompt">${tr("给 AI 的 CLI 提示词", "CLI prompt for AI")}</label><textarea id="cli-ai-prompt" readonly spellcheck="false" rows="12">${esc(prompt)}</textarea></div><p class="caption">${options.owner ? tr("不含授权凭证。首次登录须由商家核对设备，再用 Passkey 明确批准全店管理权限。", "No credentials are included. The merchant must review the device and explicitly approve full shop access with a Passkey at first login.") : tr("不含授权凭证。AI 会显示设备码，请你在浏览器核对商品和权限后授权。", "No credentials are included. The AI displays a device code for you to review the product and permissions in your browser.")}</p>`;
   const input = $("#cli-ai-prompt");
@@ -1166,7 +1178,7 @@ async function renderJobs(filter = "", requestedProductId = queueProductId, requ
     if (!active()) return;
     const authorization = { origin: location.origin,
       reuseDevice: role === "staff" && managementRemainingCLIUses <= 0 };
-    await copyCLIPrompt({ ...authorization, product: selectedProduct, permissions: role === "staff" ? permissions : [], reuseDevice: role === "staff" && managementRemainingCLIUses === 0 }, $("#queue-ai-prompt"), active);
+    await copyCLIPrompt({ ...authorization, product: selectedProduct, existingLink: role === "staff", permissions: role === "staff" ? permissions : [], reuseDevice: role === "staff" && managementRemainingCLIUses === 0 }, $("#queue-ai-prompt"), active);
   });
   $("#queue-product").addEventListener("change", () =>
     perform(() => renderJobs("", $("#queue-product").value, view)),
@@ -1499,7 +1511,7 @@ async function renderStaff(requestedView = linkView) {
     on("#copy-management-link", () =>
       copyManagementLink(result.url, input, () => active() && input.isConnected),
     );
-    on("#copy-link-ai", () => copyCLIPrompt({ origin: new URL(result.url).origin, link: result.url, product: productDefinition, permissions: selected, expires: result.expires }, $("#link-ai-prompt"), () => active() && input.isConnected));
+    on("#copy-link-ai", () => copyCLIPrompt({ origin: new URL(result.url).origin, link: result.url, existingLink: true, product: productDefinition, permissions: selected, expires: result.expires }, $("#link-ai-prompt"), () => active() && input.isConnected));
   });
   document.querySelectorAll("[data-revoke]").forEach((b) =>
     b.addEventListener("click", () =>
@@ -1552,20 +1564,32 @@ async function renderEvents() {
   })));
 }
 async function renderSessions() {
+  pipelineAuthView?.dispose();
+  pipelineAuthView = null;
+  const authority = managementAuthority();
+  const requestOptions = managementOptions();
   const generation = queueLoadId;
   const viewRole = role;
   const pathname = location.pathname;
-  const active = () => generation === queueLoadId && role === viewRole && tab === "sessions" && location.pathname === pathname;
+  const active = () => generation === queueLoadId && role === viewRole && managementAuthority() === authority && tab === "sessions" && location.pathname === pathname;
   const prefix = role === "admin" ? "/admin" : "/manage";
   const [sessions, entries, devices, ownerDevices] = await Promise.all([
-    api(prefix + "/sessions"), api(prefix + "/audit?limit=200"), api(prefix + "/cli-devices"),
-    viewRole === "admin" ? api("/admin/cli-owner-devices") : Promise.resolve([]),
+    api(prefix + "/sessions", undefined, "GET", requestOptions), api(prefix + "/audit?limit=200", undefined, "GET", requestOptions), api(prefix + "/cli-devices", undefined, "GET", requestOptions),
+    viewRole === "admin" ? api("/admin/cli-owner-devices", undefined, "GET", requestOptions) : Promise.resolve([]),
   ]);
   if (!active()) return;
   const date = (value) => value ? new Date(value * 1000).toLocaleString() : "—";
   const ownerDeviceMarkup = viewRole === "admin" ? `<h2 class="form-divider">${tr("商家 CLI 设备 · 全店管理", "Merchant CLI devices · full shop access")}</h2><p class="caption">${tr("首次授权须核对设备码与指纹，再用 Passkey 批准。此类设备拥有完整商家权限，与商品管理链接相互独立。撤销会结束该设备的全部 CLI 会话，阻止续期；浏览器会话不受影响。", "First authorization requires a device-code and fingerprint review followed by Passkey approval. These devices have full merchant access, independent of product links. Revoking one ends its CLI sessions and prevents renewal; browser sessions are unaffected.")}</p>${ownerDevices.length ? `<div class="table-wrap"><table><thead><tr><th>${tr("设备 / 指纹", "Device / fingerprint")}</th><th>${tr("权限 / 到期", "Scope / expiry")}</th><th>${tr("授权 / 最近使用", "Authorized / last used")}</th><th>${tr("状态", "Status")}</th><th></th></tr></thead><tbody>${ownerDevices.map((device) => `<tr><td>${esc(device.client_name || tr("未命名商家 CLI 设备", "Unnamed merchant CLI device"))}<p class="caption mono">${esc(device.fingerprint || "—")}</p><p class="caption mono">${esc(device.id)}</p></td><td>${tr("完整商家管理权限", "Full merchant management")}<p class="caption">${date(device.expires)}</p></td><td>${date(device.created)}<p class="caption">${date(device.last_seen)}</p></td><td>${device.revoked ? tr("已撤销", "Revoked") : device.active ? tr("有效", "Active") : tr("已到期", "Expired")}</td><td>${!device.revoked ? `<button class="danger" data-revoke-owner-device="${esc(device.id)}">${tr("撤销商家设备", "Revoke merchant device")}</button>` : ""}</td></tr>`).join("")}</tbody></table></div>` : `<p class="caption">${tr("暂无商家 CLI 设备。", "No merchant CLI devices yet.")}</p>`}` : "";
   const deviceMarkup = `<h2 class="form-divider">商品 CLI 设备 · 按商品授权</h2><p class="caption">撤销设备会结束它的 CLI 会话，并阻止它再次申请会话；浏览器会话不受影响。已用绑定次数不会退还。</p>${devices.length ? `<div class="table-wrap"><table><thead><tr><th>设备 / 指纹</th><th>商品 / 管理链接</th><th>绑定 / 最近使用</th><th>状态</th><th></th></tr></thead><tbody>${devices.map((device) => `<tr><td>${esc(device.client_name || "未命名 CLI 设备")}<p class="caption mono">${esc(device.fingerprint || "—")}</p><p class="caption mono">${esc(device.id)}</p></td><td>${esc(device.product_name || device.product_id)}<p class="caption">${esc(device.link_name || "商品管理链接")}</p></td><td>${date(device.created)}<p class="caption">${date(device.last_seen)}</p></td><td>${device.revoked ? "已撤销" : device.active ? "有效" : "授权已失效"}</td><td>${!device.revoked ? `<button class="danger" data-revoke-device="${esc(device.id)}">撤销设备</button>` : ""}</td></tr>`).join("")}</tbody></table></div>` : '<p class="caption">暂无 CLI 设备。</p>'}`;
-  $("#workspace").innerHTML = `<div class="section-head"><div><h2>会话管理</h2><p class="caption">${role === "admin" ? "查看全店会话，按需注销单个设备。" : permitted("links.delegate") ? "查看自己的会话和下级链接的会话，只限授权商品。" : "查看与注销自己的会话。"} 链接次数耗尽不会结束已有会话。</p></div><div class="actions">${viewRole === "admin" ? `<button id="copy-owner-ai" class="secondary">${tr("复制给 AI 的完整管理提示词", "Copy full management prompt for AI")}</button>` : ""}<button id="sessions-refresh" class="secondary">刷新</button></div></div>${viewRole === "admin" ? '<div id="owner-ai-prompt"></div>' : ""}<div class="table-wrap"><table><thead><tr><th>登录来源</th><th>设备 / 地址</th><th>登录 / 最近活动</th><th>到期</th><th>状态</th><th></th></tr></thead><tbody>${sessions.map((session) => `<tr><td>${esc(session.link_name || (session.role === "admin" ? (session.channel === "cli" ? "商家 CLI · 全店管理" : "商家 Passkey") : session.role === "bootstrap" ? "首次登录" : "商品管理链接"))}${session.product_name ? `<p class="caption">${esc(session.product_name)}</p>` : ""}<p class="caption">${session.channel === "cli" ? "CLI" : "浏览器"}${session.client_name ? " · " + esc(session.client_name) : ""}</p>${session.current ? '<p class="caption">当前会话</p>' : ""}</td><td class="session-client">${esc(session.ua || "未记录设备")}<p class="caption mono">${esc(session.ip || "—")}</p>${session.device_id ? `<p class="caption mono">设备 ${esc(session.device_id)}</p>` : ""}${session.fingerprint ? `<p class="caption mono">${esc(session.fingerprint)}</p>` : ""}</td><td>${date(session.created)}<p class="caption">${date(session.last_seen)}</p></td><td>${date(session.expires)}</td><td>${session.revoked ? "已注销" : session.active ? "有效" : "已到期"}</td><td>${session.active ? `<button class="danger" data-end-session="${esc(session.id)}">${session.current ? "退出此会话" : "注销"}</button>` : ""}</td></tr>`).join("")}</tbody></table></div>${ownerDeviceMarkup}${deviceMarkup}<h2 class="form-divider">访问审计</h2><p class="caption">最近 200 条登录、链接使用、委派和注销记录。记录中不包含卡密或授权凭证。</p><div class="table-wrap"><table><thead><tr><th>时间</th><th>操作</th><th>操作者</th><th>目标</th></tr></thead><tbody>${entries.map((entry) => `<tr><td>${date(entry.created)}</td><td>${esc(entry.action)}${entry.channel ? `<p class="caption">${entry.channel === "cli" ? "CLI" : "浏览器"}${entry.client_name ? " · " + esc(entry.client_name) : ""}</p>` : ""}${entry.fingerprint ? `<p class="caption mono">${esc(entry.fingerprint)}</p>` : ""}</td><td class="mono">${esc(entry.actor)}</td><td class="mono">${esc(entry.target)}</td></tr>`).join("")}</tbody></table></div><div id="error" class="error" role="alert"></div>`;
+  $("#workspace").innerHTML = `<div class="section-head"><div><h2>会话管理</h2><p class="caption">${role === "admin" ? "查看全店会话，按需注销单个设备。" : permitted("links.delegate") ? "查看自己的会话和下级链接的会话，只限授权商品。" : "查看与注销自己的会话。"} 链接次数耗尽不会结束已有会话。</p></div><div class="actions">${viewRole === "admin" ? `<button id="copy-owner-ai" class="secondary">${tr("复制给 AI 的完整管理提示词", "Copy full management prompt for AI")}</button>` : ""}<button id="sessions-refresh" class="secondary">刷新</button></div></div>${viewRole === "admin" ? '<div id="owner-ai-prompt"></div>' : ""}<div class="table-wrap"><table><thead><tr><th>登录来源</th><th>设备 / 地址</th><th>登录 / 最近活动</th><th>到期</th><th>状态</th><th></th></tr></thead><tbody>${sessions.map((session) => `<tr><td>${esc(session.link_name || (session.role === "admin" ? (session.channel === "cli" ? "商家 CLI · 全店管理" : "商家 Passkey") : session.role === "bootstrap" ? "首次登录" : "商品管理链接"))}${session.product_name ? `<p class="caption">${esc(session.product_name)}</p>` : ""}<p class="caption">${session.channel === "cli" ? "CLI" : "浏览器"}${session.client_name ? " · " + esc(session.client_name) : ""}</p>${session.current ? '<p class="caption">当前会话</p>' : ""}</td><td class="session-client">${esc(session.ua || "未记录设备")}<p class="caption mono">${esc(session.ip || "—")}</p>${session.device_id ? `<p class="caption mono">设备 ${esc(session.device_id)}</p>` : ""}${session.fingerprint ? `<p class="caption mono">${esc(session.fingerprint)}</p>` : ""}</td><td>${date(session.created)}<p class="caption">${date(session.last_seen)}</p></td><td>${date(session.expires)}</td><td>${session.revoked ? "已注销" : session.active ? "有效" : "已到期"}</td><td>${session.active ? `<button class="danger" data-end-session="${esc(session.id)}">${session.current ? "退出此会话" : "注销"}</button>` : ""}</td></tr>`).join("")}</tbody></table></div>${viewRole === "admin" ? '<section id="pipeline-authorizations"></section>' : ""}${ownerDeviceMarkup}${deviceMarkup}<h2 class="form-divider">访问审计</h2><p class="caption">最近 200 条登录、链接使用、委派和注销记录。记录中不包含卡密或授权凭证。</p><div class="table-wrap"><table><thead><tr><th>时间</th><th>操作</th><th>操作者</th><th>目标</th></tr></thead><tbody>${entries.map((entry) => `<tr><td>${date(entry.created)}</td><td>${esc(entry.action)}${entry.channel ? `<p class="caption">${entry.channel === "cli" ? "CLI" : "浏览器"}${entry.client_name ? " · " + esc(entry.client_name) : ""}</p>` : ""}${entry.fingerprint ? `<p class="caption mono">${esc(entry.fingerprint)}</p>` : ""}</td><td class="mono">${esc(entry.actor)}</td><td class="mono">${esc(entry.target)}</td></tr>`).join("")}</tbody></table></div><div id="error" class="error" role="alert"></div>`;
+  if (viewRole === "admin" && window.ExtorePipelineAuthorizations) {
+    pipelineAuthView = window.ExtorePipelineAuthorizations.mount({
+      root: $("#pipeline-authorizations"), auth: authStatus, language: () => lang,
+      api: (path, body, method, options = {}) => api(path, body, method, { ...managementOptions(), ...options }),
+      isCurrent: active, passkey, onAuth: acceptAuth,
+      copyPrompt: (options, host, current) => copyCLIPrompt({ origin: location.origin, ...options }, host, current),
+    });
+  }
   on("#sessions-refresh", renderSessions);
   if (viewRole === "admin") on("#copy-owner-ai", async () => {
     if (active()) await copyCLIPrompt({ owner: true, origin: location.origin }, $("#owner-ai-prompt"), active);
@@ -1604,6 +1628,7 @@ function renderAccountTab() {
   const generation = queueLoadId, selected = tab, pathname = location.pathname;
   accountView = window.ExtoreAccount.mount({ root: $("#workspace"), api, auth: authStatus, mode: selected,
     language: () => lang, navigate, passkey, onAuth: acceptAuth,
+    copyProcessorPrompt: (options, host, current) => copyCLIPrompt({ origin: location.origin, ...options, owner: true, processorWorkflow: true }, host, current),
     isCurrent: () => generation === queueLoadId && tab === selected && location.pathname === pathname });
 }
 async function renderSecurity() { renderAccountTab(); }
@@ -1636,6 +1661,8 @@ async function start() {
   ownerCliApproval = null;
   deviceCliApproval?.dispose();
   deviceCliApproval = null;
+  pipelineAuthView?.dispose();
+  pipelineAuthView = null;
   receiptGeneration++;
   receiptMotion?.dispose();
   window.ExtoreMotion?.disposeHome?.(app);

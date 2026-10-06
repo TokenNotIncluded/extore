@@ -352,6 +352,10 @@ async def create_request(request: Request):
         for _ in range(8):
             code = "".join(secrets.choice(CODE_ALPHABET) for _ in range(12))
             code = "-".join(code[i : i + 4] for i in range(0, 12, 4))
+            if c.execute(
+                "SELECT 1 FROM cli_scope_requests WHERE user_code=?", (code,)
+            ).fetchone():
+                continue
             try:
                 c.execute(
                     "INSERT INTO cli_device_requests(id,public_key,client_name,"
@@ -425,6 +429,10 @@ async def request_status(request: Request):
 
 @router.post("/manage/device/options")
 async def approval_options(request: Request):
+    from . import scope_auth
+
+    if await scope_auth.handles_code(request):
+        return await scope_auth.approval_options(request)
     actor = _browser(request, "options")
     body = await _body(request, OptionsInput)
     try:
@@ -437,6 +445,7 @@ async def approval_options(request: Request):
             sql = (
                 "SELECT staff.id FROM staff JOIN products ON products.id=staff.product_id "
                 "WHERE staff.revoked=0 AND staff.archived=0 AND staff.expires>? "
+                "AND NOT EXISTS (SELECT 1 FROM pipeline_bindings WHERE pipeline_bindings.staff_id=staff.id) "
                 "AND (staff.cli_uses<staff.max_cli_uses OR EXISTS ("
                 "SELECT 1 FROM cli_devices WHERE cli_devices.staff_id=staff.id "
                 "AND cli_devices.public_key=? AND cli_devices.revoked=0))"
@@ -469,6 +478,9 @@ async def approval_options(request: Request):
             if selected is not None:
                 result.update(
                     selected=_scope(c, selected, row["public_key"]),
+                    snapshot_digest=hashlib.sha256(
+                        _snapshot(c, row, selected).encode()
+                    ).hexdigest(),
                     review_digest=_review_digest(_snapshot(c, row, selected), actor),
                 )
             return result
@@ -478,6 +490,10 @@ async def approval_options(request: Request):
 
 @router.post("/manage/device/approve")
 async def approve_request(request: Request):
+    from . import scope_auth
+
+    if await scope_auth.handles_code(request):
+        return await scope_auth.approve_request(request)
     actor = _browser(request, "approve")
     body = await _body(request, ApprovalInput)
     try:
@@ -514,6 +530,10 @@ async def approve_request(request: Request):
 
 @router.post("/manage/device/deny")
 async def deny_request(request: Request):
+    from . import scope_auth
+
+    if await scope_auth.handles_code(request):
+        return await scope_auth.deny_request(request)
     actor = _browser(request, "deny")
     body = await _body(request, CodeInput)
     try:

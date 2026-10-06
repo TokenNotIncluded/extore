@@ -6,7 +6,7 @@
 
 旧业务迁入默认店铺。店主浏览器和 CLI 会话固定到 `shop_id`，只能访问本店商品、卡密、任务、附件、管理链接、配置档案与审计；商品链接仍只授权一个商品。平台管理员的 `shop_id=null`，可以维护平台和跨店资源，跨店创建或绑定时须明确店铺。每个业务入口都重新检查店铺启用状态和归属，不以顾客参数或客户端传入的 `shop_id` 替代授权。
 
-公众注册默认关闭；平台管理员先配置 TLS SMTP，再邀请店主。店主使用邮箱密码、可选 TOTP 或多个 Passkey；平台管理员首次密码只用于注册 Passkey，之后禁用首次密码。SMTP、邮件队列、TOTP 和处理器配置档案加密保存，读取接口只返回允许的元数据。完整流程和 CLI 示例见[多店与账号](shops.md)。
+公众注册默认关闭；平台管理员先配置 TLS SMTP，再邀请店主。店主使用邮箱密码、可选 TOTP 或多个 Passkey；平台管理员首次密码只用于注册 Passkey，之后禁用首次密码。SMTP、邮件队列、TOTP 和处理器配置档案加密保存；处理器模板和说明只有明确标为 `secret:false` 时才允许本店店主及平台管理员读回，真实凭据不回读。完整流程和 CLI 示例见[多店与账号](shops.md)。
 
 | 接口 | 范围与用途 |
 | --- | --- |
@@ -18,7 +18,7 @@
 | `POST /api/auth/invite/claim`、`/api/auth/register/email/request`、`/api/auth/register/email/confirm` | 一次性邀请或邮件注册，须符合平台设置 |
 | `POST /api/auth/password/reset/request`、`/api/auth/password/reset/confirm` | 邮件重置店主密码；已启用 TOTP 时仍需第二因素 |
 | `POST /api/auth/totp/setup`、`confirm`、`disable`、`backup-codes` | 本店 TOTP 设置、确认、关闭或轮换恢复码 |
-| `GET/POST /api/admin/processor-profiles`、`GET/PUT/DELETE /api/admin/processor-profiles/{id}` | 店主自己的加密配置档案；平台查询或创建显式选店；读取只返回元数据 |
+| `GET/POST /api/admin/processor-profiles`、`GET/PUT/DELETE /api/admin/processor-profiles/{id}` | 店主自己的加密配置档案；平台查询或创建显式选店；读取元数据、配置状态和明确非秘密字段，不返回凭据 |
 | `GET/PUT/DELETE /api/admin/processor-profiles/bindings/{product_id}` | 同店、同处理器的商品绑定，PUT 传 `{profile_id}` |
 
 付款适配默认关闭，提供商尚未确定。制卡、排队、预设演示或本地测试都不代表实际付款成功。
@@ -181,7 +181,49 @@ Content-Type: application/json
 
 处理器只能来自 [TokenNotIncluded/extore-processors](https://github.com/TokenNotIncluded/extore-processors) 的白名单目录。`processors/official` 由主仓库 Git 子模块记录固定提交，运行时按 `processor_id` 查找预设，不从任意仓库、文件路径或商家上传代码加载程序。商品的 `script` 字段为兼容保留，但必须为空。
 
-`GET /api/admin/processors` 供商家查询预设；`GET /api/manage/processors` 需要 `product.edit`。每个预设包含 `id`、多语言名称与说明、`delivery`、`parameters`、`outputs`、`progress_steps` 和 `shop_configuration`（兼容名称 `configuration`）。这些结构由代码定义。店主创建本店配置档案并绑定商品，发行卡密保存档案 ID 与修订；自动商品的顾客输入与交付输出必须与预设代码一致。旧 `processor_config` 是只写兼容输入，商品读取返回空对象；商品管理链接不能设置店铺配置档案。
+`GET /api/admin/processors` 供商家查询预设；`GET /api/manage/processors` 需要 `product.edit`。每个预设包含 `id`、多语言名称与说明、`delivery`、`parameters`、`outputs`、`progress_steps` 和 `shop_configuration`（兼容名称 `configuration`）。这些结构、字段敏感性和默认值由代码定义，目录不包含商家保存的实际值。店主创建本店配置档案并绑定商品，发行卡密保存档案 ID 与修订；自动商品的顾客输入与交付输出必须与预设代码一致。旧 `processor_config` 兼容输入仍创建独立档案；店主及平台管理员的商品编辑接口可读回明确非秘密字段，商品管理链接和顾客读取仍返回空对象，且不能通过商品管理链接设置店铺配置档案。
+
+档案列表、详情、创建和更新响应中的 `configuration` 仅包含当前处理器定义里严格 `secret:false` 的已保存字段；`configured_fields` 是已保存非空字段名的数组，只表达配置状态。秘密字段、未声明字段、缺失 `secret` 或 `secret` 不是严格 `false` 的值不回读；商品 owner 接口的 `processor_config` 使用同样规则。绑定响应的 `profile.configuration` 读取 `bound_revision`，不会替换为档案最新值。商品管理链接和顾客接口不返回配置值；复制商品资料提示词排除全部处理器配置，私有 CLI 编辑响应也不会暴露秘密或未知字段。
+
+档案 `PUT` 合并新字段与原值：省略字段或秘密字段传 `""` 会保留原值，可选非秘密字段传 `""` 则清空。必填模板传 `""` 返回 422，不以默认值代替用户明确提交的空值。保存继续创建加密修订，商品绑定和卡密冻结修订的规则保持不变。
+
+### 工作流配置协议
+
+配置档案 `POST` 和 `PUT` 支持 `workflow`。创建只接受 `variables`、`secrets` 和 `runtime`，不接受删除字段；更新还可指定 `delete_variables`、`delete_secrets`：
+
+```json
+{
+  "workflow": {
+    "variables": {"BRAND_NAME": "示例店铺"},
+    "secrets": {"SERVICE_TOKEN": "仅在私密文件中填写"},
+    "runtime": {
+      "timeout_seconds": 120,
+      "memory_mb": 256,
+      "cpu_seconds": 120,
+      "max_output_bytes": 1000000
+    }
+  }
+}
+```
+
+读取、创建和更新响应只返回 `workflow={variables,runtime,configured_secret_names}`，后者为已配置秘密名称的排序数组，永远不包含 `secrets` 值。店主只能读取、修改本店档案；平台管理员需明确店铺。商品管理链接、顾客读取和共享商品资料导出不包含工作流内容。
+
+名称匹配 `[A-Z][A-Z0-9_]{0,63}`，`EXTORE_` 前缀保留，系统环境、语言运行时、动态加载器和代理名称及前缀也不可用于新配置，例如 `PATH`、`HOME`、`PYTHON*`、`LD*`、`BWRAP_*` 和 `*_PROXY`。`variables` 和 `secrets` 各最多 64 项，值必须是合法 UTF-8 字符串且不能含 NUL，每值最多 8192 个 UTF-8 字节，两组合计最多 65536 字节；空秘密占位和删除名称也必须通过名称与数量校验。变量和秘密不能重名。`PUT` 两组逐键合并，省略项保留；普通变量允许保存空字符串，秘密空字符串保留已有值，首次写入的空秘密忽略。删除使用对应名称数组，设置与删除同组同名项返回 422；先删除原组再设置另一组可显式迁移名称，最终仍不能重名。`runtime` 逐键合并，未指定的上限保留。
+
+| `runtime` 字段 | 默认值 | 允许范围 |
+| --- | --- | --- |
+| `timeout_seconds` | 120 | 10–120 秒 |
+| `memory_mb` | 256 MiB 地址空间 | 64–512 MiB |
+| `cpu_seconds` | 120 | 1–120 秒 |
+| `max_output_bytes` | 1000000 | 65536–1000000 字节 |
+
+这些字段只接受整数，拒绝布尔值、未知字段及超出范围的值。`memory_mb` 按 MiB（1024² 字节）设置进程地址空间上限 `RLIMIT_AS`。它们是固定离线处理器运行的资源上限，不能用配置添加命令、镜像、挂载或网络能力。工作流与处理器配置同属一个加密修订；商品绑定读取 `bound_revision`，发行卡密冻结同一档案 ID 与修订，worker 只解密该卡密绑定的版本。更新最新档案不会改变旧卡及重试的变量、秘密或运行限制；旧密文档案读取时采用默认工作流。worker 在启动前检查完整编码输入不超过 200000 字节，这包括顾客参数、规格和步骤快照、处理器配置及工作流环境，独立于工作流值的 65536 字节限额。
+
+档案保存时另检查包含处理器配置与工作流的完整 JSON 编码不超过 200000 个 UTF-8 字节，超过返回 422，不创建修订。它与运行时整份任务输入的限额分别检查，不能只按变量原文长度判断是否可执行。
+
+`Task.environment` 和 `ProcessorContext.environment` 是按原名称读取变量与秘密的只读映射。操作系统环境统一使用 `EXTORE_WORKFLOW_<NAME>`，例如 `EXTORE_WORKFLOW_BRAND_NAME`，不覆盖 worker 的系统变量。顾客输入不能替换这些上下文；秘密不自动参与文本模板替换。运行的处理器仍能读取商家交给它的秘密，可信代码审核和禁止在输出、进度与日志中泄露秘密仍是必要边界。
+
+### 预设与处理进度
 
 | `processor_id` | 商家配置 | 顾客输入 | 输出 |
 |---|---|---|---|
@@ -192,7 +234,13 @@ Content-Type: application/json
 
 处理器可在空任务计划中输出 `kind="progress"` 与 `progress_steps` 初始化一次 1–30 项步骤，后续报告已完成项和消息。已有非空计划不能替换；进度、规格与配置版本快照在重试时保留，新的尝试才清空完成项。SDK 的 `Task.define_steps()`、`Task.progress()` 和子进程 JSON Lines 规则见[Python SDK](python-sdk.md)。
 
-升级预设处理器需审核源码与字段定义，再更新主仓库固定提交并发布程序包。固定的审核代码仍按 worker 用户权限运行，不提供任意恶意代码沙箱；其他自动化可以使用独立的 HTTPS 公网 Webhook 服务。
+### 处理器运行边界
+
+内置商品处理器需要 Linux、bubblewrap 0.12 及以上（`bwrap`）和 libseccomp，以及允许使用的内核命名空间。worker 采用固定的离线沙箱启动审核后的代码：隔离网络、进程和挂载空间，丢弃能力，只读挂载所需解释器、标准库、处理器和 SDK。数据库、主密钥、其他店铺数据和宿主的第三方包不挂载到处理器中。
+
+资源策略由发行时冻结的 `workflow.runtime` 执行，处理器不能自行增加权限。当前运行环境只支持固定的文本与资源链接预设，通过 stdin 接收任务、stdout 返回 JSON Lines。seccomp 禁止 fork、clone、exec、socket、IPC、memfd 以及创建文件或目录；不能联网、启动外部程序或在本地生成 DOCX、PPTX。`/work` 与 `/tmp` 各有 16 MiB 上限，但不授予创建文件的权限。每次任务最多报告 100 次进度，打开文件描述符最多 64，关闭 core dump；总输出受冻结上限控制。缺少依赖、内核不支持隔离或策略加载失败时拒绝执行，不降级为普通宿主进程。完整输入、输出、时间、地址空间和 CPU 均有限额；超过限制或异常退出按失败处理，等待商家核实是否已经交付。
+
+复杂文档与 PPT 商品使用队列，由外部 AI 通过已授权 CLI 读取需求、处理材料并上传成品；它们不在这个内置离线运行环境中生成。隔离不能防止处理器把它有权读取的秘密故意放入输出，所以仍不接受任意商家上传脚本。升级商品处理器需审核源码与字段定义，再更新主仓库固定提交并发布程序包。未来需要联网或写盘的处理器须另行设计受控服务与 cgroup 资源管理；支付类能力还须按店铺校验目标、额度和幂等键。当前没有这些 broker，也不允许通过工作流打开直连付款。其他自动化可使用独立的 HTTPS 公网 Webhook 服务。
 
 ## Webhook 事件
 
@@ -385,7 +433,7 @@ Content-Type: application/json
 {"name":"资料处理","days":1,"permissions":["queue.view","queue.process"]}
 ```
 
-`name` 长 1–100 字符；`days` 为大于 0、最多 90 的天数，可使用小数。商家省略 `days` 时有效 7 天；下级省略时为 7 天与父链接剩余有效期的较短者。显式期限超过父链接、权限相同或扩大，均返回 403。`permissions` 省略时使用默认的队列查看与处理权限，重复权限会去重。`max_uses` 是浏览器新登录额度，`max_cli_uses` 是新 CLI 设备绑定额度，均为 1–1000 的整数、默认 1；两项独立计数，子链接分别不能超过父链接配置的上限。
+`name` 长 1–100 字符；`days` 为大于 0、最多 90 的天数，可使用小数。商家省略 `days` 时有效 7 天；下级省略时为 7 天与父链接剩余有效期的较短者。显式期限超过父链接、权限相同或扩大，均返回 403。`permissions` 省略时使用默认的队列查看与处理权限，重复权限会去重。`max_uses` 是浏览器新登录额度，`max_cli_uses` 是新 CLI 设备绑定额度，均为 1–1000 的整数、默认 1；两项独立计数，子链接分别不能超过父链接配置的上限。后文新商品 CLI 授权的专用根链接自身不允许浏览器登录；明确获批 `links.delegate` 后，可以创建浏览器次数最多 1、CLI 绑定次数最多 1 的严格缩权子链接，期限仍不能超过原授权。
 
 一次浏览器额度用于创建一个新的成功浏览器登录会话，事务内计数，耗尽后新登录返回 409。同一个有效会话重复提交同一链接不会再扣次数；耗尽不会自动注销已有会话，权限仍受链接期限和撤销约束。获取 `/staff#...` 页面或读取认证状态不消费额度，登录需要明确提交 `POST /api/staff/login`。更换浏览器、退出后重新登录等新会话需要剩余额度。
 
@@ -418,11 +466,101 @@ Content-Type: application/json
 
 ## CLI 设备授权
 
-商品管理 CLI 使用 Ed25519 设备密钥，与浏览器 Cookie 会话分开。默认通过设备码申请，商家本人在浏览器选择**既有商品管理授权**后批准；管理链接原文不交给 CLI。一个设备授权仍只有一个商品管理链接的权限；多个商品的聚合只在客户端完成。网页「复制给 AI 的提示词」只复制公开接入说明，不创建申请、绑定票据或消耗登录次数。安装和命令用法见 [CLI 文档](cli.md)。全店授权使用后文独立的店主流程。
+商品管理 CLI 使用 Ed25519 设备密钥，与浏览器 Cookie 会话分开。CLI 可以主动申请一个商品的指定权限，或本店当前队列商品的流水线权限，由店主本人在浏览器选择范围并批准；无需先创建管理链接，也不向 CLI 传递管理链接原文。一个商品的实际访问仍对应自己的设备与权限，多个商品的聚合只在客户端完成。原有设备码绑定既有管理链接的 v1 流程继续兼容。网页「复制给 AI 的提示词」只复制公开接入说明，不创建申请、绑定票据或消耗登录次数。安装和命令用法见 [CLI 文档](cli.md)。本店流水线仅限队列权限；完整店主管理使用后文独立的店主流程。
 
 `public_key` 是 32 字节 Ed25519 公钥的无填充 base64url（43 字符），`signature` 是 64 字节签名的同种编码（86 字符）。设备码申请的 `client_name` 为 1–100 字符，不得有首尾空白或 Unicode 控制类字符。签名文本使用 UTF-8，以单个换行连接字段，不再额外追加换行；`EXTORE_ORIGIN` 必须与服务器配置完全一致。
 
-### 商品设备码登录（默认）
+### 商品权限与本店流水线快照
+
+新授权使用 `kind="product"` 或 `kind="shop.pipeline"`：
+
+| 类型 | 商品范围 | 权限边界 |
+| --- | --- | --- |
+| `product` | 明确请求的一个商品，由服务器确定所属店铺 | 本文定义的商品管理权限；批准范围只能是申请权限的子集 |
+| `shop.pipeline` | 明确店铺中，申请时快照内本次选择的队列商品（`mode="manual"`） | 仅 `queue.view`、`queue.process`、`queue.retry`，不能授予完整店主管理 |
+
+处理或重试队列必须同时包含 `queue.view`；`fulfillment.configure` 必须同时包含 `product.edit`。服务器检查商品存在、店铺归属、店铺启用、请求设备密钥、批准者身份与近期认证。商品管理会话和 CLI Bearer 不能批准新范围；平台管理员或店主的浏览器操作也必须经过明确核对与批准，已有登录本身不等于批准设备。
+
+一个 `pipeline_authorizations.id` 保存同一店铺、同一设备公钥、授权类型、商品快照、权限、期限、修订及批准者。它的 `pipeline_bindings` 为每个商品固定对应的 `staff_id` 与 `device_id`。这些是服务端不透明 ID，不是凭据；不返回专用根管理链接原文。新根链接浏览器次数为 0，只绑定本申请的设备公钥，CLI 次数为 1 且在创建绑定的事务中消费。
+
+任务仍以各商品的 `staff_id` 作为稳定处理者和审计 actor。同一有效授权的相同设备恢复，或获批追加其他商品与权限，不替换已有 `staff_id`、`device_id` 或已领取任务的归属；新增商品才创建自己的绑定。会话返回附加元数据 `authorization_id`、`authorization_revision`、`scope`，其中 `scope` 为上述 kind；每次访问和续签都重新验证授权、设备、店铺、商品与权限。客户端不能通过拼接多条授权的权限通过一次操作校验。
+
+`shop.pipeline` 是申请时冻结、当次明确审核的商品快照，不是覆盖未来商品的通配权限。新增商品需由 CLI 重新申请，再由店主选择并批准。追加请求引用原 `authorization_id` 与 `expected_revision`，使用同一设备私钥签名；已有商品和权限必须保留，不能跨店、改授权类型或延长原期限。单商品授权不能追加其他商品；想处理另一商品时发起独立申请。审核快照变化、申请保存的当前修订已更新或已有绑定被撤销时，旧审核结果不得生效。拒绝、超时或追加失败不撤销原授权。
+
+#### 主动申请与浏览器审批接口
+
+| 接口 | 认证与请求 | 结果 |
+| --- | --- | --- |
+| `POST /api/cli/scopes/request` | 无 Cookie / Bearer；设备签名，字段见下文 | 公开设备码、确认网址、指纹、挑战及申请期限 |
+| `POST /api/cli/scopes/status` | 无 Cookie / Bearer；`{request_id,public_key,signature}` | 申请状态与轮询间隔，不创建授权 |
+| `POST /api/manage/device/options` | 店主或平台管理员的浏览器会话；`{user_code,product_ids?,permissions?,expires?}` | `flow:"scope"`、设备请求、店铺、商品快照、已有授权、所选范围、`snapshot_digest` 与 `review_digest` |
+| `POST /api/manage/device/approve` | 同一浏览器、近期认证；`{user_code,product_ids,permissions,expires,review_digest}` | `{ok:true,status:"approved"}`；授权仍需设备签名领取 |
+| `POST /api/manage/device/deny` | 有权审批的浏览器；`{user_code}` | 拒绝本次申请，保留已有授权 |
+| `POST /api/cli/scopes/claim` | 无 Cookie / Bearer；`{request_id,public_key,signature}` | `{authorization,bindings}`；原子创建或更新授权与各商品设备绑定 |
+
+`request` 的固定字段如下；不要把参考说明或商品内容当成请求参数：
+
+```json
+{
+  "public_key": "无填充 base64url 公钥",
+  "client_name": "设备名称",
+  "nonce": "带时间的无填充 base64url nonce",
+  "kind": "product",
+  "shop_id": null,
+  "product_ids": ["商品 UUID"],
+  "permissions": ["queue.view", "queue.process", "queue.retry"],
+  "authorization_id": null,
+  "expected_revision": null,
+  "reason": "本次申请的原因，可为空字符串",
+  "signature": "无填充 base64url 签名"
+}
+```
+
+`product` 指定一个 `product_ids`，所属店铺由服务器验证；`shop.pipeline` 必须传店铺 `shop_id`，`product_ids=[]` 请求本店在申请时的全部当前队列商品快照，显式数组则只请求列出的商品。快照最多 500 个商品，商品与权限数组不能重复。服务器保存快照，不在批准或访问时悄悄纳入以后新增的商品。追加时同时传已有 `authorization_id` 与正整数 `expected_revision`，普通新申请两者为 `null`。同一公钥请求完全相同的已有有效范围时，服务器可识别恢复原授权，不堆积新的根绑定；被撤销的绑定不能恢复。请求的商品与权限不因网页操作扩大；新授权最长为此次申请时起 7 天，店主可以缩短，追加和恢复保留原到期时间。
+
+新申请携带的 `expected_revision` 通常必须等于当前修订。唯一的旧修订恢复情况是：同一设备公钥请求的商品与权限恰好等于目前完整有效范围，而且旧修订低于当前修订；服务器将此次审核绑定到真实当前修订，再要求本人重新批准。它不能把范围退回旧版本，也不能用旧修订追加不同范围。审批返回的 `request.expected_revision` 是此次实际核对的当前修订。
+
+请求签名不沿用旧链接绑定的签名。将除 `signature` 外的上述固定字段编码为规范 JSON：Python 等价为 `json.dumps(fields, sort_keys=True, separators=(",", ":"), ensure_ascii=True)`，对象键排序，数组保持请求顺序，不额外重排权限或商品，也不添加额外字段。使用 UTF-8 签名下面三个字段组成的文本，末尾无额外换行：
+
+```text
+extore-cli-scope-request-v1
+EXTORE_ORIGIN
+规范 JSON
+```
+
+状态与领取分别签名下列文本，末尾无换行；`challenge` 为此次申请返回的挑战：
+
+```text
+extore-cli-scope-status-v1
+EXTORE_ORIGIN
+request_id
+public_key
+```
+
+```text
+extore-cli-scope-claim-v1
+EXTORE_ORIGIN
+request_id
+challenge
+public_key
+```
+
+公钥、签名、带时间 nonce、12 字符设备码及最短轮询间隔沿用后文 v1 设备码的编码规则。确认网址仍为 `/cli/device`；浏览器使用统一接口按设备码分派到新范围或旧链接流程，不能用 `staff_id` 代替新流程的商品与权限选择。申请理由是未经信任的显示文字。
+
+`options` 返回两个 64 字符的十六进制摘要。`snapshot_digest` 覆盖完整审核快照，不绑定浏览器会话；`review_digest` 还绑定当前审批浏览器身份。重新认证换了会话后，只有快照摘要未变时才能刷新审核摘要并继续确认；商品隐藏配置、权限、期限或授权修订发生变化时须重新展示并核对，不能当作普通会话轮换。approve 只提交 `review_digest`，不添加 `snapshot_digest` 请求字段；服务器会重新计算快照并验证。approve 不立即授予权限，claim 才提交；不能由 CLI Bearer、商品管理会话、提示词或页面打开代替店主本人批准。
+
+#### 后台授权元数据与撤销
+
+| 接口 | 身份与输入 | 结果 |
+| --- | --- | --- |
+| `GET /api/admin/pipeline-authorizations` | 店主或平台管理员；`view=active\|revoked\|all`、`limit` 最多 200；平台可用 `shop_id` 过滤 | 授权安全元数据数组，用于核对商品范围、权限、修订、期限、设备指纹与批准来源 |
+| `DELETE /api/admin/pipeline-authorizations/{id}` | 商家浏览器需近期认证；店主 CLI 需新操作签名；必填 JSON `{expected_revision}` | 撤销指定修订的授权，结束派生会话并交还未完成任务 |
+
+列表与审计不返回私钥、Bearer、请求设备码、签名挑战、专用管理链接原文或商品处理秘密。平台管理员可查询平台范围或用 `shop_id` 过滤，店主只能访问本店；列表本身不能替代实际访问时的有效性检查。`view=active` 按未撤销、未到期筛选，`view=revoked` 包括已撤销或已到期记录，`view=all` 保留两者。撤销使用列表中刚核对的 `revision`，服务器在同一事务核对并撤销；修订已改变返回 409，不撤销授权，也不释放任务。不要把过期列表中的确认结果用于撤销新的范围。
+
+授权过期、撤销、设备撤销或店铺停用后不能继续访问或续签；被撤销身份不能通过重放、换设备码或同私钥恢复。明确撤销整个授权会同时撤销它的商品根绑定及其下级链接、结束会话，并将这些处理者尚未完成的任务交还原商品队列；已经交付的任务保留。店主改密码或邮件密码重置撤销本店新授权。平台 `reset-auth` 按最后完整审核的 `issuer_role="root"` 撤销新授权，保留 `issuer_role="shop"` 的店主授权。追加经签名 claim 成功生效时更新 `issuer_role`、`issuer_shop_id` 与 `approved_actor`，审计同时记录原批准者与本次批准者；设备与各商品处理者身份保持稳定。原 v1 管理链接配置及业务数据按其原规则保留。
+
+### 既有管理链接设备码绑定（v1 兼容）
 
 | 接口 | 认证与请求 | 结果 |
 | --- | --- | --- |
@@ -479,7 +617,13 @@ public_key
 
 CLI 额度为 0 时，已存在且未撤销的**同链接、同公钥**可经新设备码审核恢复原设备，不产生新绑定或延长授权期限；新公钥仍会被拒绝。已撤销的旧设备 key 不能恢复，失效的链接或祖先也不能恢复。原私钥丢失后，新 key 需要该授权的剩余额度或新的合法商品授权，不能绕过额度。申请、批准与领取记录有审计；过期握手记录按批次清理，不删除有效设备或结束已有 CLI 会话。
 
-CLI 的 `--no-wait` 只返回公开确认网址、设备码、指纹与到期时间。相同 origin、商品、设备名称和本地 profile 再次执行设备码登录，会恢复尚未过期的申请及私钥；去掉 `--no-wait` 等待审核并完成 claim。申请过期而原私钥仍保留时，可申请新设备码恢复同一绑定。私钥、nonce 与待完成申请保存在本地私有配置中，不放进提示词、命令行参数或日志。绑定之后使用下文的通用挑战接口续签，不重复申请设备码。
+CLI 使用 `--existing-link` 明确选择这个 v1 流程；否则带 `--product` 的设备码登录使用前文新商品权限申请。既有链接绑定示例：
+
+```sh
+extore manage login --device-code --existing-link --origin https://extore.example.com --product PRODUCT_ID --no-wait
+```
+
+CLI 的 `--no-wait` 只返回公开确认网址、设备码、指纹与到期时间。相同 origin、商品、设备名称和本地 profile 再次执行设备码登录，保留 `--existing-link`，会恢复尚未过期的申请及私钥；去掉 `--no-wait` 等待审核并完成 claim。申请过期而原私钥仍保留时，可申请新设备码恢复同一绑定。私钥、nonce 与待完成申请保存在本地私有配置中，不放进提示词、命令行参数或日志。绑定之后使用下文的通用挑战接口续签，不重复申请设备码。
 
 ### 设备会话与旧链接绑定兼容
 
@@ -616,7 +760,7 @@ body_sha256
 
 店主 CLI 调用 `POST /api/auth/register/options` 取得真实 WebAuthn 创建选项（顶层附 `challenge_id`）；`POST /api/auth/register/verify` 接受 `{credential,name?,challenge_id}`。两次请求都需要新设备操作签名，注册验证仍要求正确 RP ID / Origin 下的真实 UV 结果，CLI 不能制造认证器。`GET /api/auth/passkeys` 和 `DELETE /api/auth/passkeys/{id}` 支持店主设备，删除需要新操作签名且不能删除最后一个 Passkey。
 
-`admin logout` 使用设备撤销接口，结束该设备全部会话并删除本地密钥；上表的低层 `/cli/owner/session` DELETE 仅退出当前会话。服务器 `reset-auth` 撤销平台管理员的 Passkey、浏览器会话和平台 CLI 设备，并清除认证挑战；各店账号和商品管理设备保留。店主改密码或邮件重置密码会撤销本店账号会话、店主设备和商品处理设备，保留商品管理链接配置和业务数据。
+`admin logout` 使用设备撤销接口，结束该设备全部会话并删除本地密钥；上表的低层 `/cli/owner/session` DELETE 仅退出当前会话。服务器 `reset-auth` 撤销平台管理员的 Passkey、浏览器会话和平台 CLI 设备，并清除认证挑战；各店账号、原管理链接设备及最后完整审核由店主批准的新商品/流水线授权保留，最后完整审核由平台管理员批准的新授权及派生身份被撤销。店主改密码或邮件重置密码会撤销本店账号会话、店主设备、商品处理设备和新商品/流水线授权，保留原商品管理链接配置和业务数据。
 
 ## 记录保留与清理
 

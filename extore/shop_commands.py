@@ -1,6 +1,7 @@
 """Named platform, shop-account and processor-profile CLI operations."""
 
 import os
+import re
 import stat
 from urllib.parse import quote
 
@@ -78,7 +79,7 @@ def add_commands(subcommands):
     profiles = _operations(
         subcommands.add_parser(
             "processor-profiles",
-            help="shop-isolated processor credentials; metadata only",
+            help="shop-isolated processor settings and workflow; secret values are write-only",
         ),
         ("list", "get", "create", "update", "revoke", "binding", "bind", "unbind"),
     )
@@ -88,6 +89,16 @@ def add_commands(subcommands):
         profiles[operation].add_argument("id", help="processor-profile UUID")
     for operation in ("create", "update"):
         business._json_arguments(profiles[operation])
+        profiles[operation].description = (
+            "Write processor configuration and workflow variables/secrets/runtime "
+            "using private JSON input; secret values are never returned."
+        )
+        for action in profiles[operation]._actions:
+            if action.dest == "json_file":
+                action.help = (
+                    "mode-600 JSON file containing configuration and/or workflow; "
+                    "never put secret values in command arguments"
+                )
     for operation in ("binding", "bind", "unbind"):
         for action in profiles[operation]._actions:
             if action.dest == "product":
@@ -147,14 +158,76 @@ def _result(client, owner, args, method, path, *, body=None, query=None, secret=
     if secret:
         with business.OutputFile(args, "account-secret") as output:
             return output.write(request())
-    value = business._public(request())
+    value = request()
     if path.startswith(PROFILE_PREFIX):
         value = profile_metadata(value)
+    else:
+        value = business._public(value)
     return business._finish(args, {"ok": True, "result": value})
 
 
+def _workflow_metadata(value):
+    """The public workflow contract contains no secret values or run commands."""
+    if not isinstance(value, dict):
+        return {}
+
+    def valid_name(name):
+        return (
+            isinstance(name, str)
+            and re.fullmatch(r"[A-Z][A-Z0-9_]{0,63}", name) is not None
+            and not name.startswith("EXTORE_")
+        )
+
+    variables = value.get("variables", {})
+    variables = variables if isinstance(variables, dict) else {}
+    names = value.get("configured_secret_names", [])
+    names = names if isinstance(names, list) else []
+    secret_names = {name for name in names if valid_name(name)}
+    unexpected_secrets = value.get("secrets", {})
+    if isinstance(unexpected_secrets, dict):
+        secret_names.update(name for name in unexpected_secrets if valid_name(name))
+    names = list(dict.fromkeys(name for name in names if valid_name(name)))[:64]
+    # A malformed response must not echo a value classified as a secret, even
+    # when it also appears in the ordinary-variable map.
+    ordinary = {}
+    size = 0
+    for name, text in variables.items():
+        if (
+            not valid_name(name)
+            or name in secret_names
+            or not isinstance(text, str)
+            or len(ordinary) >= 64
+        ):
+            continue
+        try:
+            length = len(text.encode("utf-8"))
+        except UnicodeError:
+            continue
+        if length > 8192 or size + length > 65536:
+            continue
+        ordinary[name] = text
+        size += length
+    bounds = {
+        "timeout_seconds": (10, 120),
+        "memory_mb": (64, 512),
+        "cpu_seconds": (1, 120),
+        "max_output_bytes": (65536, 1000000),
+    }
+    runtime = value.get("runtime", {})
+    runtime = runtime if isinstance(runtime, dict) else {}
+    return {
+        "variables": ordinary,
+        "runtime": {
+            key: runtime[key]
+            for key, (low, high) in bounds.items()
+            if type(runtime.get(key)) is int and low <= runtime[key] <= high
+        },
+        "configured_secret_names": names,
+    }
+
+
 def profile_metadata(value):
-    """Private exports cannot turn profile-vault data into plaintext."""
+    """Keep editable ordinary settings while excluding the profile's secrets."""
     if isinstance(value, list):
         return [profile_metadata(item) for item in value]
     if not isinstance(value, dict):
@@ -173,9 +246,30 @@ def profile_metadata(value):
         "profile",
         "ok",
     }
-    return {
+    result = {
         key: profile_metadata(item) for key, item in value.items() if key in allowed
     }
+    if "configuration" in value or "configured_fields" in value:
+        from .processors import configuration_fields, editable_configuration
+
+        try:
+            fields = configuration_fields(value.get("processor_id"))
+            result["configuration"] = editable_configuration(
+                value.get("processor_id"), value.get("configuration", {})
+            )
+        except (ValueError, KeyError, TypeError):
+            fields = {}
+            result["configuration"] = {}
+        configured = value.get("configured_fields", [])
+        result["configured_fields"] = (
+            list(dict.fromkeys(name for name in configured if name in fields))
+            if isinstance(configured, list)
+            and all(isinstance(name, str) for name in configured)
+            else []
+        )
+    if "workflow" in value:
+        result["workflow"] = _workflow_metadata(value["workflow"])
+    return result
 
 
 def dispatch(client, owner, args):

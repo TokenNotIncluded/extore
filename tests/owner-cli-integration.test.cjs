@@ -212,11 +212,30 @@ test("approval and QR modules load before app startup with revised assets", () =
   assert.ok(owner >= 0 && account > owner && app > account);
   assert.match(scripts[owner][1], /\bdefer\b/);
   assert.match(scripts[owner][2], /\?v=20261007-shops$/);
-  assert.match(scripts[app][2], /\?v=20261007-device-code$/);
+  assert.match(scripts[app][2], /\?v=20261007-workflows$/);
   const device = scripts.findIndex((script) => script[2].startsWith("/static/device-login.js"));
   const encoder = scripts.findIndex((script) => script[2].startsWith("/static/vendor/qrcodegen.js"));
   const qr = scripts.findIndex((script) => script[2].startsWith("/static/totp-qr.js"));
   assert.ok(encoder >= 0 && qr > encoder && account > qr && device > account && app > device);
-  assert.match(scripts[account][2], /\?v=20261007-mobile-2fa$/);
-  assert.match(scripts[device][2], /\?v=20261007-device-code$/);
+  assert.match(scripts[account][2], /\?v=20261007-workflows$/);
+  assert.match(scripts[device][2], /\?v=20261007-scoped-pipelines$/);
+});
+
+test("merchant dashboard displays escaped shop name and email and refreshes without replacing the form", () => {
+  const page = appFixture();
+  page.navigate("/admin");
+  page.context.window.ExtoreAccount = { rootScope: (auth) => auth.role === "admin" && auth.superadmin === true && auth.shop_id === null };
+  const auth = { role: "admin", shop_id: "shop-identity", superadmin: false, shop_name: '店铺 <script>alert(1)</script>', shop_email: 'owner+tag@example.test', session_id: "session-identity" };
+  page.context.acceptAuth(auth);
+  page.context.shell();
+  assert.match(page.node("#app").innerHTML, /店铺 &lt;script&gt;alert\(1\)&lt;\/script&gt; · owner\+tag@example\.test/);
+  assert.doesNotMatch(page.node("#app").innerHTML, /店铺 · shop-identity/);
+  const shell = page.node("#app").innerHTML;
+  page.node("#workspace").innerHTML = '<form id="unsaved-product">unsaved</form>';
+  page.context.acceptAuth({ ...auth, shop_name: '改名后的店铺', shop_email: 'updated@example.test' });
+  assert.equal(page.node("#management-identity").textContent, '改名后的店铺 · updated@example.test');
+  assert.equal(page.node("#app").innerHTML, shell);
+  assert.equal(page.node("#workspace").innerHTML, '<form id="unsaved-product">unsaved</form>');
+  page.context.acceptAuth({ role: "admin", shop_id: null, superadmin: true, shop_name: 'stale shop', shop_email: 'stale@example.test' });
+  assert.equal(page.node("#management-identity").textContent, '超级管理员 · 平台范围');
 });

@@ -49,16 +49,33 @@ def status(request: Request):
 
         registration = registration_enabled(c)
     s = None
+    owner_identity = {}
     try:
         s = session(request, ("admin", "bootstrap", "staff"))
         role = s["role"]
+        if role == "admin" and s.get("shop_id") is not None:
+            from .security import authorize_management
+            from .shops import shop_row
+
+            # Read display metadata from the verified account scope, never a
+            # requested product/shop selector. Recheck under the same snapshot.
+            with db() as c:
+                authorize_management(c, s)
+                shop = shop_row(c, s["shop_id"])
+                owner_identity = {
+                    "shop_name": shop["name"],
+                    "shop_email": shop["email"],
+                }
     except Exception as e:
         from fastapi import HTTPException
 
         if not isinstance(e, HTTPException):
             raise
+        s = None
+        owner_identity = {}
         role = None
     result = {
+        **owner_identity,
         "configured": configured or bool(passkeys),
         "password_enabled": configured and not passkeys,
         "role": role,

@@ -59,6 +59,7 @@ def public_product(p):
             "processor_profile",
             "processor_profile_id",
             "processor_binding",
+            "configured_fields",
         )
     }
 

@@ -9,6 +9,37 @@ from typing import Callable
 from ..variants import default_variant
 
 MAX_INPUT_BYTES = 200000
+MAX_ENVIRONMENT_FIELDS = 128
+MAX_ENVIRONMENT_VALUE_BYTES = 8192
+MAX_ENVIRONMENT_BYTES = 65536
+
+
+def _freeze_environment(value):
+    """Copy server-owned workflow values without including them in errors."""
+    if not isinstance(value, Mapping) or len(value) > MAX_ENVIRONMENT_FIELDS:
+        raise ValueError("invalid task environment")
+    result = {}
+    total_bytes = 0
+    for name, content in value.items():
+        if (
+            not isinstance(name, str)
+            or not re.fullmatch(r"[A-Z][A-Z0-9_]{0,63}", name)
+            or not isinstance(content, str)
+            or "\x00" in content
+        ):
+            raise ValueError("invalid task environment")
+        try:
+            content_bytes = len(content.encode("utf-8"))
+        except UnicodeError:
+            raise ValueError("invalid task environment") from None
+        total_bytes += content_bytes
+        if (
+            content_bytes > MAX_ENVIRONMENT_VALUE_BYTES
+            or total_bytes > MAX_ENVIRONMENT_BYTES
+        ):
+            raise ValueError("task environment too large")
+        result[name] = content
+    return MappingProxyType(result)
 
 
 def _steps(value, *, allow_empty=False):
@@ -106,6 +137,7 @@ class Task:
     steps: tuple = field(default_factory=tuple)
     completed_steps: tuple = field(default_factory=tuple)
     shop_context: ShopContext = field(default_factory=ShopContext)
+    environment: Mapping[str, str] = field(default_factory=dict, repr=False)
 
     def __post_init__(self):
         plan = _steps(self.steps, allow_empty=True)
@@ -120,6 +152,7 @@ class Task:
         object.__setattr__(self, "steps", _freeze_steps(plan))
         object.__setattr__(self, "completed_steps", completed)
         object.__setattr__(self, "shop_context", context)
+        object.__setattr__(self, "environment", _freeze_environment(self.environment))
 
     @property
     def idempotency_key(self):

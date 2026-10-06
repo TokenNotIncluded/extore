@@ -5,7 +5,7 @@ pkgdesc='Single-merchant redemption and fulfillment service'
 arch=('x86_64')
 url='https://github.com/TokenNotIncluded/extore'
 license=('MIT')
-depends=('python')
+depends=('python' 'bubblewrap>=0.12' 'libseccomp')
 makedepends=('uv')
 options=('!strip' '!debug')
 backup=('etc/extore/extore.env')

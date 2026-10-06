@@ -164,14 +164,33 @@ def _link_token(value):
 
 
 def _device(c, device_id):
+    from .pipeline_scopes import check_device_scope
+
     row = c.execute("SELECT * FROM cli_devices WHERE id=?", (device_id,)).fetchone()
     if row is None or row["revoked"]:
         fail("CLI 设备授权已失效", 401)
-    return row, staff_authorization(c, row["staff_id"])
+    staff = staff_authorization(c, row["staff_id"])
+    pipeline_scope = check_device_scope(c, row, staff)
+    if pipeline_scope is not None:
+        staff.update(
+            authorization_id=pipeline_scope["id"],
+            authorization_revision=pipeline_scope["revision"],
+            scope=pipeline_scope["kind"],
+        )
+    return row, staff
+
+
+def _scope_metadata(staff):
+    return {
+        key: staff[key]
+        for key in ("authorization_id", "authorization_revision", "scope")
+        if key in staff
+    }
 
 
 def _bind_view(device, staff, already):
     return {
+        **_scope_metadata(staff),
         "device_id": device["id"],
         "product_id": staff["product_id"],
         "shop_id": staff["shop_id"],
@@ -232,6 +251,7 @@ async def authorize_cli(request: Request):
         if existing is not None:
             if existing["revoked"]:
                 fail("CLI 设备授权已撤销，请申请新的管理链接", 401)
+            existing, staff = _device(c, existing["id"])
             if ticket and not ticket["consumed"]:
                 c.execute(
                     "UPDATE cli_bind_tickets SET consumed=1,bound_device_id=? WHERE digest=?",
@@ -331,6 +351,7 @@ async def cli_session(request: Request):
         c.execute("UPDATE cli_devices SET last_seen=? WHERE id=?", (now, device["id"]))
         audit(c, staff["id"], "session.create", sid)
         return {
+            **_scope_metadata(staff),
             "access_token": access,
             "token_type": "Bearer",
             "expires": expires,
@@ -352,6 +373,7 @@ def cli_status(request: Request):
             "SELECT config FROM products WHERE id=?", (s["product_id"],)
         ).fetchone()
         result = {
+            **_scope_metadata(s),
             "role": "staff",
             "channel": "cli",
             "origin": ORIGIN,
@@ -458,7 +480,7 @@ def _devices(request, roles):
     s = session(request, roles)
     with db() as c:
         scope = _link_scope(c, s)
-        sql = "SELECT cli_devices.*,staff.name AS link_name,staff.product_id,products.config FROM cli_devices JOIN staff ON staff.id=cli_devices.staff_id JOIN products ON products.id=staff.product_id"
+        sql = "SELECT cli_devices.*,staff.name AS link_name,staff.product_id,products.config,products.shop_id AS product_shop_id FROM cli_devices JOIN staff ON staff.id=cli_devices.staff_id JOIN products ON products.id=staff.product_id"
         args = ()
         if scope is not None:
             sql += (
@@ -469,19 +491,49 @@ def _devices(request, roles):
         for row in c.execute(
             sql + " ORDER BY cli_devices.created DESC", args
         ).fetchall():
+            mapped = c.execute(
+                "SELECT pipeline_authorizations.id,pipeline_authorizations.revision,"
+                "pipeline_authorizations.kind,pipeline_authorizations.shop_id "
+                "FROM pipeline_bindings JOIN pipeline_authorizations "
+                "ON pipeline_authorizations.id=pipeline_bindings.authorization_id "
+                "WHERE pipeline_bindings.device_id=?",
+                (row["id"],),
+            ).fetchone()
             active = not row["revoked"]
             if active:
                 try:
-                    staff_authorization(c, row["staff_id"])
+                    _device(c, row["id"])
                 except HTTPException:
                     active = False
             result.append(
                 {
+                    **(
+                        {
+                            "authorization_id": mapped["id"],
+                            "authorization_revision": mapped["revision"],
+                            "scope": mapped["kind"],
+                        }
+                        if mapped is not None
+                        else {}
+                    ),
                     "id": row["id"],
                     "link_id": row["staff_id"],
                     "link_name": row["link_name"],
                     "product_id": row["product_id"],
-                    "product_name": json.loads(row["config"]).get("name"),
+                    "product_name": (
+                        json.loads(row["config"]).get("name")
+                        if (
+                            (
+                                mapped is None
+                                or mapped["shop_id"] == row["product_shop_id"]
+                            )
+                            and (
+                                s["role"] != "admin"
+                                or s.get("shop_id") in (None, row["product_shop_id"])
+                            )
+                        )
+                        else None
+                    ),
                     "client_name": row["client_name"],
                     "fingerprint": row["fingerprint"],
                     "created": row["created"],
@@ -500,9 +552,43 @@ def _revoke_device(device_id, request, roles):
     with db() as c:
         scope = _link_scope(c, s)
         row = c.execute("SELECT * FROM cli_devices WHERE id=?", (device_id,)).fetchone()
-        if row is None or (scope is not None and row["staff_id"] not in scope):
+        if row is None:
             fail("CLI 设备不存在", 404)
         actor = session_actor(s)
+        mapped = c.execute(
+            "SELECT pipeline_authorizations.id,pipeline_authorizations.shop_id "
+            "FROM pipeline_bindings JOIN pipeline_authorizations "
+            "ON pipeline_authorizations.id=pipeline_bindings.authorization_id "
+            "WHERE pipeline_bindings.device_id=?",
+            (device_id,),
+        ).fetchone()
+        if mapped is not None:
+            # The original shop remains the revocation owner even when the
+            # product has moved. A new product owner cannot revoke its other
+            # previously approved products through the device compatibility API.
+            if (
+                s["role"] == "admin"
+                and s.get("shop_id") not in (None, mapped["shop_id"])
+            ) or (s["role"] == "staff" and row["staff_id"] not in scope):
+                fail("CLI 设备不存在", 404)
+            from .pipeline_scopes import revoke_authorization
+
+            before = c.execute(
+                "SELECT count(*) FROM sessions WHERE revoked=0"
+            ).fetchone()[0]
+            changed = revoke_authorization(c, mapped["id"], actor)
+            after = c.execute(
+                "SELECT count(*) FROM sessions WHERE revoked=0"
+            ).fetchone()[0]
+            return {
+                "ok": True,
+                "id": device_id,
+                "authorization_id": mapped["id"],
+                "revoked_sessions": before - after,
+                "released_jobs": changed["jobs"],
+            }
+        if scope is not None and row["staff_id"] not in scope:
+            fail("CLI 设备不存在", 404)
         if not row["revoked"]:
             c.execute("UPDATE cli_devices SET revoked=1 WHERE id=?", (device_id,))
             audit(c, actor, "cli.device.revoke", device_id)

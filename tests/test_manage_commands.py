@@ -442,7 +442,7 @@ def test_processor_vault_is_owner_only_and_product_cli_preserves_binding(
         for item in manager["owner"].get("/api/admin/products").json()
         if item["id"] == manager["pid"]
     )
-    assert stored["processor_config"] == {}
+    assert stored["processor_config"] == {"template": "Hello $name"}
     assert manager["owner"].get(binding_path).json() == binding
     assert "Hello $name" not in json.dumps(updated)
     assert (

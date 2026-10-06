@@ -12,6 +12,7 @@
 .device-login .section-head > a {
   flex-shrink: 0;
   padding-block: 10px;
+  min-height: 44px;
 }
 .device-login input,
 .device-login select {
@@ -59,6 +60,68 @@
   width: 100%;
   max-width: 100%;
   margin-inline: 0;
+}
+.device-selection-fields {
+  min-width: 0;
+  border: 0;
+  margin-inline: 0;
+  padding-inline: 0;
+}
+.device-selection-fields legend {
+  font-weight: 600;
+  padding: 0;
+}
+.device-product-choices {
+  max-height: min(45vh, 360px);
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  scrollbar-color: var(--scroll-thumb) transparent;
+  padding-right: 4px;
+}
+.device-checkbox {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  min-height: 48px;
+  padding-block: 12px;
+  cursor: pointer;
+}
+.device-checkbox + .device-checkbox {
+  border-top: 1px dashed var(--dashed-line);
+}
+.device-login .device-checkbox input {
+  width: 20px;
+  height: 20px;
+  min-height: 20px;
+  margin: 3px 0 0;
+  flex: 0 0 20px;
+}
+.device-checkbox > span {
+  min-width: 0;
+}
+.device-checkbox .caption,
+.device-product-summary .caption {
+  display: block;
+}
+.device-product-summary {
+  padding-left: 22px;
+}
+.device-product-summary li + li {
+  margin-top: 12px;
+}
+.device-change-label {
+  display: inline-block;
+  margin-left: 8px;
+  color: var(--green);
+  font-size: 13px;
+}
+.device-request-reason {
+  white-space: pre-wrap;
+}
+.device-requested-scope > summary {
+  min-height: 44px;
+  padding-block: 10px;
+  cursor: pointer;
 }
 @media (max-width: 480px) {
   .device-login .section-head {

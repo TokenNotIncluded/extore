@@ -279,7 +279,7 @@ def test_platform_named_commands_keep_smtp_private_and_restrict_merchant_account
         workspace.command("account", "get", "--grant", device)
 
 
-def test_processor_profiles_never_export_vault_and_cannot_cross_shop(workspace):
+def test_processor_profiles_read_back_plain_templates_and_cannot_cross_shop(workspace):
     sid_a, password, _ = seed_shop("a@example.test")
     sid_b, _, _ = seed_shop("b@example.test")
     a, b = (
@@ -315,7 +315,8 @@ def test_processor_profiles_never_export_vault_and_cannot_cross_shop(workspace):
         "--json-file",
         workspace.file(definition),
     )["result"]
-    assert profile["shop_id"] == sid_a and "configuration" not in profile
+    assert profile["shop_id"] == sid_a
+    assert profile["configuration"] == {"template": "PRIVATE TEMPLATE $name"}
     workspace.command(
         "processor-profiles",
         "bind",
@@ -355,7 +356,8 @@ def test_processor_profiles_never_export_vault_and_cannot_cross_shop(workspace):
         "--output",
         str(output),
     )
-    assert "PRIVATE TEMPLATE" not in json.dumps(exported) + output.read_text()
+    assert "PRIVATE TEMPLATE" not in json.dumps(exported)
+    assert "PRIVATE TEMPLATE" in output.read_text()
     assert stat.S_IMODE(output.stat().st_mode) == 0o600
 
 

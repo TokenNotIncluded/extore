@@ -1,0 +1,127 @@
+.pipeline-authorizations {
+  min-width: 0;
+  overflow-wrap: anywhere;
+  margin-block: 32px;
+}
+.pipeline-authorizations .section-head {
+  align-items: start;
+  gap: 16px;
+}
+.pipeline-authorizations .section-head > div,
+.pipeline-authorizations .field,
+.pipeline-authorizations .account-page {
+  min-width: 0;
+}
+.pipeline-authorizations h2,
+.pipeline-authorizations h3 {
+  margin-top: 0;
+}
+.pipeline-authorizations input,
+.pipeline-authorizations select {
+  min-height: 44px;
+  min-width: 0;
+  font-size: 16px;
+}
+.pipeline-authorizations button,
+.pipeline-authorizations summary {
+  min-height: 44px;
+}
+.pipeline-prompt,
+.pipeline-filters {
+  margin-block: 20px;
+}
+.pipeline-filters {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px 24px;
+  align-items: start;
+}
+.pipeline-filters > details {
+  flex: 1;
+  min-width: min(100%, 220px);
+}
+.pipeline-authorizations summary {
+  cursor: pointer;
+  padding-block: 10px;
+}
+.pipeline-authorizations .actions {
+  flex-wrap: wrap;
+  gap: 12px;
+}
+.pipeline-authorization {
+  padding-block: 24px;
+  border-top: 1px dashed var(--dashed-line);
+}
+.pipeline-fingerprint {
+  overflow-wrap: anywhere;
+  font-size: 14px;
+}
+.pipeline-details {
+  display: grid;
+  grid-template-columns: max-content minmax(0, 1fr);
+  gap: 8px 20px;
+}
+.pipeline-details dt {
+  color: var(--muted);
+}
+.pipeline-details dd {
+  min-width: 0;
+  margin: 0;
+}
+.pipeline-authorizations .caption.mono,
+.pipeline-permissions .caption,
+.pipeline-products .caption {
+  display: block;
+}
+.pipeline-products {
+  max-height: min(50vh, 360px);
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  padding-right: 8px;
+  scrollbar-color: var(--scroll-thumb) transparent;
+}
+.pipeline-products,
+.pipeline-permissions {
+  padding-left: 22px;
+}
+.pipeline-products li + li,
+.pipeline-permissions li + li {
+  margin-top: 12px;
+}
+.pipeline-authorizations #pipeline-confirmation:empty,
+.pipeline-authorizations #pipeline-error:empty,
+.pipeline-authorizations #pipeline-notice:empty {
+  display: none;
+}
+.pipeline-authorizations .account-page {
+  width: 100%;
+  max-width: 100%;
+  margin-inline: 0;
+}
+@media (max-width: 480px) {
+  .pipeline-authorizations .section-head {
+    flex-direction: column;
+  }
+  .pipeline-authorizations .section-head button,
+  .pipeline-authorizations .actions button,
+  .pipeline-prompt > button {
+    width: 100%;
+  }
+  .pipeline-authorizations .panel {
+    padding: 24px 18px 30px;
+  }
+  .pipeline-details {
+    grid-template-columns: minmax(0, 1fr);
+    gap: 2px;
+  }
+  .pipeline-details dd {
+    margin-bottom: 12px;
+  }
+  .pipeline-filters {
+    flex-direction: column;
+  }
+  .pipeline-filters > details,
+  .pipeline-filters > button {
+    width: 100%;
+  }
+}

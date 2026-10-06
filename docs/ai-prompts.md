@@ -11,7 +11,10 @@
 ```text
 你负责 Extore 商品 PRODUCT_ID，使用 extore manage。
 
-用 uv tool install --upgrade 'extore>=0.7.0' 安装后检查 extore --version。如果本机尚未获授权，执行 extore manage login --device-code --origin SERVER --product PRODUCT_ID --client-name '商品制作 Bot' --no-wait，把 stdout JSON 的公开授权 URL、设备码和指纹交给我在浏览器核对批准；不索要、不复制或提交我的管理链接。批准后重复相同命令并去掉 --no-wait，保持相同的私密 profile、origin、product 和 client-name，继续这次申请并保存设备授权。保留本机私密配置，后续自动签名续签；不要让我去访问你的云端终端，不要把设备私钥、会话或私密配置贴到聊天里。
+用 uv tool install --upgrade 'extore>=0.7.0' 安装后检查 extore --version。如果本机尚未获授权，执行 extore manage login --device-code --origin SERVER --product PRODUCT_ID --client-name '商品制作 Bot' --permissions queue.view,queue.process,queue.retry --no-wait，把 stdout JSON 的公开授权 URL、设备码和指纹交给我以店主身份在浏览器核对批准；不需要预先存在管理链接，不索要、不复制或提交访问密钥。批准后重复相同命令并去掉 --no-wait，保持相同的私密 profile、目标、权限、原因和 client-name，继续这次申请并保存设备授权。保留本机私密配置，后续自动签名续签；不要让我去访问你的云端终端，不要把设备私钥、会话或私密配置贴到聊天里。
+
+若我明确要求处理本店当前全部队列商品，可改为 login --device-code --origin SERVER --shop SHOP_ID --pipelines-all --no-wait；权限仍仅 queue.view/queue.process/queue.retry，商品名单为批准的快照，未来新商品不会自动加入。记录 authorization.id 和各商品 grants[].id。
+需要新增商品或权限时停止依赖缺失的权限，不借用其他授权或转用 owner/admin。对店铺快照用 authorize --authorization AUTH_ID --product NEW_PRODUCT_ID --reason '接管新商品' --no-wait，或 --pipelines-all 重新申请当前清单；新增权限用 --permissions 完整期望集合，保留已有权限。单商品只增加本商品权限，另一个商品要另发 login --product。批准后相同命令去掉 --no-wait，拒绝或过期继续保留旧范围。兼容旧链接的人员可加 --existing-link，仅绑定本人浏览器已有权限。
 
 先执行 extore manage products 和 extore manage queues --all 查看摘要。
 只选择该商品当前需要处理的任务，用 extore manage job JOB_ID --product PRODUCT_ID 读取任务自己的输入、输出和步骤快照。
@@ -46,7 +49,7 @@ extore manage complete JOB_ID --product PRODUCT_ID --output-file result.json
 已批准后用 admin login-status 完成绑定，后续让本地设备密钥自动续签。
 先 products/queues 看摘要，按需读单商品 schema 或单任务 job。
 改商品用 product update 的顶层 patch，保留未指定配置；新商品可查询 templates 再 quick/create。
-制卡、创建管理链接和导出获授权的商品配置让 CLI 保存到新 0600 文件，给我路径和数量等摘要，不把原卡密、授权链接或秘密配置贴到聊天里。处理器档案的秘密不能读回，用 processor-profiles 查询元数据、按私密文件更新并显式绑定商品。
+制卡、创建管理链接和导出获授权的商品配置让 CLI 保存到新 0600 文件，给我路径和数量等摘要，不把原卡密、授权链接或秘密配置贴到聊天里。用 processor-profiles 读取明确非秘密的模板、workflow 普通变量和运行限制；密钥只显示已配置名称，真实值不能读回。配置更新通过 0600 私密 JSON 文件写入，显式 bind 后只影响之后新发的卡密，旧卡和任务保留原修订。
 上传材料与交付完成是两步；完成前按目标任务的输出快照校验文件 ID 和结果。
 只在我要求的操作范围内处理，使用明确商品 ID；涉及全店授权与设备时说明具体目标。
 Passkey 的 register-options/verify 只接入真实 WebAuthn 仪式，不能自行制造安全密钥注册结果。

@@ -19,6 +19,9 @@ def clean():
     init()
     with db() as c:
         for table in (
+            "cli_scope_requests",
+            "pipeline_bindings",
+            "pipeline_authorizations",
             "mail_outbox",
             "account_tokens",
             "shop_integration_keys",

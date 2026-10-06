@@ -218,6 +218,14 @@ def _verify_second_factor(c, shop, code, backup_code):
 def revoke_shop_auth(c, sid, action="account.auth.reset"):
     from .link_access import revoke_session
     from .owner_cli_auth import revoke_owner_devices
+    from .pipeline_scopes import revoke_authorizations
+
+    # Persistent pipeline scopes survive ordinary logout, but never account
+    # recovery. Root recovery must leave independently approved shop scopes.
+    if sid is None:
+        revoke_authorizations(c, actor=_actor(sid), issuer_role="root")
+    else:
+        revoke_authorizations(c, shop_id=sid, actor=_actor(sid))
 
     for row in c.execute(
         "SELECT digest FROM sessions WHERE shop_id IS ? AND role IN ('admin','bootstrap') AND revoked=0",

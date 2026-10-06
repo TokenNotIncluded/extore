@@ -250,7 +250,7 @@ def test_existing_product_template_copies_valid_config_without_orders_or_cards(
     if mode == "script":
         assert product["processor_config"] == {}
         assert private_template not in json.dumps(result)
-        assert source["processor_config"] == {}
+        assert source["processor_config"] == {"template": private_template}
         from extore.processor_profiles import runtime_configuration
 
         with db() as c:
@@ -367,7 +367,8 @@ def test_resource_clone_clears_delivery_secrets_until_new_resource_is_configured
     owner.cookies.clear()
     owner.cookies.set("extore_session", value)
     response = owner.put("/api/admin/products/" + clone["id"], json=configured)
-    assert response.status_code == 200 and response.json()["processor_config"] == {}
+    assert response.status_code == 200
+    assert response.json()["processor_config"] == {"message": "新资源使用说明"}
     response = owner.post(
         "/api/admin/cards", json={"product_id": clone["id"], "count": 1}
     )

@@ -30,9 +30,10 @@ def normalize_processor_product(config, *, strict_schema=True, allow_incomplete=
             declared = config.get(name)
             if declared and _fields(declared) != _fields(spec[name]):
                 raise ValueError("顾客填写项和输出字段由商品处理器代码定义")
+    supplied = config.get("processor_config", {})
     configuration = validate_configuration(
         processor_id,
-        config.get("processor_config", {}),
+        supplied,
         allow_incomplete=allow_incomplete,
     )
     return {
@@ -41,7 +42,9 @@ def normalize_processor_product(config, *, strict_schema=True, allow_incomplete=
         "delivery": spec["delivery"],
         "parameters": spec["parameters"],
         "outputs": spec["outputs"],
-        "processor_config": configuration,
+        # Keep omitted keys distinguishable from explicitly cleared text. The
+        # credential store applies defaults after merging an existing binding.
+        "processor_config": {key: configuration[key] for key in supplied},
     }
 
 
@@ -64,16 +67,37 @@ def normalize_product(config, *, allow_incomplete=True):
     )
 
 
-def public_configuration(config):
-    """Metadata-only configuration view for links lacking fulfillment access."""
-    if config.get("mode") != "script" or not config.get("processor_id"):
+def configuration_fields(processor_id):
+    """Only processor code may classify a configuration field as readable."""
+    spec = specification(processor_id)
+    fields = {}
+    for field in spec.get("configuration", []):
+        key = field.get("key") if isinstance(field, dict) else None
+        if not isinstance(key, str):
+            continue
+        # Conflicting or duplicate declarations remain secret rather than
+        # allowing a later declaration to broaden an earlier classification.
+        if key in fields:
+            fields[key] = {**field, "secret": True}
+        else:
+            fields[key] = field
+    return fields
+
+
+def editable_configuration(processor_id, values):
+    """Return explicitly non-secret fields for an already authorized owner."""
+    if not isinstance(values, dict):
         return {}
-    spec = specification(config["processor_id"])
-    secret_keys = {
-        field["key"] for field in spec["configuration"] if field.get("secret")
-    }
+    fields = configuration_fields(processor_id)
     return {
         key: value
-        for key, value in config.get("processor_config", {}).items()
-        if key not in secret_keys
+        for key, value in values.items()
+        if key in fields
+        and fields[key].get("secret") is False
+        and isinstance(value, str)
     }
+
+
+def public_configuration(config):
+    """Shared product exports and management links never contain shop settings."""
+    return {}

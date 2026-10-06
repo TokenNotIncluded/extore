@@ -2,12 +2,8 @@ import asyncio
 import fcntl
 import ipaddress
 import json
-import os
 import socket
-import sys
-import tempfile
 import time
-from pathlib import Path
 from urllib.parse import urlsplit
 
 import httpx
@@ -137,7 +133,7 @@ async def execute_script(row, p):
     row = dict(row)
     # Trust the database's issuance binding, never caller/customer metadata or
     # the product's current account selection for an already-issued card.
-    from .processor_profiles import runtime_configuration
+    from .processor_profiles import runtime_execution
 
     with db() as c:
         trusted_job = job(c, row["id"])
@@ -147,12 +143,13 @@ async def execute_script(row, p):
             or trusted_job["state"] != "processing"
         ):
             raise ValueError("处理任务已失效")
-        configuration, shop_context = runtime_configuration(
+        configuration, shop_context, workflow = runtime_execution(
             c, trusted_job, p["processor_id"]
         )
         row["params"] = trusted_job["params"]
     p = {**p, "processor_config": configuration}
     row["shop_context"] = shop_context
+    row["workflow"] = workflow
     # Freeze trusted issuance metadata separately from all customer parameters.
     if "variant" not in row:
         if row.get("card_id"):
@@ -168,33 +165,22 @@ async def execute_script(row, p):
                 )
         else:
             row["steps"], row["completed_steps"] = [], []
-    with tempfile.TemporaryDirectory(prefix="extore-processor-") as scratch:
-        return await _execute_processor(row, p, scratch, extore_processors)
+    return await _execute_processor(row, p, extore_processors)
 
 
-async def _execute_processor(row, p, scratch, processor_package):
-    proc = await asyncio.create_subprocess_exec(
-        sys.executable,
-        "-m",
-        "extore_processors",
-        p["processor_id"],
-        stdin=asyncio.subprocess.PIPE,
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.DEVNULL,
-        cwd=scratch,
-        env={
-            "PATH": os.environ.get("PATH", ""),
-            "PYTHONPATH": os.pathsep.join(
-                (
-                    str(Path(__file__).resolve().parent.parent),
-                    str(Path(processor_package.__file__).resolve().parent.parent),
-                )
-            ),
-            "PYTHONUNBUFFERED": "1",
-        },
-        limit=150000,
-        start_new_session=True,
+async def _execute_processor(row, p, processor_package):
+    from .processor_runtime import (
+        MAX_INPUT_BYTES,
+        MAX_PROGRESS_EVENTS,
+        environment,
+        launch_command,
+        process_environment,
+        sandbox_command,
+        validate_workflow,
     )
+
+    workflow = validate_workflow(row["workflow"])
+    limits = workflow["runtime"]
     payload = {
         "params": json.loads(row["params"]),
         "configuration": p["processor_config"],
@@ -202,26 +188,52 @@ async def _execute_processor(row, p, scratch, processor_package):
         "steps": [{"id": step["id"], "label": step["label"]} for step in row["steps"]],
         "completed_steps": row.get("completed_steps", []),
         "shop_context": row["shop_context"],
+        "environment": environment(workflow),
     }
+    encoded_payload = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+    if len(encoded_payload) > MAX_INPUT_BYTES:
+        raise ValueError("处理器任务输入超过限制")
+    sandbox = await asyncio.to_thread(
+        sandbox_command, p["processor_id"], processor_package
+    )
+    proc = await asyncio.create_subprocess_exec(
+        *launch_command(sandbox, workflow),
+        stdin=asyncio.subprocess.PIPE,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.DEVNULL,
+        cwd="/",
+        env=process_environment(workflow),
+        limit=131072,
+        start_new_session=True,
+        close_fds=True,
+    )
     result = None
     total = 0
+    updates = 0
 
-    async def read():
-        nonlocal result, total
-        proc.stdin.write(json.dumps(payload).encode())
+    async def send():
+        proc.stdin.write(encoded_payload)
         await proc.stdin.drain()
         proc.stdin.close()
+
+    async def read():
+        nonlocal result, total, updates
         while True:
             line = await proc.stdout.readline()
             if not line:
                 break
             total += len(line)
-            if total > 1000000:
+            if total > limits["max_output_bytes"]:
                 raise ValueError("处理器输出超过限制")
             value = json.loads(line)
+            if not isinstance(value, dict):
+                raise ValueError("处理器输出格式错误")
             if result is not None:
                 raise ValueError("结果后不能继续输出")
             if value.get("kind") == "progress":
+                updates += 1
+                if updates > MAX_PROGRESS_EVENTS:
+                    raise ValueError("处理器进度更新超过限制")
                 with db() as c:
                     current = job(c, row["id"])
                     if (
@@ -265,13 +277,25 @@ async def _execute_processor(row, p, scratch, processor_package):
             raise ValueError("处理器未正常完成")
         return result
 
+    tasks = [asyncio.create_task(send()), asyncio.create_task(read())]
     try:
-        return await asyncio.wait_for(read(), 120)
+        _, completed = await asyncio.wait_for(
+            asyncio.gather(*tasks), limits["timeout_seconds"]
+        )
+        return completed
     finally:
+        for task in tasks:
+            if not task.done():
+                task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
         if proc.returncode is None:
+            import os
             import signal
 
-            os.killpg(proc.pid, signal.SIGKILL)
+            try:
+                os.killpg(proc.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
             await proc.wait()
 
 

@@ -524,12 +524,12 @@
         ? localized(spec.description, ctx.lang)
         : "请选择一个商品处理器。";
       if (!owner) {
-        $("#processor-configuration").innerHTML = '<p class="caption">商品处理器账户由店主单独管理，配置已隐藏。</p>';
+        $("#processor-configuration").innerHTML = '<p class="caption">商品处理器配置由店主单独管理，配置已隐藏。</p>';
         return;
       }
       if (!spec) { $("#processor-configuration").innerHTML = ""; return; }
       if (!product.id) {
-        $("#processor-configuration").innerHTML = '<p class="caption">先保存商品，再选择店铺的处理器账户。付款账号和密钥在“处理器账户”中单独配置。</p>';
+        $("#processor-configuration").innerHTML = '<p class="caption">先保存商品，再选择店铺的处理器配置。变量、账号和密钥在“处理器配置”中单独设置。</p>';
         return;
       }
       if (!profilesRequested) {
@@ -547,16 +547,35 @@
       }
       const matching = profiles.filter((profile) => !profile.disabled && profile.processor_id === processorId && (!product.shop_id || profile.shop_id === product.shop_id));
       const current = profileBinding?.profile;
-      $("#processor-configuration").innerHTML = `<p class="caption">只显示账户名称与版本。绑定只影响之后发行的卡密，已发行卡密保留原绑定。</p>${current ? `<p>当前账户：${escape(current.name)} · 版本 ${escape(current.bound_revision || current.revision)}</p>` : '<p class="caption">尚未绑定处理器账户。</p>'}${select("p-profile", "店铺处理器账户", [["", "请选择账户"], ...matching.map((profile) => [profile.id, profile.name + " · 版本 " + profile.revision])], current?.id || "")}<div class="actions"><button id="bind-profile" type="button" class="secondary">绑定所选账户</button>${current ? '<button id="unbind-profile" type="button" class="danger">解除未来卡密的账户绑定</button>' : ""}</div>`;
+      const boundToProduct = current?.processor_id === spec.id && current.shop_id === (product.shop_id || ctx.shopId);
+      const visibleConfiguration = boundToProduct && current.configuration && typeof current.configuration === "object" && !Array.isArray(current.configuration) ? current.configuration : {};
+      const configurationFields = new Map();
+      for (const definition of spec.configuration || []) {
+        if (configurationFields.has(definition.key)) configurationFields.set(definition.key, { ...configurationFields.get(definition.key), secret: true });
+        else configurationFields.set(definition.key, definition);
+      }
+      const preview = [...configurationFields.values()].filter((definition) => definition.secret === false && Object.hasOwn(visibleConfiguration, definition.key) && typeof visibleConfiguration[definition.key] === "string");
+      const previewHTML = preview.length ? `<div class="form-divider processor-bound-preview"><h4>${ctx.lang === "en" ? "Plain text in the bound configuration version" : "当前绑定版本的普通文本"}</h4>${preview.map((definition, index) => {
+        const label = localized(definition.label, ctx.lang), value = visibleConfiguration[definition.key];
+        return definition.type === "textarea" ? textarea("profile-preview-" + index, label, value, 'readonly autocomplete="off" spellcheck="false" rows="5"') : field("profile-preview-" + index, label, value, "text", 'readonly autocomplete="off"');
+      }).join("")}</div>` : "";
+      const workflow = boundToProduct && current.workflow && typeof current.workflow === "object" && !Array.isArray(current.workflow) ? current.workflow : null;
+      const variableEntries = workflow?.variables && typeof workflow.variables === "object" && !Array.isArray(workflow.variables) ? Object.entries(workflow.variables).filter(([name, value]) => /^[A-Z][A-Z0-9_]{0,63}$/.test(name) && typeof value === "string").slice(0, 64) : [];
+      const secretNames = Array.isArray(workflow?.configured_secret_names) ? [...new Set(workflow.configured_secret_names.filter((name) => typeof name === "string" && /^[A-Z][A-Z0-9_]{0,63}$/.test(name)))].slice(0, 64) : [];
+      const runtimeLabels = [["timeout_seconds", "最长运行时间（秒）", "Timeout (seconds)", 10, 120], ["memory_mb", "内存上限（MB）", "Memory (MB)", 64, 512], ["cpu_seconds", "CPU 时间（秒）", "CPU time (seconds)", 1, 120], ["max_output_bytes", "输出上限（字节）", "Output limit (bytes)", 65536, 1000000]];
+      const runtimeEntries = runtimeLabels.filter(([key, zh, en, low, high]) => Number.isSafeInteger(workflow?.runtime?.[key]) && workflow.runtime[key] >= low && workflow.runtime[key] <= high);
+      const workflowHTML = workflow ? `<div class="form-divider processor-workflow-preview" style="overflow-wrap:anywhere"><h4>${ctx.lang === "en" ? "Variables and runtime in the bound version" : "当前绑定版本的变量与运行环境"}</h4>${variableEntries.map(([name, value], index) => textarea("workflow-variable-" + index, name, value, 'readonly autocomplete="off" spellcheck="false" rows="3"')).join("")}${secretNames.length ? `<p class="caption">${ctx.lang === "en" ? "Secrets (values hidden)" : "密钥（不显示值）"}</p><ul>${secretNames.map((name) => `<li>${escape(name)} · ${ctx.lang === "en" ? "Configured" : "已设置"}</li>`).join("")}</ul>` : ""}${runtimeEntries.length ? `<dl>${runtimeEntries.map(([key, zh, en]) => `<dt>${escape(ctx.lang === "en" ? en : zh)}</dt><dd>${escape(workflow.runtime[key])}</dd>`).join("")}</dl>` : ""}<p class="caption">${ctx.lang === "en" ? "Variables are provided separately to the processor. They are never automatically inserted into delivery text." : "变量单独传给处理器，不会自动插入交付文本。"}</p></div>` : "";
+      const editHint = current ? `<p class="caption">${ctx.lang === "en" ? "Preview only. Edit in Processor configurations, save, then return here and bind the new version. Existing codes continue using their original version." : "这里只预览。请在「处理器配置」中编辑模板与变量，保存后回到此商品选择新版本；已发行卡密继续使用原版本。"}</p>` : "";
+      $("#processor-configuration").innerHTML = `<p class="caption">普通文本可预览，密码和密钥不会显示。绑定只影响之后发行的卡密，已发行卡密保留原绑定。</p>${current ? `<p>当前配置：${escape(current.name)} · 绑定版本 ${escape(current.bound_revision || current.revision)}</p>` : '<p class="caption">尚未绑定处理器配置。</p>'}${previewHTML}${workflowHTML}${editHint}${select("p-profile", "店铺处理器配置", [["", "请选择配置"], ...matching.map((profile) => [profile.id, profile.name + " · 版本 " + profile.revision])], current?.id || "")}<div class="actions"><button id="bind-profile" type="button" class="secondary">绑定所选配置</button>${current ? '<button id="unbind-profile" type="button" class="danger">解除未来卡密的配置绑定</button>' : ""}</div>`;
       on("#bind-profile", "click", async () => {
         const chosen = $("#p-profile").value;
-        if (!matching.some((profile) => profile.id === chosen)) throw new Error("请选择属于当前店铺的处理器账户");
+        if (!matching.some((profile) => profile.id === chosen)) throw new Error("请选择属于当前店铺的处理器配置");
         const load = ++bindingLoad;
         const result = await ctx.api("/admin/processor-profiles/bindings/" + encodeURIComponent(product.id), { profile_id: chosen }, "PUT");
         if (!active() || load !== bindingLoad) return;
         profileBinding = result;
         drawConfiguration();
-        ctx.notify("处理器账户已绑定，仅用于之后发行的卡密");
+        ctx.notify("处理器配置已绑定，仅用于之后发行的卡密");
       });
       on("#unbind-profile", "click", async () => {
         const load = ++bindingLoad;

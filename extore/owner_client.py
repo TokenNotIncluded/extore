@@ -756,6 +756,8 @@ def add_parser(commands):
         for action in sub.choices[name]._actions:
             if action.dest == "product":
                 action.required = False
+            if name == "api" and action.dest == "path":
+                action.help = "known relative owner API path"
     # Extend the shared product commands with owner-only lifecycle operations.
     product_sub = next(
         action
@@ -874,6 +876,8 @@ _API_ROUTES = (
     ("POST", r"/api/auth/register/(?:options|verify)"),
     ("GET", r"/api/admin/cli-owner-devices"),
     ("DELETE", r"/api/admin/cli-owner-devices/[A-Za-z0-9_-]+"),
+    ("GET", r"/api/admin/pipeline-authorizations"),
+    ("DELETE", r"/api/admin/pipeline-authorizations/[A-Za-z0-9_-]+"),
     ("GET", r"/api/platform/(?:settings|shops)"),
     ("PUT", r"/api/platform/settings"),
     ("POST", r"/api/platform/shops(?:/[A-Za-z0-9_-]+/invite)?"),

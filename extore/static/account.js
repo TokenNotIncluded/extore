@@ -16,7 +16,7 @@
   const secret = (id, label, attrs = "") => field(id, label, "password", attrs.includes("autocomplete=") ? attrs : `autocomplete="off" ${attrs}`);
   const factors = (prefix, tr = (cn) => cn) => `<div class="grid">${secret(prefix + "-code", tr("2FA 验证码（已启用时填写）", "2FA code (if enabled)"), 'inputmode="numeric" autocomplete="one-time-code" maxlength="6"')}${secret(prefix + "-backup", tr("恢复码（与验证码二选一）", "Recovery code (instead of a 2FA code)"), 'maxlength="100"')}</div>`;
 
-  function mount({ root, api, auth = {}, mode = "login", token = "", isCurrent = () => true, navigate = (url) => { window.location.href = url; }, passkey, language = "zh-CN", onAuth = () => {} } = {}) {
+  function mount({ root, api, auth = {}, mode = "login", token = "", isCurrent = () => true, navigate = (url) => { window.location.href = url; }, passkey, language = "zh-CN", onAuth = () => {}, copyProcessorPrompt } = {}) {
     if (!root?.querySelector || typeof api !== "function") throw new TypeError("Account page needs a root and API");
     mounts.get(root)?.dispose();
     let disposed = false, version = 0, busy = false, selectedProfileShop = "", enrollment = null;
@@ -152,7 +152,10 @@
     function fresh(handler, title = "确认账户身份") {
       if (!active()) return;
       const target = $("#account-confirmation");
-      target.innerHTML = `<section class="panel account-stepup"><h3>${esc(title)}</h3><p class="caption">重新验证后才会提交本次操作。店铺范围：${esc(rootScope(auth) ? "超级管理员" : auth.shop_id || "未登录")}</p>${shopScope(auth) ? `<form id="account-fresh-form">${secret("fresh-password", "当前密码", 'required autocomplete="current-password" maxlength="200"')}${factors("fresh", tr)}<button type="submit">使用密码确认</button></form>` : ""}<div class="actions"><button id="account-fresh-passkey" type="button">使用 Passkey 确认</button><button id="account-fresh-cancel" class="secondary" type="button">取消</button></div></section>`;
+      const identity = shopScope(auth)
+        ? `<div class="account-identity"><p id="account-fresh-shop"><strong>${esc(auth.shop_name || tr("店铺", "Shop"))}</strong></p>${auth.shop_email ? `<p id="account-fresh-email" class="caption">${esc(auth.shop_email)}</p>` : ""}<p class="caption mono">${tr("店铺 ID", "Shop ID")}：${esc(auth.shop_id)}</p></div>`
+        : `<p class="caption">${rootScope(auth) ? tr("超级管理员", "Platform administrator") : tr("未登录", "Not signed in")}</p>`;
+      target.innerHTML = `<section class="panel account-stepup"><h3>${esc(title)}</h3><p class="caption">${tr("重新验证后才会提交本次操作。", "This operation is submitted only after you verify your identity again.")}</p>${identity}${shopScope(auth) ? `<form id="account-fresh-form">${secret("fresh-password", "当前密码", 'required autocomplete="current-password" maxlength="200"')}${factors("fresh", tr)}<button type="submit">使用密码确认</button></form>` : ""}<div class="actions"><button id="account-fresh-passkey" type="button">使用 Passkey 确认</button><button id="account-fresh-cancel" class="secondary" type="button">取消</button></div></section>`;
       on("#account-fresh-form", "submit", async () => {
         try { await request("/auth/reauth/password", values("fresh"), "POST"); } finally { clearSecrets(); }
         if (!await checkScope()) return;
@@ -222,6 +225,10 @@
       const [keys, account] = await Promise.all([request("/auth/passkeys"), shopScope(auth) ? request("/shop/account") : Promise.resolve(null)]);
       if (!active() || load !== version) return;
       if (account && account.id !== auth.shop_id) throw new Error("店铺账户范围不一致，请重新登录");
+      if (account) {
+        auth = { ...auth, shop_name: account.name, shop_email: account.email || "" };
+        onAuth(auth);
+      }
       page(tr("账户安全", "Account security"), `<p class="caption">${account ? "当前店铺：" + esc(account.name) + " · " + esc(account.email) : "超级管理员 · 平台范围"}</p>${account ? `<section class="panel"><h3>店铺账户</h3><form id="account-name-form">${field("account-name", "店铺名称", "text", 'required maxlength="100"', account.name)}<button type="submit" class="secondary">保存名称</button></form><details class="account-password-change form-divider"><summary>修改密码</summary><form id="account-password-form">${secret("change-password", "当前密码", 'required autocomplete="current-password" maxlength="200"')}${secret("change-new", "新密码（至少 12 字符）", 'required autocomplete="new-password" minlength="12" maxlength="200"')}${factors("change", tr)}<button type="submit">验证并修改密码</button><p class="caption">修改后退出此前所有设备及授权会话，当前浏览器重新登录。</p></form></details></section><section class="panel"><h3>${tr("2FA 双因素认证", "2FA two-factor authentication")}</h3><p>${account.totp_enabled ? tr("已开启。密码登录需要验证器验证码或恢复码；Passkey 可独立登录。", "Enabled. Password sign-in requires an authenticator or recovery code. Passkeys work independently.") : tr("尚未开启。添加验证器，让密码登录多一层保护。", "Not enabled. Add an authenticator to protect password sign-in.")}</p><form id="account-totp-form">${secret("totp-password", "当前密码", 'required autocomplete="current-password" maxlength="200"')}${account.totp_enabled ? factors("totp", tr) : ""}<div class="actions">${account.totp_enabled ? `<button id="account-totp-rotate" type="submit">${tr("重新生成恢复码", "Regenerate recovery codes")}</button><button id="account-totp-disable" type="button" class="danger">${tr("关闭 2FA", "Disable 2FA")}</button>` : `<button type="submit">${tr("设置验证器", "Set up authenticator")}</button>`}</div></form><div id="account-totp-setup"></div><p id="account-totp-notice" class="caption" role="status"></p></section>` : '<p class="caption">超级管理员使用 Passkey。可添加多个设备；请保留备用设备。</p>'}<section class="panel"><h3>Passkey 设备</h3>${field("account-key-name", "新设备名称", "text", 'maxlength="200"', "备用 Passkey")}<button id="account-key-add" type="button">添加 Passkey</button><div class="product-list">${keys.map((key) => `<div class="product-row"><div class="product-info"><h3>${esc(key.name)}</h3><p>${esc(new Date(key.created * 1000).toLocaleString())}</p></div><button data-account-key="${esc(key.id)}" type="button" class="danger">移除</button></div>`).join("")}</div></section>`);
       on("#account-name-form", "submit", async () => { const name = $("#account-name").value.trim(); if (!await checkScope()) return; await request("/shop/account", { name }, "PATCH"); if (active()) await security(); });
       on("#account-password-form", "submit", async () => {
@@ -273,34 +280,152 @@
       });
     }
     async function profiles() {
-      if (!rootScope(auth) && !shopScope(auth)) throw new Error("仅店主可管理处理器账户");
+      if (!rootScope(auth) && !shopScope(auth)) throw new Error("仅店主可管理处理器配置");
       const load = ++version;
       const [catalog, shopsList] = await Promise.all([request("/admin/processors"), rootScope(auth) ? request("/platform/shops") : Promise.resolve([])]);
       if (!active() || version !== load) return;
       if (rootScope(auth) && !selectedProfileShop) selectedProfileShop = shopsList[0]?.id || "";
-      const items = rootScope(auth) && !selectedProfileShop ? [] : await request("/admin/processor-profiles" + (rootScope(auth) ? "?" + new URLSearchParams({ shop_id: selectedProfileShop }) : ""));
+      const profileShop = rootScope(auth) ? selectedProfileShop : auth.shop_id;
+      const items = rootScope(auth) && !profileShop ? [] : await request("/admin/processor-profiles" + (rootScope(auth) ? "?" + new URLSearchParams({ shop_id: profileShop }) : ""));
       if (!active() || version !== load) return;
+      if (!Array.isArray(items) || items.some((item) => !item || item.shop_id !== profileShop)) throw new Error("处理器配置的店铺范围不一致，请重新打开后台");
       const specs = Array.isArray(catalog) ? catalog : catalog.processors || [];
-      page("商品处理器账户", `<p class="caption">配置独立保存在店铺中。仅店主可更新与绑定，页面只显示名称、范围和版本，不回读付款账号或密钥。</p><section class="panel"><h3>新建处理器账户</h3><form id="profile-create-form">${rootScope(auth) ? `<div class="field"><label for="profile-shop">所属店铺</label><select id="profile-shop"><option value="">请选择店铺</option>${shopsList.map((shop) => `<option value="${esc(shop.id)}" ${selectedProfileShop === shop.id ? "selected" : ""}>${esc(shop.name)}</option>`).join("")}</select></div>` : ""}${field("profile-name", "账户名称", "text", 'required maxlength="100"')}<div class="field"><label for="profile-processor">商品处理器</label><select id="profile-processor"><option value="">请选择处理器</option>${specs.map((spec) => `<option value="${esc(spec.id)}">${esc(typeof spec.name === "object" ? spec.name["zh-CN"] || spec.id : spec.name || spec.id)}</option>`).join("")}</select></div><div id="profile-fields"></div><button type="submit">创建处理器账户</button></form></section><div id="profile-items">${items.map((item) => `<section class="panel"><div class="section-head"><div><h3>${esc(item.name)}</h3><p class="caption mono">${esc(item.processor_id)} · ${esc(item.shop_id)} · 版本 ${esc(item.revision)}${item.disabled ? " · 已停用" : ""}</p></div><div class="actions">${item.disabled ? "" : `<button data-profile-edit="${esc(item.id)}" class="secondary">更新账户</button><button data-profile-delete="${esc(item.id)}" class="danger">停用</button>`}</div></div><div id="profile-editor-${esc(item.id)}"></div></section>`).join("")}</div>`);
-      const definitions = (spec) => spec?.shop_configuration || spec?.configuration || [];
-      const fieldsHTML = (spec, prefix, existing) => definitions(spec).map((definition, index) => secret(prefix + index, (typeof definition.label === "object" ? definition.label["zh-CN"] || definition.key : definition.label || definition.key) + (existing ? "（留空保留）" : definition.required ? " *" : ""), `maxlength="10000" ${definition.required && !existing ? "required" : ""}`)).join("") || '<p class="caption">此处理器没有店铺账户配置项。</p>';
-      const capture = (spec, prefix) => Object.fromEntries(definitions(spec).map((definition, index) => [definition.key, $("#" + prefix + index)?.value || ""]).filter(([, value]) => value !== ""));
+      const definitions = (spec) => {
+        const fields = new Map(), declared = spec?.shop_configuration || spec?.configuration || [];
+        for (const definition of Array.isArray(declared) ? declared : []) {
+          if (!definition || typeof definition.key !== "string") continue;
+          if (fields.has(definition.key)) {
+            const sensitive = { ...fields.get(definition.key), secret: true };
+            delete sensitive.default;
+            fields.set(definition.key, sensitive);
+          } else fields.set(definition.key, definition);
+        }
+        return [...fields.values()];
+      };
+      const label = (value, fallback) => typeof value === "object" && value ? tr(value["zh-CN"] || fallback, value.en || fallback) : value || fallback;
+      const limits = [
+        { key: "timeout_seconds", name: "超时（秒）", min: 10, max: 120, default: 120 },
+        { key: "memory_mb", name: "内存（MiB）", min: 64, max: 512, default: 256 },
+        { key: "cpu_seconds", name: "CPU 时间（秒）", min: 1, max: 120, default: 120 },
+        { key: "max_output_bytes", name: "输出上限（字节）", min: 65536, max: 1000000, default: 1000000 },
+      ];
+      const validName = (name) => /^[A-Z][A-Z0-9_]{0,63}$/.test(name) && !name.startsWith("EXTORE_");
+      const drafts = new Map();
+      const fieldsHTML = (spec, prefix, existing, configuration = {}) => definitions(spec).map((definition, index) => {
+        const sensitive = definition.secret !== false, id = prefix + index;
+        const name = label(definition.label, definition.key) + (existing && sensitive ? "（留空保留）" : !existing && definition.required ? " *" : "");
+        const max = Number.isInteger(definition.max_length) && definition.max_length > 0 ? Math.min(definition.max_length, 10000) : 10000;
+        const attrs = `maxlength="${max}" ${definition.required && !existing ? "required" : ""}`;
+        if (sensitive) return secret(id, name, attrs);
+        const value = existing ? configuration[definition.key] ?? "" : definition.default ?? "";
+        if (definition.type === "textarea") return `<div class="field"><label for="${id}">${esc(name)}</label><textarea id="${id}" rows="5" ${attrs}>${esc(value)}</textarea></div>`;
+        return field(id, name, ["text", "url", "email", "tel", "number"].includes(definition.type) ? definition.type : "text", attrs, value);
+      }).join("") || '<p class="caption">此处理器没有额外参数。</p>';
+      const rowHTML = (prefix, kind, row) => {
+        const base = `${prefix}${kind}-${row.id}`;
+        return `<div id="${base}" class="processor-${kind === "variable" ? "variable" : "secret"}-row">${field(base + "-name", "名称（大写）", "text", `maxlength="64" pattern="[A-Z][A-Z0-9_]{0,63}" ${kind === "secret" && row.originalName ? "readonly" : ""}`, row.name)}${kind === "secret" ? secret(base + "-value", row.originalName ? "新值（留空保留）" : "密钥值", 'maxlength="8192"') : `<div class="field"><label for="${base}-value">值（普通文本）</label><textarea id="${base}-value" rows="2" maxlength="8192">${esc(row.value)}</textarea></div>`}<button id="${base}-remove" type="button" class="secondary">删除${kind === "secret" ? "密钥" : "变量"}</button></div>`;
+      };
+      const editorHTML = (spec, prefix, item = null) => {
+        const workflow = item?.workflow || {}, state = { variables: [], secrets: [], nextId: 0 };
+        for (const [name, value] of Object.entries(workflow.variables || {})) if (typeof value === "string") state.variables.push({ id: state.nextId++, name, value, originalName: name });
+        for (const name of Array.isArray(workflow.configured_secret_names) ? workflow.configured_secret_names : []) if (typeof name === "string") state.secrets.push({ id: state.nextId++, name, originalName: name });
+        drafts.set(prefix, state);
+        return `<fieldset class="processor-settings"><legend>处理器参数</legend>${fieldsHTML(spec, prefix, !!item, item?.configuration || {})}<p class="caption">普通模板可直接编辑；处理器凭据不回读，留空保留。</p></fieldset><details class="processor-workflow" ${state.variables.length ? "open" : ""}><summary id="${prefix}variable-summary">普通变量 · ${state.variables.length}</summary><fieldset class="processor-workflow-fields"><legend>普通变量</legend><p class="caption">名称使用大写字母、数字与下划线；系统保留名不能使用，保存时会校验。程序通过 Task.environment[NAME] 读取，同时传入 EXTORE_WORKFLOW_NAME。普通变量可见，请把凭据放入密钥。</p><div id="${prefix}variables">${state.variables.map((row) => rowHTML(prefix, "variable", row)).join("")}</div><div class="processor-workflow-actions actions"><button id="${prefix}add-variable" type="button" class="secondary">添加变量</button></div></fieldset></details><details class="processor-workflow" ${state.secrets.length ? "open" : ""}><summary id="${prefix}secret-summary">密钥 · ${state.secrets.length}</summary><fieldset class="processor-workflow-fields"><legend>密钥</legend><p class="caption">只显示已配置的名称，值只写入、不回读。留空保留；删除在保存后生效。改名请删除旧密钥，再添加新名称和值。</p><div id="${prefix}secrets">${state.secrets.map((row) => rowHTML(prefix, "secret", row)).join("")}</div><div class="processor-workflow-actions actions"><button id="${prefix}add-secret" type="button" class="secondary">添加密钥</button></div></fieldset></details><details class="processor-workflow"><summary>运行限制</summary><fieldset class="processor-workflow-fields"><legend>运行限制</legend><div class="processor-runtime-grid grid">${limits.map((limit) => field(prefix + "runtime-" + limit.key, limit.name, "number", `required min="${limit.min}" max="${limit.max}" step="1" inputmode="numeric"`, workflow.runtime?.[limit.key] ?? limit.default)).join("")}</div><p class="caption">超时 10–120 秒，内存 64–512 MiB，CPU 时间 1–120 秒，输出 65,536–1,000,000 字节。仅运行离线预设处理器；配置不能改变启动命令、镜像、软件包、网络或挂载。</p></fieldset></details>`;
+      };
+      const wireWorkflow = (prefix) => {
+        const state = drafts.get(prefix);
+        const updateCount = (kind, rows) => text("#" + prefix + kind + "-summary", (kind === "variable" ? "普通变量" : "密钥") + " · " + rows.filter((row) => !row.deleted).length);
+        const bindRow = (kind, row) => on(`#${prefix}${kind}-${row.id}-remove`, "click", () => {
+          row.deleted = true;
+          const node = $(`#${prefix}${kind}-${row.id}`), value = $(`#${prefix}${kind}-${row.id}-value`);
+          if (value) value.value = value.defaultValue = "";
+          node.innerHTML = ""; node.hidden = true;
+          updateCount(kind, kind === "variable" ? state.variables : state.secrets);
+        });
+        for (const [kind, rows] of [["variable", state.variables], ["secret", state.secrets]]) {
+          rows.forEach((row) => bindRow(kind, row));
+          on("#" + prefix + "add-" + kind, "click", () => {
+            if (rows.filter((row) => !row.deleted).length >= 64) throw new Error("每组最多添加 64 个变量或密钥");
+            const row = { id: state.nextId++, name: "", value: "", originalName: null };
+            rows.push(row);
+            $("#" + prefix + (kind === "variable" ? "variables" : "secrets")).insertAdjacentHTML("beforeend", rowHTML(prefix, kind, row));
+            bindRow(kind, row);
+            updateCount(kind, rows);
+            $(`#${prefix}${kind}-${row.id}-name`).focus();
+          });
+        }
+      };
+      const capture = (spec, prefix) => Object.fromEntries(definitions(spec).flatMap((definition, index) => {
+        const value = $("#" + prefix + index)?.value || "";
+        return definition.secret === false || value !== "" ? [[definition.key, value]] : [];
+      }));
+      const captureWorkflow = (prefix) => {
+        const state = drafts.get(prefix), workflow = { variables: {}, secrets: {}, runtime: {}, delete_variables: [], delete_secrets: [] };
+        const names = new Set();
+        let totalBytes = 0;
+        for (const [kind, rows] of [["variable", state.variables], ["secret", state.secrets]]) {
+          const values = kind === "variable" ? workflow.variables : workflow.secrets, deletions = kind === "variable" ? workflow.delete_variables : workflow.delete_secrets;
+          for (const row of rows) {
+            if (row.deleted) { if (row.originalName) deletions.push(row.originalName); continue; }
+            const name = $(`#${prefix}${kind}-${row.id}-name`).value.trim(), value = $(`#${prefix}${kind}-${row.id}-value`).value;
+            if (!name && !value && !row.originalName) continue;
+            if (!validName(name)) throw new Error("变量或密钥名称须以大写字母开头，最多 64 字符，不能使用 EXTORE_ 前缀");
+            if (kind === "secret" && !row.originalName && !value) throw new Error("新密钥必须填写值；已有密钥留空才会保留");
+            if (names.has(name)) throw new Error("变量与密钥名称不能重复");
+            names.add(name);
+            const bytes = new TextEncoder().encode(value).length;
+            if (bytes > 8192) throw new Error("每个变量或密钥的值最多 8 KiB");
+            totalBytes += bytes;
+            if (kind === "secret" && row.originalName && name !== row.originalName) throw new Error("密钥改名请删除旧密钥，再添加新名称和值");
+            if (kind === "secret" && !value) continue;
+            values[name] = value;
+            if (row.originalName && name !== row.originalName) deletions.push(row.originalName);
+          }
+        }
+        if (totalBytes > 65536) throw new Error("变量和密钥的值合计最多 64 KiB");
+        workflow.delete_variables = [...new Set(workflow.delete_variables)].filter((name) => !Object.hasOwn(workflow.variables, name));
+        workflow.delete_secrets = [...new Set(workflow.delete_secrets)].filter((name) => !Object.hasOwn(workflow.secrets, name));
+        for (const limit of limits) {
+          const text = $("#" + prefix + "runtime-" + limit.key).value;
+          if (!/^[0-9]+$/.test(text)) throw new Error(limit.name + "必须是整数");
+          const value = Number(text);
+          if (!Number.isSafeInteger(value) || value < limit.min || value > limit.max) throw new Error(`${limit.name}必须在 ${limit.min}–${limit.max} 之间`);
+          workflow.runtime[limit.key] = value;
+        }
+        return workflow;
+      };
+      page("商品处理器配置", `<p class="caption">按店铺隔离的工作流配置：处理器参数、普通变量、密钥与运行限制。保存会创建新版本；商品需重新绑定才影响之后发行的卡密，已发行卡密继续使用原来的冻结版本。</p><section class="panel processor-config-card"><h3>新建配置</h3><form id="profile-create-form" class="processor-config-form">${rootScope(auth) ? `<div class="field"><label for="profile-shop">所属店铺</label><select id="profile-shop"><option value="">请选择店铺</option>${shopsList.map((shop) => `<option value="${esc(shop.id)}" ${profileShop === shop.id ? "selected" : ""}>${esc(shop.name)}</option>`).join("")}</select></div>` : ""}<div class="processor-config-basics grid">${field("profile-name", "配置名称", "text", 'required maxlength="120"')}<div class="field"><label for="profile-processor">商品处理器</label><select id="profile-processor" required><option value="">请选择处理器</option>${specs.map((spec) => `<option value="${esc(spec.id)}">${esc(label(spec.name, spec.id))}</option>`).join("")}</select></div></div><div id="profile-fields"></div><div class="actions"><button type="submit">创建配置</button>${typeof copyProcessorPrompt === "function" ? '<button id="profile-copy-template" type="button" class="secondary">复制配置提示词</button>' : ""}</div></form></section><div id="processor-cli-prompt"></div><div id="profile-items">${items.map((item) => `<section class="panel processor-config-card"><div class="section-head"><div><h3>${esc(item.name)}</h3><p class="caption">${esc(label(specs.find((spec) => spec.id === item.processor_id)?.name, item.processor_id))} · 当前版本 ${esc(item.revision)}${item.disabled ? " · 已停用" : ""}</p><p class="caption mono">${esc(item.processor_id)} · ${esc(item.shop_id)}</p></div><div class="actions">${typeof copyProcessorPrompt === "function" ? `<button data-profile-copy="${esc(item.id)}" class="secondary" type="button">复制配置提示词</button>` : ""}${item.disabled ? "" : `<button data-profile-edit="${esc(item.id)}" class="secondary">编辑配置</button><button data-profile-delete="${esc(item.id)}" class="danger">停用</button>`}</div></div><p class="caption">已绑定商品保留各自的绑定版本；在商品页重新绑定后，后续发行才使用此配置版本。已发行卡密不会改变。</p><div id="profile-editor-${esc(item.id)}"></div></section>`).join("")}</div>`);
+      const displayVersion = version;
+      const copyPrompt = (item, processorId) => {
+        if (!profileShop) throw new Error("请选择所属店铺");
+        if (!processorId) throw new Error("请选择可用的商品处理器");
+        return copyProcessorPrompt({ shopId: profileShop, ...(item ? { profileId: item.id } : {}), processorId }, $("#processor-cli-prompt"), () => active() && version === displayVersion);
+      };
+      on("#profile-copy-template", "click", () => copyPrompt(null, specs.find((spec) => spec.id === $("#profile-processor").value)?.id));
+      root.querySelectorAll("[data-profile-copy]").forEach((node) => node.addEventListener("click", () => run(() => { const item = items.find((profile) => profile.id === node.dataset.profileCopy); return copyPrompt(item, item.processor_id); }, node)));
       on("#profile-shop", "change", async () => { selectedProfileShop = $("#profile-shop").value; await profiles(); });
-      on("#profile-processor", "change", () => { $("#profile-fields").innerHTML = fieldsHTML(specs.find((spec) => spec.id === $("#profile-processor").value), "profile-field-", false); });
+      on("#profile-processor", "change", () => { clearSecrets(); $("#profile-fields").innerHTML = editorHTML(specs.find((spec) => spec.id === $("#profile-processor").value), "profile-field-"); wireWorkflow("profile-field-"); });
       on("#profile-create-form", "submit", async () => {
         const spec = specs.find((spec) => spec.id === $("#profile-processor").value);
         if (!spec) throw new Error("请选择可用的商品处理器");
-        const body = { name: $("#profile-name").value.trim(), processor_id: spec.id, configuration: capture(spec, "profile-field-") };
+        const body = { name: $("#profile-name").value.trim(), processor_id: spec.id, configuration: capture(spec, "profile-field-"), workflow: captureWorkflow("profile-field-") };
+        delete body.workflow.delete_variables; delete body.workflow.delete_secrets;
         if (rootScope(auth)) { body.shop_id = $("#profile-shop").value; if (!body.shop_id) throw new Error("请选择所属店铺"); }
         clearSecrets();
-        fresh(async () => { try { await request("/admin/processor-profiles", body, "POST"); } finally { body.configuration = {}; } if (active()) await profiles(); }, "确认创建处理器账户");
+        fresh(async () => { try { await request("/admin/processor-profiles", body, "POST"); } finally { body.configuration = {}; delete body.workflow; } if (active()) await profiles(); }, "确认创建处理器配置");
       });
       root.querySelectorAll("[data-profile-edit]").forEach((node) => node.addEventListener("click", () => run(() => {
         const item = items.find((p) => p.id === node.dataset.profileEdit), spec = specs.find((s) => s.id === item.processor_id), prefix = "profile-update-" + item.id + "-";
-        $("#profile-editor-" + item.id).innerHTML = `<form id="profile-update-${esc(item.id)}">${field(prefix + "name", "账户名称", "text", 'required maxlength="100"', item.name)}${fieldsHTML(spec, prefix, true)}<p class="caption">留空保留原有配置，只替换填写的字段。</p><button type="submit">保存更新</button></form>`;
-        on("#profile-update-" + item.id, "submit", async () => { const body = { name: $("#" + prefix + "name").value.trim() }, configuration = capture(spec, prefix); if (Object.keys(configuration).length) body.configuration = configuration; clearSecrets(); fresh(async () => { try { await request("/admin/processor-profiles/" + encodeURIComponent(item.id), body, "PUT"); } finally { delete body.configuration; } if (active()) await profiles(); }, "确认更新处理器账户"); });
+        $("#profile-editor-" + item.id).innerHTML = `<form id="profile-update-${esc(item.id)}" class="processor-config-form">${field(prefix + "name", "配置名称", "text", 'required maxlength="120"', item.name)}${editorHTML(spec, prefix, item)}<p class="caption">普通文本和变量可直接编辑；清空可选文本会删除原内容。密钥留空保留，删除须明确点击对应删除按钮后保存。</p><button type="submit">保存新版本</button></form>`;
+        wireWorkflow(prefix);
+        on("#profile-update-" + item.id, "submit", async () => {
+          const body = { name: $("#" + prefix + "name").value.trim(), workflow: captureWorkflow(prefix) }, configuration = capture(spec, prefix);
+          if (Object.keys(configuration).length) body.configuration = configuration;
+          clearSecrets();
+          fresh(async () => { try { await request("/admin/processor-profiles/" + encodeURIComponent(item.id), body, "PUT"); } finally { delete body.configuration; delete body.workflow; } if (active()) await profiles(); }, "确认更新处理器配置");
+        });
       }, node)));
-      root.querySelectorAll("[data-profile-delete]").forEach((node) => node.addEventListener("click", () => run(() => fresh(async () => { await request("/admin/processor-profiles/" + encodeURIComponent(node.dataset.profileDelete), null, "DELETE"); if (active()) await profiles(); }, "确认停用处理器账户"), node)));
+      root.querySelectorAll("[data-profile-delete]").forEach((node) => node.addEventListener("click", () => run(() => fresh(async () => { await request("/admin/processor-profiles/" + encodeURIComponent(node.dataset.profileDelete), null, "DELETE"); if (active()) await profiles(); }, "确认停用处理器配置"), node)));
     }
     const instance = Object.freeze({ dispose() { disposed = true; version++; controller.abort(); clearTotpSetup(); clearSecrets(); window.removeEventListener?.("pagehide", leavePage); if (mounts.get(root) === instance) mounts.delete(root); }, confirmFresh: fresh, get active() { return active(); } });
     mounts.set(root, instance);

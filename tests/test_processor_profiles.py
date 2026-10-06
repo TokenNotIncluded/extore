@@ -72,9 +72,16 @@ def submit(client, code, params=None):
     return exchanged["token"], response.json()
 
 
-def test_profile_values_are_write_only_and_ciphertext_not_in_metadata(owner):
-    product = create_product(owner, "PRIVATE-TEMPLATE $name")
-    assert product["processor_config"] == {}
+def test_profile_secret_values_are_write_only_and_ciphertext_not_in_metadata(owner):
+    product = create_product(
+        owner,
+        processor_id="resource_link",
+        configuration={
+            "resource_url": "https://example.com/PRIVATE-RESOURCE",
+            "message": "可编辑的交付说明",
+        },
+    )
+    assert product["processor_config"] == {"message": "可编辑的交付说明"}
     profile = binding(owner, product["id"])
     for response in (
         owner.get("/api/admin/products"),
@@ -83,7 +90,7 @@ def test_profile_values_are_write_only_and_ciphertext_not_in_metadata(owner):
     ):
         assert response.status_code == 200
         assert (
-            "PRIVATE-TEMPLATE" not in response.text
+            "PRIVATE-RESOURCE" not in response.text
             and "ciphertext" not in response.text
         )
     with db() as c:
@@ -94,7 +101,8 @@ def test_profile_values_are_write_only_and_ciphertext_not_in_metadata(owner):
             "SELECT ciphertext FROM processor_profile_revisions WHERE profile_id=?",
             (profile["id"],),
         ).fetchone()[0]
-        assert "PRIVATE-TEMPLATE" not in raw + secret
+        assert "PRIVATE-RESOURCE" not in raw + secret
+        assert "可编辑的交付说明" not in raw + secret
         assert json.loads(raw)["processor_config"] == {}
         assert secret.startswith("v1.")
 

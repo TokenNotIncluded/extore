@@ -47,6 +47,7 @@ from .owner_cli_auth import router as owner_cli_router
 from .owner_cli_auth import verify_owner_cli_action
 from .processor_profiles import router as processor_profiles_router
 from .processors import processor_catalog
+from .scope_auth import router as scope_auth_router
 from .security import (
     authorize_management,
     batch_cards,
@@ -98,6 +99,7 @@ app.include_router(source_router)
 app.include_router(link_access_router)
 app.include_router(cli_auth_router)
 app.include_router(device_login_router)
+app.include_router(scope_auth_router)
 app.include_router(owner_cli_router)
 app.include_router(processor_profiles_router)
 app.include_router(maintenance_router)
@@ -112,6 +114,9 @@ async def guard(request: Request, call_next):
         "/api/cli/device/request",
         "/api/cli/device/status",
         "/api/cli/device/claim",
+        "/api/cli/scopes/request",
+        "/api/cli/scopes/status",
+        "/api/cli/scopes/claim",
         "/api/cli/owner/request",
         "/api/cli/owner/status",
         "/api/cli/owner/claim",
@@ -487,7 +492,7 @@ def admin_products(request: Request, compact: bool = False, shop_id: str = ""):
         return [
             product_summary(owner_product_view(c, r["id"]))
             if compact
-            else owner_product_view(c, r["id"])
+            else owner_product_view(c, r["id"], s)
             for r in c.execute(
                 "SELECT id FROM products WHERE (? IS NULL OR shop_id=?) ORDER BY created",
                 (scope, scope),
@@ -495,9 +500,18 @@ def admin_products(request: Request, compact: bool = False, shop_id: str = ""):
         ]
 
 
-def owner_product_view(c, pid):
-    row = c.execute("SELECT shop_id FROM products WHERE id=?", (pid,)).fetchone()
-    return {**product(c, pid), "shop_id": row["shop_id"]}
+def owner_product_view(c, pid, owner_session=None):
+    row = c.execute(
+        "SELECT products.shop_id,shops.enabled AS shop_enabled FROM products "
+        "JOIN shops ON shops.id=products.shop_id WHERE products.id=?",
+        (pid,),
+    ).fetchone()
+    values = {**product(c, pid), "shop_id": row["shop_id"]}
+    if owner_session is not None and values["mode"] == "script" and row["shop_enabled"]:
+        from .processor_profiles import product_configuration_view
+
+        values.update(product_configuration_view(c, pid, owner_session))
+    return values
 
 
 def product_summary(p):
@@ -538,7 +552,7 @@ def create_product(body: Product, request: Request, shop_id: str = ""):
             (json.dumps(values, ensure_ascii=False), pid),
         )
         audit(c, management_actor(s), "product.create", pid)
-        return owner_product_view(c, pid)
+        return owner_product_view(c, pid, s)
 
 
 PRODUCT_TEMPLATES = (
@@ -623,7 +637,7 @@ def quick_product(body: QuickProductInput, request: Request, shop_id: str = ""):
             ),
             s,
         )
-        return {"product": owner_product_view(c, pid), "management_link": link}
+        return {"product": owner_product_view(c, pid, s), "management_link": link}
 
 
 @app.put("/api/admin/products/{pid}")
@@ -633,7 +647,7 @@ def edit_product(pid: str, body: Product, request: Request):
         authorize_management(c, s)
         shops.authorize_product(c, s, pid)
         save_product(c, pid, body, management_actor(s), s)
-        return owner_product_view(c, pid)
+        return owner_product_view(c, pid, s)
 
 
 def save_product(c, pid, body, actor, actor_session=None):
@@ -787,7 +801,17 @@ def create_product_link(c, body, s):
         parent = c.execute(
             "SELECT max_uses,max_cli_uses FROM staff WHERE id=?", (parent_id,)
         ).fetchone()
-        if body.max_uses > parent["max_uses"]:
+        scope_parent = c.execute(
+            "SELECT device_id FROM pipeline_bindings WHERE staff_id=?", (parent_id,)
+        ).fetchone()
+        # A key-bound scope has no browser admission itself. Its explicitly
+        # approved links.delegate permission may create one-use child links.
+        if scope_parent and (
+            s.get("channel") != "cli" or s.get("device_id") != scope_parent["device_id"]
+        ):
+            fail("请通过已授权的流水线 CLI 设备创建下级链接", 403)
+        browser_ceiling = 1 if scope_parent else parent["max_uses"]
+        if body.max_uses > browser_ceiling:
             fail("下级链接可用次数不能超过当前链接的上限", 403)
         if body.max_cli_uses > parent["max_cli_uses"]:
             fail("下级链接 CLI 绑定次数不能超过当前链接的上限", 403)
@@ -864,7 +888,9 @@ def list_staff(
             link_view(r)
             for r in c.execute(
                 "SELECT staff.* FROM staff JOIN products ON products.id=staff.product_id "
-                "WHERE (? IS NULL OR products.shop_id=?) ORDER BY staff.created",
+                "WHERE (? IS NULL OR products.shop_id=?) AND NOT EXISTS "
+                "(SELECT 1 FROM pipeline_bindings WHERE staff_id=staff.id) "
+                "ORDER BY staff.created",
                 (scope, scope),
             )
             if view == "all" or link_state(c, r) == view
@@ -876,7 +902,11 @@ def revoke_staff(sid: str, request: Request):
     s = session(request)
     with db() as c:
         authorize_management(c, s)
-        row = c.execute("SELECT product_id FROM staff WHERE id=?", (sid,)).fetchone()
+        row = c.execute(
+            "SELECT product_id FROM staff WHERE id=? AND NOT EXISTS "
+            "(SELECT 1 FROM pipeline_bindings WHERE staff_id=staff.id)",
+            (sid,),
+        ).fetchone()
         if not row:
             fail("商品管理链接不存在", 404)
         shops.authorize_product(c, s, row["product_id"])
@@ -1149,7 +1179,8 @@ def managed_product(request: Request, product_id: str = ""):
     s = session(request, ("admin", "staff"))
     with db() as c:
         pid = management_scope(c, s, product_id, "product.edit")
-        return managed_product_view(product(c, pid), s)
+        p = owner_product_view(c, pid, s) if s["role"] == "admin" else product(c, pid)
+        return managed_product_view(p, s)
 
 
 def managed_product_view(p, s):
@@ -1198,7 +1229,8 @@ def edit_managed_product(
         except ValueError:
             fail("商品配置格式错误", 422)
         save_product(c, pid, updated, management_actor(s), s)
-        return managed_product_view(product(c, pid), s)
+        p = owner_product_view(c, pid, s) if s["role"] == "admin" else product(c, pid)
+        return managed_product_view(p, s)
 
 
 @app.get("/api/manage/cards")
@@ -1305,7 +1337,10 @@ def managed_links(
         return [
             link_view(r)
             for r in c.execute(
-                "SELECT * FROM staff WHERE product_id=? ORDER BY created", (pid,)
+                "SELECT * FROM staff WHERE product_id=? AND NOT EXISTS "
+                "(SELECT 1 FROM pipeline_bindings WHERE staff_id=staff.id) "
+                "ORDER BY created",
+                (pid,),
             )
             if (descendants is None or r["id"] in descendants)
             and (view == "all" or link_state(c, r) == view)
@@ -1329,7 +1364,11 @@ def revoke_managed_link(sid: str, request: Request, product_id: str = ""):
             c, s["staff_id"], include_self=False
         ):
             fail("只能撤销自己创建的下级商品管理链接", 403)
-        row = c.execute("SELECT product_id FROM staff WHERE id=?", (sid,)).fetchone()
+        row = c.execute(
+            "SELECT product_id FROM staff WHERE id=? AND NOT EXISTS "
+            "(SELECT 1 FROM pipeline_bindings WHERE staff_id=staff.id)",
+            (sid,),
+        ).fetchone()
         if not row:
             fail("商品管理链接不存在", 404)
         if row["product_id"] != pid:

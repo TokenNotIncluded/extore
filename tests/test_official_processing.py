@@ -119,7 +119,7 @@ def test_merchant_cannot_execute_unapproved_code_or_replace_contract(owner, valu
 
 def test_incomplete_processor_can_be_saved_but_not_issued(owner):
     product = create(owner, "resource_link")
-    assert product["processor_config"] == {}
+    assert product["processor_config"] == {"message": ""}
     profile = owner.get(
         f"/api/admin/processor-profiles/bindings/{product['id']}"
     ).json()["profile"]

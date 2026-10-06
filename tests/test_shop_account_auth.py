@@ -296,17 +296,16 @@ def test_mfa_security_write_uses_fresh_body_without_double_consuming_code(mercha
             "UPDATE sessions SET auth_at=1 WHERE digest=?",
             (digest(merchant["cookie"]),),
         )
+    code = _code(secret)
     response = merchant["client"].post(
         "/api/auth/totp/backup-codes",
-        json={"password": PASSWORD, "code": _code(secret)},
+        json={"password": PASSWORD, "code": code},
     )
     assert response.status_code == 200, response.text
     assert len(response.json()["backup_codes"]) == 10
     assert (
         merchant["client"]
-        .post(
-            "/api/auth/totp/disable", json={"password": PASSWORD, "code": _code(secret)}
-        )
+        .post("/api/auth/totp/disable", json={"password": PASSWORD, "code": code})
         .status_code
         == 401
     )

@@ -122,6 +122,120 @@ def test_sdk_shop_context_is_frozen_and_separate_from_customer_inputs():
         ShopContext(revision=True)
 
 
+def test_sdk_environment_is_private_readonly_and_separate_from_customer_input():
+    values = {"LOCALE": "zh-CN", "API_TOKEN": "private-workflow-token"}
+    task = Task(
+        "task",
+        "product",
+        1,
+        {"API_TOKEN": "customer-spoof", "environment": "customer-value"},
+        environment=values,
+    )
+    values["API_TOKEN"] = "changed-after-construction"
+    assert task.environment["API_TOKEN"] == "private-workflow-token"
+    assert task.params["API_TOKEN"] == "customer-spoof"
+    assert task.params["environment"] == "customer-value"
+    assert "private-workflow-token" not in repr(task)
+    assert "API_TOKEN': 'private-workflow-token" not in repr(task)
+    with pytest.raises(TypeError):
+        task.environment["API_TOKEN"] = "replaced"
+    with pytest.raises(FrozenInstanceError):
+        task.environment = {}
+    assert Task("task", "product", 1, {}).environment == {}
+
+
+@pytest.mark.parametrize(
+    "values",
+    [
+        None,
+        [],
+        {"lowercase": "secret-not-in-error"},
+        {"BAD-NAME": "secret-not-in-error"},
+        {"A" * 65: "secret-not-in-error"},
+        {"API_TOKEN": None},
+        {"API_TOKEN": {"nested": "secret-not-in-error"}},
+        {"API_TOKEN": "secret-not-in-error\x00"},
+        {"API_TOKEN": "secret-not-in-error\ud800"},
+        {"API_TOKEN": "x" * 8193},
+        {"API_TOKEN": "文" * 2731},
+        {f"VALUE_{i}": "" for i in range(129)},
+        {f"VALUE_{i}": "x" * 8192 for i in range(9)},
+    ],
+)
+def test_invalid_sdk_environment_uses_safe_errors(values, capsys):
+    with pytest.raises(ValueError) as error:
+        Task("task", "product", 1, {}, environment=values)
+    assert "secret-not-in-error" not in str(error.value)
+    assert not capsys.readouterr().out
+
+
+def test_sdk_environment_accepts_full_workflow_limits():
+    values = {f"VALUE_{i}": "" for i in range(128)}
+    values.update({f"VALUE_{i}": "x" * 8192 for i in range(8)})
+    task = Task("task", "product", 1, {}, environment=values)
+    assert len(task.environment) == 128
+    assert (
+        sum(len(value.encode("utf-8")) for value in task.environment.values()) == 65536
+    )
+
+
+def test_sdk_environment_is_available_to_handler_without_automatic_result_or_log_copy(
+    monkeypatch, capsys
+):
+    monkeypatch.setattr(
+        "sys.stdin",
+        io.StringIO(
+            json.dumps(
+                {
+                    "id": "task",
+                    "product_id": "product",
+                    "attempt": 1,
+                    "params": {"API_TOKEN": "customer-spoof"},
+                    "environment": {"API_TOKEN": "private-workflow-token"},
+                }
+            )
+        ),
+    )
+
+    def handler(task):
+        assert task.environment["API_TOKEN"] == "private-workflow-token"
+        assert task.params["API_TOKEN"] == "customer-spoof"
+        task.progress(50, "Working")
+        return Result.success("safe-delivery")
+
+    run(handler)
+    output = capsys.readouterr()
+    assert not output.err
+    assert "private-workflow-token" not in output.out
+    lines = [json.loads(line) for line in output.out.splitlines()]
+    assert [line["kind"] for line in lines] == ["progress", "result"]
+    assert lines[-1]["state"] == "succeeded"
+
+
+def test_sdk_combined_input_budget_includes_valid_workflow_environment(
+    monkeypatch, capsys
+):
+    monkeypatch.setattr(
+        "sys.stdin",
+        io.StringIO(
+            json.dumps(
+                {
+                    "id": "task",
+                    "product_id": "product",
+                    "attempt": 1,
+                    "params": {"text": "x" * 143000},
+                    "environment": {f"VALUE_{i}": "s" * 8192 for i in range(8)},
+                }
+            )
+        ),
+    )
+    run(lambda task: pytest.fail("oversized combined payload must not execute"))
+    output = capsys.readouterr()
+    assert not output.err
+    assert json.loads(output.out)["state"] == "failed"
+    assert "s" * 100 not in output.out
+
+
 @pytest.mark.parametrize(
     "raw",
     [

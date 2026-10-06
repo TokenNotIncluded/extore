@@ -6,12 +6,12 @@
 
 | 入口 | 用途 | 授权 |
 | --- | --- | --- |
-| `extore manage` | 商品配置、卡密、队列、附件、管理链接、事件与会话 | 设备码经浏览器批准，或私密管理链接绑定；可保存多个独立商品授权 |
+| `extore manage` | 商品配置、卡密、队列、附件、管理链接、事件与会话 | 主动设备码申请，店主明确批准商品和权限；兼容已有商品管理链接，可保存多个独立授权 |
 | [`extore customer`](cli-customer.md) | 验码、填参、上传材料、跟踪状态、领取和销毁 | 卡密或已有领取链接，不使用商家权限 |
 | [`extore admin`](cli-owner.md) | 本店商品、队列、卡密、安全；平台账号可维护店铺和 SMTP | 固定到账号的 CLI 设备；店主支持邮箱密码及第二因素或真实 Passkey 批准，平台管理员使用 Passkey |
 | `extore init / serve / worker …` | 本机初始化、运行与服务器恢复 | 服务器用户，见[运行指南](getting-started.md) |
 
-下面介绍 `manage`。一个授权只管理一个商品；客户端可以保存多个授权并聚合查看，每次写入仍使用其中一个授权，不合并权限。示例中的大写 ID 与路径是占位符，请用当前操作返回的实际值替换。
+下面介绍 `manage`。每个商品有独立设备授权；店铺流水线申请可一次批准多个商品，客户端逐商品保存并聚合查看，每次操作仍使用其中一个授权，不合并权限。示例中的大写 ID 与路径是占位符，请用当前操作返回的实际值替换。
 
 ## 安装与登录
 
@@ -20,14 +20,50 @@
 ```sh
 uv tool install --upgrade 'extore>=0.7.0'
 extore manage --help
-extore manage login --device-code --origin https://extore.lmm.best --client-name '我的 AI Bot'
+extore manage login --device-code --origin https://extore.lmm.best --product PRODUCT_ID --client-name '我的 AI Bot'
 ```
 
-CLI 显示公开授权地址、短设备码和设备指纹，最多等待 10 分钟。本人在浏览器打开地址、输入设备码，核对名称、指纹、商品和权限后批准；管理链接只留在浏览器，不用交给 AI 或写入 CLI。浏览器与 CLI 的授权次数分别计算，批准不会再次消费浏览器次数。
+CLI 显示公开授权地址、短设备码和设备指纹，最多等待 10 分钟。本人在浏览器登录店主账号、输入设备码，核对名称、指纹、商品和权限后批准。不需要预先创建管理链接，也不用将访问密钥交给 AI；审批后用本机保存的设备密钥续签。
+
+单商品默认申请 `queue.view,queue.process,queue.retry`，可用 `--permissions` 显式请求该商品所需的其他权限，店主看到完整范围后批准。需要某店的全部队列商品可执行：
+
+```sh
+extore manage login --device-code --origin https://extore.lmm.best --shop SHOP_ID --pipelines-all --client-name '店铺 Bot' --no-wait
+```
+
+这是申请时该店当前队列商品的快照，仅允许三个队列权限；不会获得店主账号管理、SMTP、其他店铺或未来新商品的权限。店主可在首次批准时缩小商品清单与权限，成功结果中的 `authorization` 和 `grants` 是实际有效范围。
 
 提示写到 stderr；成功结果写到 stdout 的一行 JSON，包含商品授权摘要，不包含私钥、Bearer、签名或服务器挑战。`--no-wait` 的 stdout 为 `{"ok":true,"pending":true,"authorization":{"approval_url":"…","user_code":"…","fingerprint":"…","expires":…}}`，可以将其中公开字段转告本人，无需让本人访问 AI 的云端终端。
 
-可用 `--product PRODUCT_ID` 限定本次批准的商品。如果 AI 的工具不能一直等待，先加 `--no-wait` 取得公开地址和设备码，交给本人批准后，再运行相同命令并去掉 `--no-wait`，保持相同 profile、origin、product 和 client-name。未过期的申请会继续使用，网络中断或 Ctrl+C 后也可重复该命令。超过 10 分钟重新申请。拒绝或过期不会创建可用的商品授权。
+如果 AI 的工具不能一直等待，先加 `--no-wait` 取得公开地址和设备码，交给本人批准后，再运行相同命令并去掉 `--no-wait`，保持相同 profile、目标、权限、原因和 client-name。未过期的申请会继续使用，网络中断或 Ctrl+C 后也可重复该命令。超过 10 分钟重新申请。拒绝或过期不会创建可用的商品授权。
+
+成功后保存 `authorization.id` 和各商品 `grants[].id`。后者可作为业务命令的 `--grant`，分别指向商品设备，权限不会相互叠加。
+
+## 申请追加商品或权限
+
+需要更多权限时主动申请，由店主再次批准。`--permissions` 是完整期望集合，必须包含已有权限；不写则保留已有权限。
+
+```sh
+extore manage authorize --authorization AUTHORIZATION_ID --permissions queue.view,queue.process,queue.retry,product.edit --reason '需要调整该商品的输入参数' --no-wait
+extore manage authorize --authorization SHOP_AUTHORIZATION_ID --product NEW_PRODUCT_ID --reason '接管新商品队列' --no-wait
+extore manage authorize --authorization SHOP_AUTHORIZATION_ID --pipelines-all --reason '申请当前新增的队列商品' --no-wait
+```
+
+第一条适用于单商品授权。单商品授权保持一个商品；处理另一个商品需另执行 `login --product NEW_PRODUCT_ID`。店铺流水线授权可重复 `--product` 追加商品，或用 `--pipelines-all` 重新申请当前快照，两种选择不能同时使用；它仍只允许三个队列权限。
+
+本人批准后，重复相同申请并去掉 `--no-wait` 完成。待批准、拒绝或申请过期都不会改变原有权限；批准并领取后，原商品设备 ID 和任务处理者保持稳定，正在处理的任务可继续交付。领取后网络中断可重复原命令续签；若未收到领取结果且设备码已过期，需重新核对批准，仍恢复原授权与任务身份。追加授权不会延长原到期时间。
+
+也可用 `--grant DEVICE_ID` 选择保存的授权。对旧管理链接设备申请更大权限会新建独立商品授权，保留旧链接权限；旧设备已领取的任务仍需使用原 `--grant ORIGINAL_DEVICE_ID` 处理，不将任务移交给新身份。
+
+## 兼容已有管理链接
+
+已有管理链接的浏览器会话可以使用兼容设备码入口，不申请新的店主授权：
+
+```sh
+extore manage login --device-code --existing-link --origin https://extore.lmm.best --product PRODUCT_ID --no-wait
+```
+
+省略商品和店铺目标的设备码命令也保留原兼容方式。管理链接留在本人浏览器，CLI 不接收它；浏览器与 CLI 的授权次数分别计算，批准不会再次消费浏览器次数。这个方式使用原链接既有权限，不接受新的 `--permissions`。
 
 原有私密链接登录继续可用：`extore manage login` 会隐藏输入，粘贴完整管理链接即可。需要自动接入时，把链接从私密文件交给客户端：
 
@@ -37,9 +73,9 @@ extore manage login --link-stdin < /path/to/private-link.txt
 
 支持完整的 `/staff#…` 商品管理链接或 `/cli#…` 专用票据链接；不接受裸 token，也不通过命令行参数传递链接。生产服务器必须使用 HTTPS，本机回环地址可用 HTTP。`--client-name` 可设置后台审计中显示的设备名称。
 
-登录时客户端在本机生成并私密保存 Ed25519 设备密钥，用签名证明持有私钥；服务器绑定设备和浏览器明确批准的商品授权。默认每条管理链接允许 1 次浏览器登录及 1 个 CLI 设备绑定，两种额度独立；同一设备重复批准相同授权或后续续签不再次消耗 CLI 额度。不同商品的授权可保存到同一配置，操作时仍逐个检查权限。
+登录时客户端在本机生成并私密保存 Ed25519 设备密钥，用签名证明持有私钥；服务器绑定设备和浏览器明确批准的商品授权。兼容入口中，默认每条管理链接允许 1 次浏览器登录及 1 个 CLI 设备绑定，两种额度独立；同一设备重复批准相同授权或后续续签不再次消耗 CLI 额度。不同商品的授权可保存到同一配置，操作时仍逐个检查权限。
 
-CLI Bearer 会话有效 8 小时，到期前或失效后客户端通过设备签名自动续签。能否续签仍取决于设备、管理链接及全部祖先是否有效；设备或授权撤销、授权过期后不能继续使用。
+CLI Bearer 会话有效 8 小时，到期前或失效后客户端通过设备签名自动续签。主动授权还检查店铺、商品和授权版本，兼容入口还检查管理链接及全部祖先；设备或授权撤销、授权过期后不能继续使用。
 
 ## 复制机器人接入提示词
 
@@ -153,7 +189,7 @@ extore manage cards issue --product PRODUCT_ID --variant standard --count 10 --l
 extore manage links create --product PRODUCT_ID --json-file link.json
 ```
 
-`product get --include-secrets --output NEWFILE` 必须由同一个授权同时具备 `product.edit` 与 `fulfillment.configure`，获授权的 Webhook 等配置只保存到新 0600 文件，禁止输出到终端。处理器配置档案的模板、资源地址等秘密不会出现在商品导出中；它们由店主通过独立的[配置档案命令](shops.md#处理器配置档案)更新，读取只返回元数据。
+`product get --include-secrets --output NEWFILE` 必须由同一个授权同时具备 `product.edit` 与 `fulfillment.configure`，获授权的 Webhook 等配置只保存到新 0600 文件，禁止输出到终端。商品管理链接的 `product get` 仍不导出处理器配置。店主和平台管理员通过独立的[配置档案命令](shops.md#处理器配置档案)更新、绑定配置；档案响应的 `configuration` 可读回处理器字段定义中严格标为 `secret:false` 的模板、说明等内容，`configured_fields` 只表示哪些字段已配置。资源 URL、密钥及未知字段默认隐藏，不回读；缺少 `secret` 或其值不是严格 `false` 的字段也不会回读。
 
 `patch.json` 只填写需要改动的顶层字段，例如 `{"name":"新名称","description":"新的领取说明"}`。数组或嵌套对象在显式提供时整体替换，不是递归合并；修改未来任务的表单仍遵守快照和已发卡冻结规则。
 
@@ -174,6 +210,86 @@ extore manage api PUT /api/manage/product --product PRODUCT_ID --json-file produ
 
 `api` 接受 `GET / POST / PUT / PATCH / DELETE` 和已支持的相对 `/api/manage/…` 路径，用可重复的 `--query KEY=VALUE` 传查询，JSON 用 `--json-file` 或 `--json-stdin`。它不会接受外部 URL、跟随重定向或扩大权限。商品写入的底层 API 使用完整 Product；需要局部改动时优先用 `product update`。队列 GET 默认 compact 与 active，`--detail` 按需读取完整详情。制卡与创建管理链接的 API 响应仍自动保存到私密文件。
 
+## 用 CLI 配置商品处理器工作流
+
+工作流配置要求 **0.7.0 及以上**，通过已授权的 `extore admin` 店主设备操作，商品队列的 `extore manage` 授权不能读取店铺配置档案。每个档案独立保存普通变量、写入后不可读回的密钥和运行限制，再绑定到同店、同处理器的商品。
+
+先创建权限为 0600 的 JSON 文件，在自己的编辑器中填写；密钥不放进命令行参数、聊天或日志。
+
+```sh
+umask 077
+touch ./processor-profile.json
+chmod 600 ./processor-profile.json
+```
+
+文件格式如下。`API_KEY` 的值在私密文件中填写，示例中的处理器模板可按需修改：
+
+```json
+{
+  "name": "文档流水线配置",
+  "processor_id": "personalized_text",
+  "configuration": {"template": "Hello $name"},
+  "workflow": {
+    "variables": {"MODEL": "example-model", "LANGUAGE": "zh-CN"},
+    "secrets": {"API_KEY": "在私密文件中填写"},
+    "runtime": {
+      "timeout_seconds": 120,
+      "memory_mb": 256,
+      "cpu_seconds": 120,
+      "max_output_bytes": 1000000
+    }
+  }
+}
+```
+
+创建返回档案 ID，随后查看、编辑并绑定商品：
+
+```sh
+extore admin processor-profiles create --grant OWNER_DEVICE_ID --json-file ./processor-profile.json
+extore admin processor-profiles list --grant OWNER_DEVICE_ID
+extore admin processor-profiles get PROFILE_ID --grant OWNER_DEVICE_ID
+extore admin processor-profiles update PROFILE_ID --grant OWNER_DEVICE_ID --json-file ./workflow-patch.json
+extore admin processor-profiles bind PROFILE_ID --product PRODUCT_ID --grant OWNER_DEVICE_ID
+extore admin processor-profiles binding --product PRODUCT_ID --grant OWNER_DEVICE_ID
+extore admin processor-profiles unbind --product PRODUCT_ID --grant OWNER_DEVICE_ID
+extore admin processor-profiles revoke PROFILE_ID --grant OWNER_DEVICE_ID
+```
+
+平台管理员创建、列出某店档案时显式加 `--shop SHOP_ID`。商家设备只能操作本店档案，不能跨店绑定。撤销档案会阻止依赖它的处理任务继续运行。
+
+`workflow-patch.json` 也必须是 0600 私密文件。更新逐键合并：未填写的普通变量、密钥和运行限制保留；普通变量的空字符串会保存，密钥的空字符串保留原值。删除必须用明确的数组，同一名称不能同时设置和删除：
+
+```json
+{
+  "workflow": {
+    "variables": {"LANGUAGE": "en", "NOTE": ""},
+    "secrets": {"API_KEY": ""},
+    "delete_variables": ["OLD_MODEL"],
+    "delete_secrets": ["OLD_API_KEY"],
+    "runtime": {"timeout_seconds": 60}
+  }
+}
+```
+
+变量和密钥名称必须符合 `[A-Z][A-Z0-9_]{0,63}`，不能以 `EXTORE_` 开头，两类名称不能相同。每类最多 64 项，单值最多 8 KiB，总值最多 64 KiB。运行限制只接受整数：超时 10–120 秒、内存 64–512 MiB、CPU 时间 1–120 秒、输出 65536–1000000 字节；不能通过此配置改运行命令、镜像、网络或挂载。
+
+所有读取、创建、更新和绑定结果都只返回安全配置：`configuration` 中严格标为 `secret:false` 的模板或说明，以及 `workflow.variables`、`workflow.runtime`、`workflow.configured_secret_names`。密钥只显示已配置的名称；真实值、资源 URL 和加密内容不会出现在 stdout 或 `--output` 导出中。普通模板和变量可读回并编辑，不会再次被全部打码。输出文件仍为新的 0600 文件。
+
+更新档案只生成新修订，商品仍保留原绑定；显式执行 `bind` 后，之后新发的卡密才使用新修订。已经发出的卡密和任务保留原模板、变量、密钥和运行限制，即使商品后来解绑。
+
+同样的操作可通过店主的通用 API 命令完成，私密 JSON 文件和安全返回规则一致：
+
+```sh
+extore admin api POST /api/admin/processor-profiles --grant OWNER_DEVICE_ID --json-file ./processor-profile.json
+extore admin api GET /api/admin/processor-profiles/PROFILE_ID --grant OWNER_DEVICE_ID
+extore admin api PUT /api/admin/processor-profiles/PROFILE_ID --grant OWNER_DEVICE_ID --json-file ./workflow-patch.json
+extore admin api PUT /api/admin/processor-profiles/bindings/PRODUCT_ID --grant OWNER_DEVICE_ID --json-file ./binding.json
+extore admin api DELETE /api/admin/processor-profiles/bindings/PRODUCT_ID --grant OWNER_DEVICE_ID
+extore admin api DELETE /api/admin/processor-profiles/PROFILE_ID --grant OWNER_DEVICE_ID
+```
+
+`binding.json` 的内容是 `{"profile_id":"PROFILE_ID"}`。平台管理员的通用列表命令可加 `--query shop_id=SHOP_ID`，创建文件则填写 `shop_id`。
+
 ## 输出与本地配置
 
 默认列表为摘要，使用 `job`、`schema`、`--detail` 或显式 `prompt` 读取当前任务所需内容。`--output NEWFILE` 可将支持该选项的命令结果写入新 0600 文件；已存在的目标会被拒绝。
@@ -191,4 +307,6 @@ extore manage logout --product PRODUCT_ID
 extore manage logout --all
 ```
 
-`logout` 结束所选当前 CLI 会话，清理相应待审批申请与不再被该商品授权使用的本地恢复密钥；其他商品的授权继续保留。`logout --all` 同时清理所有本地设备密钥和待审批申请，服务器仍保留设备审计记录。需要彻底阻止设备以后续签时，在后台撤销设备；撤销管理链接同时停止其设备、会话及下级授权。设备被撤销后，先 `logout --product PRODUCT_ID`，再带相同 `--product` 重新设备码登录以生成新密钥；商家须提供仍有效且有额度的新授权，不能用重新登录绕过撤销或绑定次数。会话界面区分 browser / cli 渠道，并显示绑定设备信息。
+`logout` 结束所选当前 CLI 会话，清理相应待审批申请与不再使用的本地恢复密钥，保留其他商品的授权。店铺快照中多个商品共用授权密钥，退出一个商品会保留其余成员所需的密钥。`logout --all` 同时清理所有本地授权、设备密钥和待审批申请，服务器仍保留审计记录。
+
+需要彻底阻止设备续签时，在后台撤销流水线授权或设备；撤销管理链接同时停止其设备、会话及下级授权。主动授权被撤销后，先退出相应范围，再申请新设备码，由店主重新批准；整组授权可用 `logout --origin SERVER` 清理该服务器所有本地记录后重新申请。旧链接兼容入口须提供仍有效且有额度的新授权，不能绕过撤销或绑定次数。会话界面区分 browser / cli 渠道，并显示绑定设备信息。

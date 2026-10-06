@@ -4,7 +4,7 @@ permissions:
   contents: read
 jobs:
   test:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-22.04
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
@@ -12,6 +12,18 @@ jobs:
       - uses: astral-sh/setup-uv@94527f2e458b27549849d47d273a16bec83a01e9 # v7
         with:
           version: "0.12.20"
+      - name: Install processor sandbox dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends build-essential meson ninja-build pkg-config libcap-dev libseccomp2
+          git init "$RUNNER_TEMP/extore-bubblewrap"
+          git -C "$RUNNER_TEMP/extore-bubblewrap" remote add origin https://github.com/containers/bubblewrap.git
+          git -C "$RUNNER_TEMP/extore-bubblewrap" fetch --depth=1 origin 719a4fd474d44b26906bcf2b1b0fb6eddd8d56d0
+          git -C "$RUNNER_TEMP/extore-bubblewrap" checkout --detach FETCH_HEAD
+          meson setup "$RUNNER_TEMP/extore-bubblewrap-build" "$RUNNER_TEMP/extore-bubblewrap" --prefix=/usr -Dtests=false -Dman=disabled -Dselinux=disabled
+          meson compile -C "$RUNNER_TEMP/extore-bubblewrap-build"
+          sudo meson install -C "$RUNNER_TEMP/extore-bubblewrap-build"
+          /usr/bin/bwrap --version
       - run: uv sync --frozen --python 3.12
       - run: uv run ruff check extore scripts tests
       - run: uv run ruff format --check extore scripts tests
@@ -21,6 +33,7 @@ jobs:
       - run: node --check extore/static/vendor/qrcodegen.js
       - run: node --check extore/static/totp-qr.js
       - run: node --check extore/static/device-login.js
+      - run: node --check extore/static/pipeline-authorizations.js
       - run: node --check extore/static/app.js
       - run: node --check extore/static/preferences.js
       - run: node --check extore/static/products.js
@@ -33,7 +46,7 @@ jobs:
       - run: node --check extore/static/owner-cli.js
       - run: node --test tests/*.test.cjs
       - run: uv run pytest -q processors/official/tests
-      - run: uv build
+      - run: uv build -q
       - run: uv run extore --help
       - run: uv run extore --version
       - run: uv run extore manage --help

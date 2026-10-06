@@ -632,6 +632,12 @@ summary {
   align-items: center;
   justify-content: space-between;
 }
+.admin-top > div {
+  min-width: 0;
+}
+#management-identity {
+  overflow-wrap: anywhere;
+}
 .admin-top h1 {
   font-size: 32px;
 }
@@ -1687,3 +1693,56 @@ th {
 }
 .header-home { color: inherit; text-decoration: none; border-bottom: 1px dashed currentColor; }
 .header-home:hover { opacity: .75; }
+
+.processor-config-card { min-width: 0; }
+.processor-config-card .section-head { align-items: flex-start; }
+.processor-config-card .section-head > div { min-width: 0; }
+.processor-config-form { min-width: 0; }
+.processor-config-basics { align-items: start; }
+.processor-settings, .processor-workflow-fields {
+  min-width: 0;
+  margin: 24px 0;
+  padding: 20px;
+  border: 1px dashed var(--dashed-line);
+  border-radius: 8px;
+}
+.processor-settings legend, .processor-workflow-fields legend {
+  padding: 0 8px;
+  font-weight: 600;
+}
+.processor-workflow { margin: 16px 0; }
+.processor-workflow > summary {
+  padding: 12px 0;
+  cursor: pointer;
+  color: var(--green);
+  font-weight: 600;
+  min-height: 44px;
+}
+.processor-workflow[open] > summary { border-bottom: 1px dashed var(--dashed-line); }
+.processor-variable-row, .processor-secret-row {
+  display: grid;
+  grid-template-columns: minmax(120px, 1fr) minmax(160px, 2fr) auto;
+  align-items: end;
+  gap: 12px;
+  margin: 20px 0;
+}
+.processor-variable-row > *, .processor-secret-row > *, .processor-runtime-grid > * { min-width: 0; }
+.processor-variable-row .field, .processor-secret-row .field { margin: 0; }
+.processor-variable-row input, .processor-secret-row input { font-family: ui-monospace, monospace; }
+.processor-variable-row button, .processor-secret-row button { min-height: 44px; }
+.processor-variable-row { align-items: start; }
+.processor-variable-row button { margin-top: 32px; }
+.processor-config-form [hidden] { display: none !important; }
+.processor-config-form textarea { min-height: 160px; }
+.processor-variable-row textarea { min-height: 96px; }
+.processor-runtime-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+.processor-workflow-actions { margin-top: 12px; }
+@media (max-width: 760px) {
+  .processor-config-basics, .processor-runtime-grid { grid-template-columns: minmax(0, 1fr); }
+  .processor-settings, .processor-workflow-fields { padding: 16px; }
+  .processor-variable-row, .processor-secret-row { grid-template-columns: minmax(0, 1fr); gap: 10px; }
+  .processor-variable-row button, .processor-secret-row button { justify-self: start; }
+  .processor-variable-row button { margin-top: 0; }
+  .processor-config-form textarea { font-size: 16px; }
+  .processor-config-card .section-head { flex-wrap: wrap; }
+}

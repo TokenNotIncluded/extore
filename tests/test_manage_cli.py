@@ -1388,6 +1388,7 @@ def device_login(merchant, profile, *, product=None, no_wait=False):
     options = [
         "login",
         "--device-code",
+        "--existing-link",
         "--origin",
         ORIGIN,
         "--client-name",
@@ -1782,6 +1783,7 @@ def test_real_device_code_cli_approvals_aggregate_two_product_queues(
             return command(
                 "login",
                 "--device-code",
+                "--existing-link",
                 "--origin",
                 origin,
                 "--product",
@@ -1795,6 +1797,7 @@ def test_real_device_code_cli_approvals_aggregate_two_product_queues(
             return command(
                 "login",
                 "--device-code",
+                "--existing-link",
                 "--origin",
                 origin,
                 "--product",

@@ -227,10 +227,10 @@ async function renderOwner(p) {
   await rendering;
 }
 
-async function editProduct(p, value = product()) {
+async function editProduct(p, value = product(), processors = catalog) {
   const editing = p.ui.edit(p.ctx, value);
   assert.equal(p.requests[0].url, p.ctx.role === "staff" ? "/manage/processors" : "/admin/processors");
-  p.requests[0].resolve(catalog);
+  p.requests[0].resolve(processors);
   await editing;
 }
 
@@ -444,12 +444,177 @@ test("processor schemas stay code-defined and product writes never echo masked c
   assert.equal(body.script, "");
 });
 
+const readableCatalog = [{
+  ...catalog[0],
+  configuration: [
+    { ...fieldDefinition("template", "textarea"), secret: false, default: "Default template" },
+    { ...fieldDefinition("message"), secret: false },
+    { ...fieldDefinition("api_key"), secret: true },
+    fieldDefinition("username"),
+  ],
+}];
+
+const boundProfile = (overrides = {}) => ({
+  id: "profile-one",
+  shop_id: "shop-one",
+  processor_id: "personalized_text",
+  name: "文档交付账户",
+  revision: 4,
+  bound_revision: 2,
+  configuration: { template: "Bound template\n$name", message: "Delivery message" },
+  configured_fields: ["template", "message", "api_key"],
+  ...overrides,
+});
+
+async function showBoundProfile(p, profile, listedProfile = boundProfile({ configuration: { template: "Latest template" } })) {
+  await editProduct(p, product({ shop_id: "shop-one", mode: "script", processor_id: "personalized_text" }), readableCatalog);
+  p.requests[1].resolve([listedProfile]);
+  p.requests[2].resolve({ product_id: "product-one", profile });
+  await flush();
+}
+
+test("bound templates are readable, escaped and pinned without echoing credentials or writing shared configuration", async () => {
+  const p = page();
+  const text = 'Bound template\n$name\n</textarea><script>unsafe()</script>&"';
+  await showBoundProfile(p, boundProfile({ configuration: {
+    template: text,
+    message: "Delivery message",
+    api_key: "CREDENTIAL_NEVER_RENDERED",
+    username: "UNDECLARED_SECRET_NEVER_RENDERED",
+    unknown: "UNKNOWN_NEVER_RENDERED",
+  } }));
+  const markup = p.node("#processor-configuration").innerHTML;
+  assert.equal(p.node("#profile-preview-0").value, text);
+  assert.equal(p.node("#profile-preview-0").readOnly, true);
+  assert.equal(p.node("#profile-preview-1").value, "Delivery message");
+  assert.equal(p.node("#profile-preview-1").readOnly, true);
+  assert.equal(p.node("#profile-preview-2"), null);
+  assert.match(markup, /版本 2/);
+  assert.match(markup, /&lt;\/textarea&gt;&lt;script&gt;/);
+  assert.match(markup, /保存后回到此商品选择新版本；已发行卡密继续使用原版本/);
+  assert.doesNotMatch(markup, /<script>|Latest template|CREDENTIAL_NEVER_RENDERED|UNDECLARED_SECRET_NEVER_RENDERED|UNKNOWN_NEVER_RENDERED/);
+  assert.match(markup, /id="profile-preview-1"[^>]*type="text"/);
+  p.node("#profile-preview-0").value = "Edited through DOM";
+  p.node("#product-form").emit("submit");
+  const body = JSON.parse(JSON.stringify(p.requests[3].body));
+  assert.equal(Object.hasOwn(body, "processor_config"), false);
+  assert.doesNotMatch(JSON.stringify(body), /Edited through DOM|CREDENTIAL_NEVER_RENDERED/);
+});
+
+test("explicit empty bound text remains empty and missing values never invent profile defaults", async () => {
+  const p = page();
+  await showBoundProfile(p, boundProfile({ configuration: { template: "", message: 10 } }));
+  assert.equal(p.node("#profile-preview-0").value, "");
+  assert.equal(p.node("#profile-preview-1"), null);
+  assert.doesNotMatch(p.node("#processor-configuration").innerHTML, /Default template/);
+});
+
+test("duplicate configuration names hide conflicting secrets regardless of declaration order", async () => {
+  const p = page();
+  const processors = [{ ...readableCatalog[0], configuration: [
+    { ...fieldDefinition("template", "textarea"), secret: false },
+    { ...fieldDefinition("template"), secret: true },
+    { ...fieldDefinition("template", "textarea"), secret: false },
+    { ...fieldDefinition("message"), secret: false },
+  ] }];
+  await editProduct(p, product({ shop_id: "shop-one", mode: "script", processor_id: "personalized_text" }), processors);
+  p.requests[1].resolve([boundProfile()]);
+  p.requests[2].resolve({ product_id: "product-one", profile: boundProfile({ configuration: { template: "CONFLICTING_SECRET_MUST_STAY_HIDDEN", message: "Visible message" } }) });
+  await flush();
+  assert.equal(p.node("#profile-preview-0").value, "Visible message");
+  assert.equal(p.node("#profile-preview-1"), null);
+  assert.doesNotMatch(p.node("#processor-configuration").innerHTML, /CONFLICTING_SECRET_MUST_STAY_HIDDEN/);
+});
+
+test("a bound preview requires the product's shop and processor, including the current shop fallback", async () => {
+  for (const profile of [
+    boundProfile({ shop_id: "shop-two", configuration: { template: "FOREIGN_SHOP_TEXT" } }),
+    boundProfile({ processor_id: "other_processor", configuration: { template: "FOREIGN_PROCESSOR_TEXT" } }),
+  ]) {
+    const p = page();
+    await showBoundProfile(p, profile);
+    assert.equal(p.node("#profile-preview-0"), null);
+    assert.doesNotMatch(p.node("#processor-configuration").innerHTML, /FOREIGN_SHOP_TEXT|FOREIGN_PROCESSOR_TEXT/);
+  }
+  const p = page();
+  p.ctx.shopId = "shop-one";
+  await editProduct(p, product({ mode: "script", processor_id: "personalized_text" }), readableCatalog);
+  p.requests[1].resolve([boundProfile()]);
+  p.requests[2].resolve({ product_id: "product-one", profile: boundProfile() });
+  await flush();
+  assert.equal(p.node("#profile-preview-0").value, "Bound template\n$name");
+});
+
+test("rebind previews the returned version and unbind removes text without changing product configuration", async () => {
+  const p = page();
+  await showBoundProfile(p, boundProfile());
+  await p.node("#bind-profile").emit("click");
+  assert.equal(p.requests[3].method, "PUT");
+  assert.deepEqual(JSON.parse(JSON.stringify(p.requests[3].body)), { profile_id: "profile-one" });
+  p.requests[3].resolve({ product_id: "product-one", profile: boundProfile({ bound_revision: 4, configuration: { template: "New bound version" } }) });
+  await flush();
+  assert.equal(p.node("#profile-preview-0").value, "New bound version");
+  assert.match(p.node("#processor-configuration").innerHTML, /版本 4/);
+  assert.deepEqual(p.notifications, ["处理器配置已绑定，仅用于之后发行的卡密"]);
+  await p.node("#unbind-profile").emit("click");
+  assert.equal(p.requests[4].method, "DELETE");
+  assert.equal(p.requests[4].body, null);
+  p.requests[4].resolve({ ok: true });
+  await flush();
+  assert.equal(p.node("#profile-preview-0"), null);
+  assert.match(p.node("#processor-configuration").innerHTML, /尚未绑定处理器配置/);
+  assert.doesNotMatch(p.node("#processor-configuration").innerHTML, /New bound version/);
+});
+
+test("workflow preview shows pinned plain variables, secret names and only bounded runtime fields", async () => {
+  const p = page();
+  const workflow = {
+    variables: { OUTPUT_LOCALE: "zh-CN", INSTRUCTIONS: "Bound instructions\n</textarea><script>ignored()</script>" },
+    configured_secret_names: ["API_TOKEN", "PAYMENT_ACCOUNT"],
+    runtime: { timeout_seconds: 90, memory_mb: 256, cpu_seconds: 60, max_output_bytes: 1000000, command: "hidden-command" },
+    secrets: { API_TOKEN: "private-workflow-token" },
+  };
+  await showBoundProfile(p, boundProfile({ workflow }), boundProfile({ workflow: { ...workflow, variables: { OUTPUT_LOCALE: "Latest locale" } } }));
+  assert.equal(p.node("#workflow-variable-0").value, "zh-CN");
+  assert.equal(p.node("#workflow-variable-0").readOnly, true);
+  assert.equal(p.node("#workflow-variable-1").value, workflow.variables.INSTRUCTIONS);
+  assert.equal(p.node("#workflow-variable-1").readOnly, true);
+  const markup = p.node("#processor-configuration").innerHTML;
+  assert.match(markup, /绑定版本 2/);
+  assert.match(markup, /API_TOKEN · 已设置/);
+  assert.match(markup, /PAYMENT_ACCOUNT · 已设置/);
+  assert.match(markup, /最长运行时间（秒）<\/dt><dd>90/);
+  assert.match(markup, /内存上限（MB）<\/dt><dd>256/);
+  assert.match(markup, /输出上限（字节）<\/dt><dd>1000000/);
+  assert.match(markup, /变量单独传给处理器，不会自动插入交付文本/);
+  assert.match(markup, /「处理器配置」中编辑模板与变量/);
+  assert.doesNotMatch(markup, /private-workflow-token|Latest locale|hidden-command|<script>|处理器账户/);
+  p.node("#workflow-variable-0").value = "DOM change must not save shared config";
+  p.node("#product-form").emit("submit");
+  assert.equal(Object.hasOwn(p.requests[3].body, "workflow"), false);
+  assert.doesNotMatch(JSON.stringify(p.requests[3].body), /DOM change|private-workflow-token/);
+});
+
+test("foreign or malformed workflow DTO values never create readable variables or leaked secrets", async () => {
+  for (const profile of [
+    boundProfile({ shop_id: "shop-two", workflow: { variables: { SECRET: "foreign-plain" }, configured_secret_names: ["FOREIGN_TOKEN"], runtime: { memory_mb: 256 } } }),
+    boundProfile({ processor_id: "other_processor", workflow: { variables: { SECRET: "foreign-plain" }, configured_secret_names: ["FOREIGN_TOKEN"], runtime: { memory_mb: 256 } } }),
+    boundProfile({ workflow: { variables: { "bad-name": "invalid-plain", ARRAY: [] }, configured_secret_names: ["<script>bad-name</script>", 4], runtime: { timeout_seconds: "90", memory_mb: 1000000 }, secrets: { API_TOKEN: "private-workflow-token" } } }),
+  ]) {
+    const p = page();
+    await showBoundProfile(p, profile);
+    assert.equal(p.node("#workflow-variable-0"), null);
+    assert.doesNotMatch(p.node("#processor-configuration").innerHTML, /foreign-plain|FOREIGN_TOKEN|invalid-plain|private-workflow-token|<script>|<dd>1000000/);
+  }
+});
+
 test("even a full product manager cannot load or bind shop processor accounts", async () => {
   const p = page({ role: "staff", canConfigure: true });
   await editProduct(p, product({ mode: "script", processor_id: "personalized_text", processor_config: { template: "payment-secret" } }));
   assert.equal(p.requests.length, 1);
   assert.equal(p.node("#p-processor").disabled, true);
   assert.equal(p.node("#p-profile"), null);
+  assert.equal(p.node("#workflow-variable-0"), null);
   assert.equal(p.node("#pc-value-0"), null);
   assert.doesNotMatch(p.workspace.innerHTML, /payment-secret/);
   p.node("#product-form").emit("submit");

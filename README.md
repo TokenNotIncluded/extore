@@ -41,8 +41,8 @@ Extore 接手支付之后的兑换与交付：验证卡密，将顾客带到对�
 | 独立商品队列 | 每个商品独立领取、筛选和批处理任务，显示真实步骤、处理消息与商品内排位。人或获授权的 AI 使用同一套接口。 |
 | 灵活交付 | 链接、文本、账户信息或文件，也可只返回服务状态。支持一次领取、重复查看、失败重试、退回补充、附原因的拒绝，以及顾客主动销毁内容。 |
 | 权限与认证 | 平台管理员使用多个 Passkey；店主可用邮箱密码、可选 TOTP 或多个 Passkey 登录。注册默认关闭，由平台管理员邀请店主。商品链接默认 1 次浏览器登录与 1 个 CLI 绑定，支持委派和会话审计。 |
-| 自动化与二次开发 | 开源预设处理器、店铺加密配置档案、代码定义输入输出与步骤、Python SDK、签名事件与回调；原生定义 **49 个 WebMCP 工具**，按页面、身份与权限动态提供。 |
-| 命令行操作 | `manage` 管理商品授权，`customer` 兑换与领取，`admin` 用固定账号的设备管理本店或平台；默认精简输出，凭证保存到私密文件，商品授权支持浏览器设备码批准，提供可复制 AI 提示词。 |
+| 自动化与二次开发 | 开源商品处理器、店铺加密配置与工作流变量、只写秘密、冻结运行限制、代码定义输入输出与步骤、Python SDK、签名事件与回调；原生定义 **49 个 WebMCP 工具**，按页面、身份与权限动态提供。 |
+| 命令行操作 | `manage` 管理商品授权，`customer` 兑换与领取，`admin` 用固定账号的设备管理本店或平台；默认精简输出，凭证保存到私密文件。AI 主动申请单商品或当前整店队列权限，店长用设备码审批，可追加权限、集中审计与撤销。 |
 | 界面与存储 | SQLite 持久化任务、事件和投递重试；单文件、单卡、单店与全站附件额度，磁盘余量保护；撕纸与分段虚线界面，明暗和语言默认自动。 |
 
 顾客上传的是兑换材料，管理者上传的是交付文件。预设处理器来自审核后固定版本的[开源子模块](https://github.com/TokenNotIncluded/extore-processors)，商家在预设中选择并填写配置。浏览器 AI 需要原生 WebMCP 支持及实际授权，具体兼容性见[工具文档](https://github.com/TokenNotIncluded/extore/blob/main/docs/webmcp.md#浏览器兼容性)。
@@ -64,6 +64,12 @@ Extore 接手支付之后的兑换与交付：验证卡密，将顾客带到对�
 
 ## 快速运行
 
+需要 **Python 3.12+、[uv](https://docs.astral.sh/uv/) 和 Linux**。完整环境、部署和备份说明见[运行指南](https://github.com/TokenNotIncluded/extore/blob/main/docs/getting-started.md)。内置自动处理器还需要系统安装 bubblewrap 0.12 及以上和 libseccomp；Python 包安装不会提供这些依赖。Arch Linux 可执行：
+
+```sh
+sudo pacman -S --needed bubblewrap libseccomp
+```
+
 从 [PyPI](https://pypi.org/project/extore/) 安装后，可直接使用 `extore` 命令：
 
 ```sh
@@ -76,8 +82,6 @@ extore serve
 另开一个终端，设置相同的 `EXTORE_DATA` 后运行 `extore worker`。`extore --help` 查看全部命令，`extore --version` 查看版本。生产环境还须配置 `EXTORE_ORIGIN` 并提供 HTTPS，见运行指南。
 
 也可以从源码运行：
-
-需要 **Python 3.12+、[uv](https://docs.astral.sh/uv/) 和 Linux**。完整环境、部署和备份说明见[运行指南](https://github.com/TokenNotIncluded/extore/blob/main/docs/getting-started.md)。
 
 ```sh
 git clone --recurse-submodules https://github.com/TokenNotIncluded/extore.git
@@ -114,6 +118,9 @@ uv run extore worker
 extore manage login --device-code --origin https://extore.example.com --product PRODUCT_ID
 extore manage queues --all
 
+# 本店当前全部队列商品：先申请，再由店长核对商品清单和权限
+extore manage login --device-code --origin https://extore.example.com --shop SHOP_ID --pipelines-all --no-wait
+
 # 顾客：卡密从私密文件标准输入读取
 extore customer exchange --origin https://extore.example.com --codes-stdin < /path/to/private-codes.txt
 
@@ -124,11 +131,13 @@ extore admin login --origin https://extore.example.com
 extore admin login --origin https://extore.example.com --email owner@example.com
 ```
 
-商品授权可以在客户端聚合查看，每次写入仍使用一个独立授权。店主设备授权最多 30 天，8 小时会话由本机私钥续签；后续 JSON 写操作另用一次性设备签名。列表默认摘要，任务详情和教程按需读取，制卡与新授权链接保存为 0600 文件。
+本店队列授权只覆盖批准清单内的队列商品，之后新建的商品需要再次申请。AI 可提出追加商品或权限，店长可减少申请范围再批准；拒绝、取消或到期的申请不会改变原授权。成功追加保留原任务处理者身份；每次写入仍使用一个商品的独立授权，客户端可以聚合查看多个队列。后台会话管理可查看、撤销整份流水线授权并释放其处理中任务。店主设备授权最多 30 天，8 小时会话由本机私钥续签；后续 JSON 写操作另用一次性设备签名。列表默认摘要，任务详情和教程按需读取，制卡与新授权链接保存为 0600 文件。
 
-SMTP 凭据、TOTP 密钥与店铺处理器配置加密保存，接口只返回配置状态和修订元数据。付款适配尚未启用，供应商平台仍待确定；现有预设只交付链接或文本，不代表已完成真实付款。
+SMTP 凭据、TOTP 密钥与店铺处理器配置加密保存。店主可以回读、编辑明确声明为普通文本的交付模板与说明；账号密钥和未声明类型的配置只返回是否已设置。配置档案还支持普通工作流变量、只写秘密与运行资源上限，网页和店主 CLI 均可管理。已有卡密冻结整份档案修订，修改变量、秘密或资源上限不改变旧卡；处理器通过只读环境取得对应版本。[配置与工作流说明](https://github.com/TokenNotIncluded/extore/blob/main/docs/shops.md#工作流变量秘密与运行限制)
 
-设备码登录要求 **0.7.0 及以上**。网页可一键复制不含凭证的商品机器人提示词：机器人申请设备码，你在 `/cli/device` 输入短码，核对商品、权限、设备指纹与期限，再明确批准。批准只绑定选中的既有商品授权，不扩大到整店；浏览器与 CLI 绑定次数独立。[文档里的提示词](https://github.com/TokenNotIncluded/extore/blob/main/docs/ai-prompts.md)也可直接复制，配合已授权的 CLI 使用。上传只保存材料，提交或交付需明确执行下一步；持续运行机器人由接入方安排。
+内置商品处理器采用固定代码的离线运行环境，需要 Linux、bubblewrap 0.12 及以上（`bwrap`）、libseccomp 和可用的内核命名空间。当前只支持 stdin/stdout 文本与资源链接预设，执行时间、进程地址空间、CPU 与输出上限；禁止联网、fork、外部程序及创建文件。隔离不可用时拒绝执行，不降级为宿主直接运行。复杂文档和 PPT 仍由外部 AI 通过 CLI 队列处理并上传文件。商家不能增加命令、挂载或联网能力；处理器可读取授予的秘密，代码仍须审核，秘密不会自动进入交付模板。付款适配和受控支付服务尚未实现，现有预设不代表已完成真实付款。
+
+设备码登录要求 **0.7.0 及以上**。网页可一键复制不含凭证的商品机器人提示词：机器人申请设备码，你在 `/cli/device` 输入短码，核对商品、权限、设备指纹与期限，再明确批准。主动商品申请不要求先创建管理链接；本店流水线只给队列权限，商品管理的额外权限须单独明确申请。既有商品管理链接通过 `--existing-link` 设备码流程绑定，浏览器与 CLI 绑定次数独立。[文档里的提示词](https://github.com/TokenNotIncluded/extore/blob/main/docs/ai-prompts.md)也可直接复制，配合已授权的 CLI 使用。上传只保存材料，提交或交付需明确执行下一步；持续运行机器人由接入方安排。
 
 ## 文档
 

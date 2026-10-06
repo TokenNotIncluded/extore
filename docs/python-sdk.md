@@ -13,7 +13,7 @@ SDK 位于 `extore/sdk/`，任务和回调模块只使用 Python 标准库。二
 | `resource_link` | 必填 `resource_url`：HTTPS 地址，最多 2000 字符；可选 `message`：多行文本，最多 10000 字符，默认空串 | 无 | 必填 `resource_url`；可选 `message` |
 | `personalized_text` | 必填 `template`：最多 10000 字符，默认 `你好，$name！\n你的商品已准备好。` | 必填 `name`：最多 200 字符 | 必填 `content`：多行文本 |
 
-模板只做纯文本替换：`$name` 和 `${name}` 插入称呼，`$$` 表示美元符号，不执行代码。资源处理器只返回配置的链接，不访问该地址。两个处理器的配置字段均标记为 `secret: true`；管理和顾客读取接口均不返回档案原文，交付结果在授权领取时返回。发行卡密时固定档案版本，worker 仅解密该卡所属店铺的版本；更新配置不改变旧卡，撤销档案则阻止已有版本继续执行。
+模板只做纯文本替换：`$name` 和 `${name}` 插入称呼，`$$` 表示美元符号，不执行代码。资源处理器只返回配置的链接，不访问该地址。`template` 和 `message` 明确标记为 `secret: false`，店主可在处理器配置中回读编辑；`resource_url` 保持敏感。缺少 `secret` 标记的字段默认敏感，不回读原值。顾客只在授权领取时获取交付结果。发行卡密时固定配置版本，worker 仅解密该卡所属店铺的版本；更新配置不改变旧卡，撤销配置则阻止已有版本继续执行。
 
 可以保存尚未绑定配置的商品草稿，但发行卡密和实际执行前必须通过完整校验。配置档案本身须符合代码定义的结构。
 
@@ -32,7 +32,7 @@ result = processor.run(
 
 ### 预设 worker 子进程协议
 
-worker 调用固定模块 `python -m extore_processors <processor_id>`，stdin 包含顾客参数、商家配置，以及服务端绑定的规格和步骤元数据：
+worker 在隔离运行环境中执行固定的 `extore_processors` 模块，stdin 包含顾客参数、商家配置，以及服务端绑定的规格、步骤和环境元数据：
 
 ```json
 {
@@ -41,7 +41,8 @@ worker 调用固定模块 `python -m extore_processors <processor_id>`，stdin �
   "variant": {"id":"default","name":"默认规格","description":"","price":null,"currency":"CNY","attributes":{},"enabled":true},
   "steps": [],
   "completed_steps": [],
-  "shop_context": {"shop_id":"所属店铺 UUID","profile_id":"配置档案 UUID","revision":1}
+  "shop_context": {"shop_id":"所属店铺 UUID","profile_id":"配置档案 UUID","revision":1},
+  "environment": {"OUTPUT_LOCALE":"zh-CN"}
 }
 ```
 
@@ -56,13 +57,35 @@ worker 调用固定模块 `python -m extore_processors <processor_id>`，stdin �
 
 CLI 校验失败以非零状态退出，只向 stderr 写入安全错误代码，不输出用户值。worker 丢弃 stderr，限制执行时间为 120 秒、stdout 总量为 1 MB、单行读取为 150 KB。结果后继续输出、非零退出、无结果、超时或格式错误均转为不可自动重试的待核实失败。
 
-worker 只允许尚无计划、无已完成步骤的任务初始化一次 `progress_steps`，随后把计划保存为任务快照；已有计划不能更换。已有计划含预设自己的步骤 ID 时，预设按实际完成项更新；遇到其他商家计划时，只报告百分比和消息，不伪造已完成项。有步骤时最终进度由服务端按完成集合计算，百分比不能绕过商家计划。顾客填写的参数不能覆盖顶层 `variant`、`steps`、`completed_steps` 或 `shop_context`。
+worker 只允许尚无计划、无已完成步骤的任务初始化一次 `progress_steps`，随后把计划保存为任务快照；已有计划不能更换。已有计划含预设自己的步骤 ID 时，预设按实际完成项更新；遇到其他商家计划时，只报告百分比和消息，不伪造已完成项。有步骤时最终进度由服务端按完成集合计算，百分比不能绕过商家计划。顾客填写的参数不能覆盖顶层 `variant`、`steps`、`completed_steps`、`shop_context` 或 `environment`。
 
 固定审核代码限制了可运行的处理器集合，不能替代恶意代码的隔离沙箱。需要独立依赖或外部平台访问的自动化服务，可以使用下面的 HTTPS Webhook 与签名回调。
 
 ## SDK 任务与结果
 
-`Task` 字段为 `id`、`product_id`、`attempt`、`params`、`configuration`、`variant`、`steps`、`completed_steps` 与 `shop_context`。`configuration` 默认 `{}`；步骤计划和完成集合转为只读快照，默认空集合。`ShopContext` 是不可变的 `shop_id/profile_id/revision` 元数据，不含配置秘密，旧请求可省略。旧任务省略 `variant` 时使用固定默认规格（空属性、空参考价、币种 `CNY`）。`idempotency_key` 等于稳定任务 ID，跨重试不变；真实交付必须按这个值去重。
+`Task` 字段为 `id`、`product_id`、`attempt`、`params`、`configuration`、`variant`、`steps`、`completed_steps`、`shop_context` 与 `environment`。`configuration` 和 `environment` 默认 `{}`；环境、步骤计划和完成集合转为只读快照，默认空集合。`ShopContext` 是不可变的 `shop_id/profile_id/revision` 元数据，不含配置秘密，旧请求可省略。旧任务省略 `variant` 时使用固定默认规格（空属性、空参考价、币种 `CNY`）。`idempotency_key` 等于稳定任务 ID，跨重试不变；真实交付必须按这个值去重。
+
+### 变量、密钥与运行环境
+
+处理器配置的 `workflow` 分为普通 `variables`、私密 `secrets` 和资源上限 `runtime`。店主可回读普通变量；密钥只返回已设置的名称，不回读值。配置保存后生成新版本，发行卡密时固定该版本。重试仍使用原版本，不受之后修改的变量、密钥或运行上限影响。
+
+worker 把该卡固定版本的普通变量与密钥合并为顶层 `environment: dict[str, str]`，只提供给审核后的处理器代码。SDK 用 `task.environment["NAME"]`，预设包用 `context.environment["NAME"]` 读取原名称；两个映射都先复制再设为只读，不能通过修改传入字典或顾客参数覆盖它们。省略 `environment` 保持兼容，得到空映射；显式 `null`、嵌套值或其他非字符串值会被拒绝。
+
+```python
+from extore.sdk import Task
+from extore_processors import ProcessorContext
+
+# 实际 worker 从卡密固定的配置版本构造这些值。
+task = Task("task-id", "product-id", 1, {}, environment={"OUTPUT_LOCALE": "zh-CN"})
+context = ProcessorContext(environment={"OUTPUT_LOCALE": "zh-CN"})
+locale = task.environment.get("OUTPUT_LOCALE", "en")
+assert locale == context.environment["OUTPUT_LOCALE"]
+# task.environment["OUTPUT_LOCALE"] = "en"  # TypeError：不可修改。
+```
+
+隔离进程也获得带前缀的操作系统环境变量，例如 `os.environ.get("EXTORE_WORKFLOW_OUTPUT_LOCALE")`；不会导出裸 `OUTPUT_LOCALE`，也不把密钥放进命令参数。配置名称必须匹配 `[A-Z][A-Z0-9_]{0,63}`，系统名称、`EXTORE_` 等保留前缀被拒绝；变量与密钥不可重名。每组最多 64 项，合并后最多 128 项；每个值 UTF-8 编码最多 8192 字节，所有值合计最多 65536 字节，不能包含 NUL。整个 stdin JSON（顾客参数、配置、环境和全部元数据）仍最多 200000 个 UTF-8 字节，超限会在处理器执行前拒绝，不截断值。
+
+环境不会自动插入 `params`、模板、进度消息或交付 `output`。顾客在 `params` 中填写 `environment` 也不会创建运行变量。内置文本模板仍只支持顾客称呼 `$name`，不能读取环境密钥。`Task` 的自动 `repr` 省略环境；代码仍须避免打印环境映射、密钥、原始异常，或把它们放进结果。运行环境不开放任意命令、文件挂载或网络访问；需要外部平台网络的处理流程可使用签名 Webhook。
 
 `variant` 是发行卡密时冻结的完整规格快照，包含 `id,name,description,price,currency,attributes,enabled`；以后停用规格或改参考价、属性都不改旧卡。`price` 是参考价，以十进制字符串或 `None` 保存，仅供商家在外部商城配置商品时参考；Extore 只负责兑换与交付，不收款。SDK 的 `steps` 每项含只读 `id,label`；页面和事件视图另外带 `done`。`completed_steps` 是本次尝试已经完成的步骤 ID。输入输出定义也在任务首次提交时冻结，队列商品后来调整表单只影响新任务；处理旧任务时用队列接口返回的任务 `parameters` / `outputs`，不能套用商品当前表单。
 
@@ -113,13 +136,14 @@ if __name__ == "__main__":
   "variant": {"id":"standard","name":"标准版","description":"","price":"12.5","currency":"CNY","attributes":{"days":30},"enabled":true},
   "steps": [],
   "completed_steps": [],
-  "shop_context": {"shop_id":"所属店铺 UUID","profile_id":null,"revision":null}
+  "shop_context": {"shop_id":"所属店铺 UUID","profile_id":null,"revision":null},
+  "environment": {"OUTPUT_LOCALE":"zh-CN"}
 }
 ```
 
 `task.define_steps(plan, message="")` 为当前空计划初始化一次 1–30 个有唯一 ID 的步骤，输出 `kind="progress"` 与 `progress_steps`。已有计划或完成项时拒绝替换；顺序与标签固定，重试保留计划。`task.progress(0..99, message)` 输出进度 JSON Lines。带步骤的任务使用 `task.progress(message="内容已准备好", completed_steps=["prepare"])`，也可同时提供百分比，但服务器按步骤数量计算；成功由系统设为 100。
 
-`run` 随后输出包含 `kind="result"`、`state`、`output`、`content`、`message`、`retryable` 和可选 `completed_steps` 的结果行。它限制 stdin 为 200000 字节，并将无效输入或处理异常转换为安全的待核实失败，不公开异常文本。自行编写外部服务时，进度行需要由服务转成 `Client.update` 回调，不能仅打印后期待主网站收到进度。当前 `Client.update` 支持更新已存在计划的完成项，不接受 `progress_steps`；外部 Webhook 的计划应先在商品中定义。
+`run` 随后输出包含 `kind="result"`、`state`、`output`、`content`、`message`、`retryable` 和可选 `completed_steps` 的结果行。它限制整个 stdin 为 200000 个 UTF-8 字节，包括 `configuration` 与 `environment`，并将无效输入或处理异常转换为安全的待核实失败，不公开异常文本。自行编写外部服务时，进度行需要由服务转成 `Client.update` 回调，不能仅打印后期待主网站收到进度。当前 `Client.update` 支持更新已存在计划的完成项，不接受 `progress_steps`；外部 Webhook 的计划应先在商品中定义。
 
 完成集合必须来自任务计划，省略保留原值，不能在同一尝试撤回已完成步骤。完成全部步骤但仍处理中时为 99%，成功回调自动完成全部步骤并设为 100%。`Result.success(..., completed_steps=...)` 与 `Result.failure(..., completed_steps=...)` 可携带完成集合；实际重试开始时清空集合、进度归零，保留任务 ID、规格、输入输出定义和步骤计划。
 

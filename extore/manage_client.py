@@ -241,6 +241,9 @@ def _safe_grant(grant):
             "permissions",
             "link_expires",
             "expires",
+            "authorization_id",
+            "authorization_revision",
+            "shop_id",
         )
         if key in grant
     }
@@ -521,7 +524,16 @@ class ManageClient:
             "already_authorized": response.get("already_authorized", False),
         }
 
-    def device_login(self, origin, client_name, *, product=None, no_wait=False):
+    def device_login(
+        self,
+        origin,
+        client_name,
+        *,
+        product=None,
+        no_wait=False,
+        scope=None,
+        scope_key=None,
+    ):
         """Ask a browser to approve this locally generated key, without a link."""
         origin = origin_from_url(origin)
         name = client_name.strip()
@@ -547,7 +559,10 @@ class ManageClient:
         active = [
             item
             for item in pending
-            if item.get("expires", time.time() + 1) > time.time()
+            if item.get("scope_claim", {})
+            .get("authorization", {})
+            .get("expires", item.get("expires", time.time() + 1))
+            > time.time()
         ]
         if len(active) != len(pending):
             pending[:] = active
@@ -559,9 +574,33 @@ class ManageClient:
                 if item.get("origin") == origin
                 and item.get("client_name") == name
                 and item.get("requested_product") == product
+                and item.get("scope_intent") == scope
             ),
             None,
         )
+        if request is None and scope is not None:
+            # A claim can already have committed the new scope revision before
+            # session renewal loses its response. Resume that saved claim even
+            # though the local authorization now has the newer revision.
+            for item in pending:
+                previous = item.get("scope_intent")
+                if (
+                    item.get("scope_claim")
+                    and isinstance(previous, dict)
+                    and item.get("origin") == origin
+                    and item.get("client_name") == name
+                    and all(
+                        previous.get(key) == scope.get(key)
+                        for key in ("kind", "shop_id", "authorization_id", "reason")
+                    )
+                    and set(previous.get("product_ids", []))
+                    == set(scope["product_ids"])
+                    and set(previous.get("permissions", []))
+                    == set(scope["permissions"])
+                ):
+                    request = item
+                    scope = previous
+                    break
         if request is None:
             device_keys = self.data.setdefault("device_keys", {})
             if not isinstance(device_keys, dict):
@@ -573,13 +612,35 @@ class ManageClient:
                     if item.get("origin") == origin
                     and item.get("device_id")
                     and (product is None or item.get("product_id") == product)
+                    and scope is None
                 ),
                 None,
             )
             key_scope = origin + "\n" + (product or "")
-            saved_key = device_keys.get(key_scope) or (
-                existing["private_key"] if existing else None
-            )
+            if scope is not None:
+                device_keys = self.data.setdefault("scoped_device_keys", {})
+                if not isinstance(device_keys, dict):
+                    raise ManageError("Invalid CLI profile", code="invalid_profile")
+                key_scope = (
+                    origin
+                    + "\n"
+                    + hashlib.sha256(
+                        json.dumps(
+                            scope,
+                            sort_keys=True,
+                            separators=(",", ":"),
+                            ensure_ascii=True,
+                        ).encode()
+                    ).hexdigest()
+                )
+                saved = device_keys.get(key_scope)
+                saved_key = scope_key or (
+                    saved.get("private_key") if isinstance(saved, dict) else saved
+                )
+            else:
+                saved_key = device_keys.get(key_scope) or (
+                    existing["private_key"] if existing else None
+                )
             private = (
                 Ed25519PrivateKey.from_private_bytes(_unb64(saved_key))
                 if saved_key
@@ -587,8 +648,13 @@ class ManageClient:
             )
             # The code may expire after a binding response is lost. Keep its
             # device key so a fresh approval can recover that same binding.
-            device_keys[key_scope] = _b64(
+            encoded_key = _b64(
                 private.private_bytes(Encoding.Raw, PrivateFormat.Raw, NoEncryption())
+            )
+            device_keys[key_scope] = (
+                {"private_key": encoded_key, "scope_intent": scope, "origin": origin}
+                if scope is not None
+                else encoded_key
             )
             issued_at = int(time.time())
             request = {
@@ -603,6 +669,9 @@ class ManageClient:
                 "nonce": _b64(issued_at.to_bytes(8, "big") + secrets.token_bytes(24)),
                 "expires": issued_at + DEVICE_LOGIN_TTL,
             }
+            if scope is not None:
+                request["scope_intent"] = scope
+                request["scope_key_selector"] = key_scope
             pending.append(request)
             # Save the key and nonce before requesting a code; the server can
             # return the same request if its first response was interrupted.
@@ -611,31 +680,55 @@ class ManageClient:
         public_raw = private.public_key().public_bytes(Encoding.Raw, PublicFormat.Raw)
         public = _b64(public_raw)
         fingerprint = hashlib.sha256(public_raw).hexdigest()
+        if request.get("scope_claim"):
+            return self._finish_scope_login(request, pending)
         if request.get("device_id"):
             return self._finish_device_login(request, pending)
         if not request.get("request_id"):
-            proof = "\n".join(
-                (
-                    "extore-cli-device-request-v1",
-                    origin,
-                    public,
-                    name,
-                    request["nonce"],
-                    product or "",
+            if scope is None:
+                payload = {
+                    "public_key": public,
+                    "client_name": name,
+                    "nonce": request["nonce"],
+                    "product_id": product,
+                }
+                proof = "\n".join(
+                    (
+                        "extore-cli-device-request-v1",
+                        origin,
+                        public,
+                        name,
+                        request["nonce"],
+                        product or "",
+                    )
                 )
-            )
+                request_path = "/api/cli/device/request"
+            else:
+                payload = {
+                    **scope,
+                    "public_key": public,
+                    "client_name": name,
+                    "nonce": request["nonce"],
+                }
+                proof = (
+                    "extore-cli-scope-request-v1\n"
+                    + origin
+                    + "\n"
+                    + json.dumps(
+                        payload,
+                        sort_keys=True,
+                        separators=(",", ":"),
+                        ensure_ascii=True,
+                    )
+                )
+                request_path = "/api/cli/scopes/request"
+            payload["signature"] = _b64(private.sign(proof.encode()))
             response = _object(
                 self._json(
                     origin,
                     "POST",
-                    "/api/cli/device/request",
-                    json={
-                        "public_key": public,
-                        "signature": _b64(private.sign(proof.encode())),
-                        "client_name": name,
-                        "nonce": request["nonce"],
-                        "product_id": product,
-                    },
+                    request_path,
+                    json=payload,
                 )
             )
             self._validate_device_request(response, origin, fingerprint)
@@ -666,12 +759,19 @@ class ManageClient:
             + visible["user_code"]
             + "\n核对设备指纹："
             + visible["fingerprint"]
-            + "\n仅批准你刚刚发起的请求；管理链接留在浏览器中。",
+            + (
+                "\n请店主在浏览器核对商品清单与请求权限后批准。"
+                if scope is not None
+                else "\n仅批准你刚刚发起的请求；管理链接留在浏览器中。"
+            ),
             file=sys.stderr,
             flush=True,
         )
         if no_wait:
-            return {"ok": True, "pending": True, "authorization": visible}
+            result = {"ok": True, "pending": True, "authorization": visible}
+            if scope is not None:
+                result["requested"] = scope
+            return result
         print(
             "等待浏览器授权，按 Ctrl+C 可停止；重复此命令可继续。",
             file=sys.stderr,
@@ -685,14 +785,23 @@ class ManageClient:
             if time.monotonic() >= deadline:
                 break
             proof = "\n".join(
-                ("extore-cli-device-status-v1", origin, request["request_id"], public)
+                (
+                    "extore-cli-scope-status-v1"
+                    if scope is not None
+                    else "extore-cli-device-status-v1",
+                    origin,
+                    request["request_id"],
+                    public,
+                )
             )
             try:
                 response = _object(
                     self._json(
                         origin,
                         "POST",
-                        "/api/cli/device/status",
+                        "/api/cli/scopes/status"
+                        if scope is not None
+                        else "/api/cli/device/status",
                         json={
                             "request_id": request["request_id"],
                             "public_key": public,
@@ -742,7 +851,9 @@ class ManageClient:
                 )
             proof = "\n".join(
                 (
-                    "extore-cli-device-claim-v1",
+                    "extore-cli-scope-claim-v1"
+                    if scope is not None
+                    else "extore-cli-device-claim-v1",
                     origin,
                     request["request_id"],
                     request["challenge"],
@@ -753,7 +864,9 @@ class ManageClient:
                 self._json(
                     origin,
                     "POST",
-                    "/api/cli/device/claim",
+                    "/api/cli/scopes/claim"
+                    if scope is not None
+                    else "/api/cli/device/claim",
                     json={
                         "request_id": request["request_id"],
                         "public_key": public,
@@ -761,6 +874,14 @@ class ManageClient:
                     },
                 )
             )
+            if scope is not None:
+                self._validate_scope_claim(response, request, fingerprint)
+                request["scope_claim"] = {
+                    "authorization": response["authorization"],
+                    "bindings": response["bindings"],
+                }
+                self.persist()
+                return self._finish_scope_login(request, pending)
             if (
                 not isinstance(response.get("device_id"), str)
                 or not response["device_id"]
@@ -851,6 +972,384 @@ class ManageClient:
             "grant": _safe_grant(grant),
             "already_authorized": request.get("already_authorized", False),
         }
+
+    def pipeline_login(
+        self,
+        origin,
+        client_name,
+        *,
+        kind,
+        shop=None,
+        products=(),
+        permissions=None,
+        authorization=None,
+        reason="",
+        no_wait=False,
+    ):
+        from .models import LINK_PERMISSIONS
+
+        products = list(products)
+        permissions = list(
+            permissions
+            if permissions is not None
+            else (
+                authorization["permissions"] if authorization else LINK_PERMISSIONS[:3]
+            )
+        )
+        if (
+            kind not in ("product", "shop.pipeline")
+            or (kind == "product" and (len(products) != 1 or shop is not None))
+            or (kind == "shop.pipeline" and not shop)
+            or len(products) != len(set(products))
+            or any(
+                not isinstance(item, str) or not item or len(item) > 100
+                for item in products
+            )
+            or not permissions
+            or len(permissions) != len(set(permissions))
+            or set(permissions) - set(LINK_PERMISSIONS)
+            or (
+                kind == "shop.pipeline" and set(permissions) - set(LINK_PERMISSIONS[:3])
+            )
+            or (
+                set(permissions) & {"queue.process", "queue.retry"}
+                and "queue.view" not in permissions
+            )
+            or (
+                "fulfillment.configure" in permissions
+                and "product.edit" not in permissions
+            )
+            or not isinstance(reason, str)
+            or len(reason) > 1000
+            or (
+                authorization is not None
+                and (
+                    authorization["origin"] != origin
+                    or authorization["kind"] != kind
+                    or (shop and authorization["shop_id"] != shop)
+                    or set(authorization["permissions"]) - set(permissions)
+                    or (products and set(authorization["product_ids"]) - set(products))
+                )
+            )
+        ):
+            raise ManageError(
+                "Invalid pipeline scope; upgrades must retain existing products and permissions",
+                code="invalid_input",
+            )
+        scope = {
+            "kind": kind,
+            "shop_id": shop,
+            "product_ids": products,
+            "permissions": permissions,
+            "authorization_id": authorization["id"] if authorization else None,
+            "expected_revision": authorization["revision"] if authorization else None,
+            "reason": reason,
+        }
+        return self.device_login(
+            origin,
+            client_name,
+            product=products[0] if kind == "product" else None,
+            no_wait=no_wait,
+            scope=scope,
+            scope_key=authorization["private_key"] if authorization else None,
+        )
+
+    def pipeline_authorize(
+        self,
+        *,
+        authorization_id=None,
+        grant_id=None,
+        origin=None,
+        products=(),
+        pipelines_all=False,
+        permissions=None,
+        reason="",
+        client_name=None,
+        no_wait=False,
+    ):
+        authorizations = self.data.get("authorizations", [])
+        if not isinstance(authorizations, list):
+            raise ManageError("Invalid CLI profile", code="invalid_profile")
+        if grant_id:
+            grants = [
+                item
+                for item in self.data["grants"]
+                if item.get("id") == grant_id
+                and (not origin or item["origin"] == origin)
+            ]
+            if len(grants) != 1:
+                raise ManageError(
+                    "Select a saved grant and its server origin", code="no_auth"
+                )
+            grant = grants[0]
+            origin = grant["origin"]
+            authorization_id = grant.get("authorization_id")
+            if not authorization_id:
+                if pipelines_all or (
+                    products and set(products) != {grant["product_id"]}
+                ):
+                    raise ManageError(
+                        "Legacy grants can request a separate scope for their own product",
+                        code="invalid_input",
+                    )
+                # Never mutate a legacy staff link or its browser permissions.
+                return self.pipeline_login(
+                    origin,
+                    client_name or grant["client_name"],
+                    kind="product",
+                    products=[grant["product_id"]],
+                    permissions=permissions
+                    if permissions is not None
+                    else grant["permissions"],
+                    reason=reason,
+                    no_wait=no_wait,
+                )
+        matches = [
+            item
+            for item in authorizations
+            if item.get("id") == authorization_id
+            and (not origin or item.get("origin") == origin)
+        ]
+        if len(matches) != 1:
+            raise ManageError(
+                "Select a saved authorization and its server origin", code="no_auth"
+            )
+        authorization = matches[0]
+        if authorization["kind"] == "product":
+            if pipelines_all or (
+                products and set(products) != set(authorization["product_ids"])
+            ):
+                raise ManageError(
+                    "Single-product scopes cannot add products; use login for the new product",
+                    code="invalid_input",
+                )
+            desired = authorization["product_ids"]
+        else:
+            if pipelines_all and products:
+                raise ManageError(
+                    "Use explicit product additions or --pipelines-all",
+                    code="invalid_input",
+                )
+            desired = (
+                []
+                if pipelines_all
+                else list(dict.fromkeys([*authorization["product_ids"], *products]))
+            )
+        return self.pipeline_login(
+            authorization["origin"],
+            client_name or authorization["client_name"],
+            kind=authorization["kind"],
+            shop=authorization["shop_id"]
+            if authorization["kind"] == "shop.pipeline"
+            else None,
+            products=desired,
+            permissions=permissions,
+            authorization=authorization,
+            reason=reason,
+            no_wait=no_wait,
+        )
+
+    def _validate_scope_claim(self, response, request, fingerprint):
+        from .models import LINK_PERMISSIONS
+
+        authorization = _object(response.get("authorization"))
+        bindings = _objects(response.get("bindings"))
+        scope = request["scope_intent"]
+        products = authorization.get("product_ids")
+        permissions = authorization.get("permissions")
+        if (
+            not isinstance(authorization.get("id"), str)
+            or not authorization["id"]
+            or authorization.get("kind") != scope["kind"]
+            or not isinstance(authorization.get("shop_id"), str)
+            or not authorization["shop_id"]
+            or (scope["shop_id"] and scope["shop_id"] != authorization["shop_id"])
+            or authorization.get("fingerprint") != fingerprint
+            or type(authorization.get("revision")) is not int
+            or authorization["revision"] < 1
+            or type(authorization.get("expires")) not in (int, float)
+            or not 0 < authorization["expires"] < 10**15
+            or not math.isfinite(authorization["expires"])
+            or not isinstance(authorization.get("client_name"), str)
+            or not isinstance(products, list)
+            or not products
+            or len(products) > 500
+            or any(not isinstance(item, str) or not item for item in products)
+            or len(products) != len(set(products))
+            or (scope["product_ids"] and set(products) - set(scope["product_ids"]))
+            or (scope["kind"] == "product" and products != scope["product_ids"])
+            or not isinstance(permissions, list)
+            or not permissions
+            or any(not isinstance(item, str) for item in permissions)
+            or len(permissions) != len(set(permissions))
+            or set(permissions) - set(LINK_PERMISSIONS)
+            or set(permissions) - set(scope["permissions"])
+            or len(bindings) != len(products)
+        ):
+            raise ManageError(
+                "The server returned an unrequested authorization scope",
+                code="invalid_response",
+            )
+        if scope["authorization_id"]:
+            existing = next(
+                (
+                    item
+                    for item in self.data.get("authorizations", [])
+                    if item.get("id") == scope["authorization_id"]
+                    and item.get("origin") == request["origin"]
+                ),
+                None,
+            )
+            if (
+                existing is None
+                or authorization["id"] != existing["id"]
+                or authorization["revision"] < scope["expected_revision"]
+                or set(existing["product_ids"]) - set(products)
+                or set(existing["permissions"]) - set(permissions)
+                or authorization["expires"] > existing["expires"]
+                or (
+                    authorization["revision"] == scope["expected_revision"]
+                    and (
+                        set(products) != set(existing["product_ids"])
+                        or set(permissions) != set(existing["permissions"])
+                        or authorization["expires"] != existing["expires"]
+                    )
+                )
+            ):
+                raise ManageError(
+                    "The server changed the existing authorization unexpectedly",
+                    code="invalid_response",
+                )
+        seen = set()
+        for binding in bindings:
+            if (
+                not isinstance(binding.get("device_id"), str)
+                or not binding["device_id"]
+                or binding.get("product_id") not in products
+                or binding["product_id"] in seen
+                or binding.get("authorization_id") != authorization["id"]
+                or binding.get("shop_id") != authorization["shop_id"]
+                or binding.get("fingerprint") != fingerprint
+                or not isinstance(binding.get("staff_id"), str)
+                or not binding["staff_id"]
+                or binding.get("permissions") != permissions
+            ):
+                raise ManageError(
+                    "The server returned an invalid product binding",
+                    code="invalid_response",
+                )
+            existing_grant = next(
+                (
+                    item
+                    for item in self.data["grants"]
+                    if item.get("origin") == request["origin"]
+                    and item.get("authorization_id") == authorization["id"]
+                    and item.get("product_id") == binding["product_id"]
+                ),
+                None,
+            )
+            if existing_grant is not None and (
+                existing_grant["device_id"] != binding["device_id"]
+                or existing_grant.get("link_id") != binding["staff_id"]
+            ):
+                raise ManageError(
+                    "The server replaced an existing task-processing identity",
+                    code="invalid_response",
+                )
+            seen.add(binding["product_id"])
+
+    def _finish_scope_login(self, request, pending):
+        claimed = request["scope_claim"]
+        authorization = {
+            **claimed["authorization"],
+            "origin": request["origin"],
+            "private_key": request["private_key"],
+        }
+        authorizations = self.data.setdefault("authorizations", [])
+        if not isinstance(authorizations, list):
+            raise ManageError("Invalid CLI profile", code="invalid_profile")
+        authorizations[:] = [
+            item
+            for item in authorizations
+            if not (
+                item.get("id") == authorization["id"]
+                and item.get("origin") == authorization["origin"]
+            )
+        ]
+        authorizations.append(authorization)
+        grants = []
+        for binding in claimed["bindings"]:
+            grant = next(
+                (
+                    item
+                    for item in self.data["grants"]
+                    if item.get("origin") == request["origin"]
+                    and item.get("device_id") == binding["device_id"]
+                ),
+                None,
+            )
+            if grant is None:
+                grant = {}
+                self.data["grants"].append(grant)
+            changed_scope = (
+                grant.get("authorization_revision") != authorization["revision"]
+                or grant.get("permissions") != binding["permissions"]
+            )
+            grant.update(
+                {
+                    "id": binding["device_id"],
+                    "device_id": binding["device_id"],
+                    "origin": request["origin"],
+                    "product_id": binding["product_id"],
+                    "shop_id": authorization["shop_id"],
+                    "authorization_id": authorization["id"],
+                    "authorization_revision": authorization["revision"],
+                    "private_key": request["private_key"],
+                    "client_name": authorization["client_name"],
+                    "link_id": binding["staff_id"],
+                    "permissions": binding["permissions"],
+                }
+            )
+            # A scope revision invalidates existing bearer sessions. Resume with
+            # the stable device key after saving every binding atomically.
+            if changed_scope:
+                grant.pop("access_token", None)
+                grant.pop("expires", None)
+            grants.append(grant)
+        self.persist()
+        for grant in grants:
+            self.session(grant, refresh_scope=True)
+            self.persist()
+        pending.remove(request)
+        cached_key = self.data.get("scoped_device_keys", {}).get(
+            request["scope_key_selector"]
+        )
+        if isinstance(cached_key, dict):
+            cached_key["authorization_id"] = authorization["id"]
+        self.persist()
+        result = {
+            "ok": True,
+            "authorization": {
+                key: authorization[key]
+                for key in (
+                    "id",
+                    "origin",
+                    "shop_id",
+                    "kind",
+                    "permissions",
+                    "product_ids",
+                    "expires",
+                    "revision",
+                    "client_name",
+                    "fingerprint",
+                )
+                if key in authorization
+            },
+            "grants": [_safe_grant(grant) for grant in grants],
+        }
+        if len(grants) == 1:
+            result["grant"] = result["grants"][0]
+        return result
 
     def grants(self, *, product=None, origin=None, grant_id=None, permissions=()):
         matches = []
@@ -1258,6 +1757,19 @@ def _limit(value):
     return parsed
 
 
+def _permissions_csv(value):
+    from .models import LINK_PERMISSIONS
+
+    requested = [item.strip() for item in value.split(",")]
+    if not requested or any(item not in LINK_PERMISSIONS for item in requested):
+        raise argparse.ArgumentTypeError(
+            "permissions must be a comma-separated list of product permission codes"
+        )
+    if len(requested) != len(set(requested)):
+        raise argparse.ArgumentTypeError("permission codes cannot be repeated")
+    return [item for item in LINK_PERMISSIONS if item in requested]
+
+
 def add_parser(commands):
     manage = commands.add_parser(
         "manage",
@@ -1287,6 +1799,27 @@ def add_parser(commands):
     login.add_argument("--origin", help="HTTPS server origin for device-code login")
     login.add_argument("--product", help="limit browser approval to this product ID")
     login.add_argument(
+        "--shop", help="request a snapshot of one shop's current pipeline products"
+    )
+    login.add_argument(
+        "--pipelines-all",
+        action="store_true",
+        help="request the shop's current queue products; future products require another approval",
+    )
+    login.add_argument(
+        "--existing-link",
+        action="store_true",
+        help="compatibility: bind an existing product management link in the browser",
+    )
+    login.add_argument(
+        "--permissions",
+        type=_permissions_csv,
+        help="exact comma-separated requested permissions (default: queue.view,queue.process,queue.retry)",
+    )
+    login.add_argument(
+        "--reason", default="", help="why this device needs the requested scope"
+    )
+    login.add_argument(
         "--no-wait",
         action="store_true",
         help="return the public code immediately; repeat without this option after browser approval",
@@ -1295,6 +1828,43 @@ def add_parser(commands):
         "--client-name",
         default="Extore CLI · " + socket.gethostname(),
         help="device name retained in the session audit",
+    )
+    authorize = subcommands.add_parser(
+        "authorize",
+        help="ask the shop owner to approve additions or changes to a saved scope",
+    )
+    scope = authorize.add_mutually_exclusive_group(required=True)
+    scope.add_argument("--authorization", help="saved pipeline authorization ID")
+    scope.add_argument(
+        "--grant", help="saved device grant; legacy grants create a separate scope"
+    )
+    authorize.add_argument("--origin", help="select the saved server origin")
+    authorize.add_argument(
+        "--product",
+        action="append",
+        default=[],
+        help="product to add; repeat to request several",
+    )
+    authorize.add_argument(
+        "--pipelines-all",
+        action="store_true",
+        help="request the shop's current pipeline snapshot again",
+    )
+    authorize.add_argument(
+        "--permissions",
+        type=_permissions_csv,
+        help="complete desired permission set; omit to keep current permissions",
+    )
+    authorize.add_argument(
+        "--reason", default="", help="why added products or permissions are needed"
+    )
+    authorize.add_argument(
+        "--client-name", help="audited device name; defaults to the saved name"
+    )
+    authorize.add_argument(
+        "--no-wait",
+        action="store_true",
+        help="return a public device code; repeat without this flag after approval",
     )
     products = subcommands.add_parser(
         "products", help="list products authorized by all saved grants"
@@ -1458,6 +2028,18 @@ def dispatch(client, args, command, origin):
     if command in COMMANDS:
         return dispatch_management(client, args, origin)
     grant_id = getattr(args, "grant", None)
+    if command == "authorize":
+        return client.pipeline_authorize(
+            authorization_id=args.authorization,
+            grant_id=args.grant,
+            origin=origin,
+            products=args.product,
+            pipelines_all=args.pipelines_all,
+            permissions=args.permissions,
+            reason=args.reason,
+            client_name=args.client_name,
+            no_wait=args.no_wait,
+        )
     if command == "login":
         if args.device_code:
             if not origin:
@@ -1465,10 +2047,56 @@ def dispatch(client, args, command, origin):
                     "Device-code login requires --origin https://your-extore-server",
                     code="invalid_input",
                 )
+            if args.existing_link:
+                if (
+                    args.shop
+                    or args.pipelines_all
+                    or args.permissions is not None
+                    or args.reason
+                ):
+                    raise ManageError(
+                        "Existing-link login uses the link's original scope",
+                        code="invalid_input",
+                    )
+            elif args.product or args.shop or args.pipelines_all:
+                if args.product and (args.shop or args.pipelines_all):
+                    raise ManageError(
+                        "Select a product or one shop's pipeline snapshot",
+                        code="invalid_input",
+                    )
+                if bool(args.shop) != args.pipelines_all:
+                    raise ManageError(
+                        "Shop login requires --shop and --pipelines-all together",
+                        code="invalid_input",
+                    )
+                return client.pipeline_login(
+                    origin,
+                    args.client_name,
+                    kind="product" if args.product else "shop.pipeline",
+                    shop=args.shop,
+                    products=[args.product] if args.product else [],
+                    permissions=args.permissions,
+                    reason=args.reason,
+                    no_wait=args.no_wait,
+                )
+            elif args.permissions is not None or args.reason:
+                raise ManageError(
+                    "Requested permissions require a product or shop pipeline target",
+                    code="invalid_input",
+                )
             return client.device_login(
                 origin, args.client_name, product=args.product, no_wait=args.no_wait
             )
-        if args.product or args.no_wait or origin:
+        if (
+            args.product
+            or args.no_wait
+            or origin
+            or args.shop
+            or args.pipelines_all
+            or args.existing_link
+            or args.permissions is not None
+            or args.reason
+        ):
             raise ManageError(
                 "--origin, --product and --no-wait require --device-code",
                 code="invalid_input",
@@ -1508,10 +2136,33 @@ def dispatch(client, args, command, origin):
         ]
         result = client.logout(grants)
         pending = client.data.get("device_requests", [])
+        retired_authorizations = {
+            item["authorization_id"] for item in grants if item.get("authorization_id")
+        }
+
+        def selected_scope_request(item):
+            scope = item.get("scope_intent")
+            if not isinstance(scope, dict):
+                return False
+            authorization_id = scope.get("authorization_id") or item.get(
+                "scope_claim", {}
+            ).get("authorization", {}).get("id")
+            selected_grant = authorization_id in retired_authorizations
+            return (
+                (not origin or item.get("origin") == origin)
+                and (not grant_id or selected_grant)
+                and (
+                    not args.product
+                    or args.product in scope.get("product_ids", [])
+                    or selected_grant
+                )
+            )
+
         removed_pending = [
             item
             for item in pending
-            if (
+            if selected_scope_request(item)
+            or (
                 (
                     not args.product
                     or item.get("product_id", item.get("requested_product"))
@@ -1560,6 +2211,57 @@ def dispatch(client, args, command, origin):
             )
             if not in_use and selected:
                 del device_keys[scope]
+        authorizations = client.data.get("authorizations", [])
+        retired_authorizations.update(
+            item.get("scope_intent", {}).get("authorization_id")
+            or item.get("scope_claim", {}).get("authorization", {}).get("id")
+            for item in removed_pending
+            if item.get("scope_intent")
+        )
+        retired_authorizations.discard(None)
+        keep = []
+        for authorization in authorizations:
+            authorization_id = authorization["id"]
+            selected = authorization_id in retired_authorizations or (
+                not grant_id
+                and (not origin or authorization["origin"] == origin)
+                and (not args.product or args.product in authorization["product_ids"])
+            )
+            in_use = any(
+                item.get("origin") == authorization["origin"]
+                and (
+                    item.get("authorization_id") == authorization_id
+                    or item.get("scope_intent", {}).get("authorization_id")
+                    == authorization_id
+                    or item.get("scope_claim", {}).get("authorization", {}).get("id")
+                    == authorization_id
+                )
+                for item in [*client.data["grants"], *client.data["device_requests"]]
+            )
+            if not selected or in_use:
+                keep.append(authorization)
+        if "authorizations" in client.data:
+            client.data["authorizations"] = keep
+        protected_keys = {
+            item["private_key"]
+            for item in [*client.data["grants"], *client.data["device_requests"], *keep]
+            if item.get("private_key")
+        }
+        for selector, cached in list(client.data.get("scoped_device_keys", {}).items()):
+            if not isinstance(cached, dict):
+                continue
+            scope = cached["scope_intent"]
+            selected = (
+                cached.get("authorization_id") in retired_authorizations
+                or (
+                    not grant_id
+                    and (not origin or cached["origin"] == origin)
+                    and (not args.product or args.product in scope["product_ids"])
+                )
+                or cached["private_key"] in retired_keys
+            )
+            if selected and cached["private_key"] not in protected_keys:
+                del client.data["scoped_device_keys"][selector]
         return result
     permission = (
         "queue.view"

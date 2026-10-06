@@ -15,7 +15,7 @@ const scope = () => ({ staff_id: ids.link, link_name: "文档 Bot", product_id: 
 const details = () => ({ request_id: ids.request, user_code: code, client_name: "我的 Bot", fingerprint: "a".repeat(64), product_id: null, expires: Date.now() / 1000 + 600 });
 function options(selected = false, overrides = {}) {
   const grant = overrides.scope || scope();
-  return { request: overrides.request || details(), candidates: [grant], ...(selected ? { selected: grant, review_digest: "b".repeat(64) } : {}), ...overrides };
+  return { request: overrides.request || details(), candidates: [grant], ...(selected ? { selected: grant, review_digest: "b".repeat(64), snapshot_digest: "9".repeat(64) } : {}), ...overrides };
 }
 
 function fixture(settings = {}) {
@@ -24,14 +24,15 @@ function fixture(settings = {}) {
   const decode = (value) => String(value).replaceAll("&quot;", '"').replaceAll("&#39;", "'").replaceAll("&lt;", "<").replaceAll("&gt;", ">").replaceAll("&amp;", "&");
   function element(attributes = "") {
     const children = new Set(), listeners = new Map();
-    const node = { attributes, value: decode(attributes.match(/\bvalue="([^"]*)"/)?.[1] || ""), disabled: false, textContent: "", isConnected: true, focusCalls: 0,
+    const node = { attributes, value: decode(attributes.match(/\bvalue="([^"]*)"/)?.[1] || ""), disabled: /\bdisabled\b/.test(attributes), checked: /\bchecked\b/.test(attributes), dataset: {}, textContent: "", isConnected: true, focusCalls: 0,
       querySelector: (selector) => nodes.get(selector) || null,
-      querySelectorAll: (selector) => [...nodes.values()].filter((entry) => entry.isConnected && selector === 'input[type="password"]' && /\btype="password"/.test(entry.attributes)),
+      querySelectorAll: (selector) => [...nodes.values()].filter((entry) => entry.isConnected && (selector === 'input[type="password"]' ? /\btype="password"/.test(entry.attributes) : selector === "[data-device-selection]" ? entry.attributes.includes("data-device-selection") : /^input\[name="[a-z-]+"\]$/.test(selector) && entry.attributes.includes(selector.slice(6, -1)))),
       addEventListener(event, handler) { if (!listeners.has(event)) listeners.set(event, []); listeners.get(event).push(handler); },
       async emit(event) { for (const handler of [...(listeners.get(event) || [])]) await handler({ preventDefault() {} }); },
       focus() { this.focusCalls++; },
       disconnect() { this.isConnected = false; for (const key of children) { nodes.get(key)?.disconnect(); nodes.delete(key); } children.clear(); },
     };
+    for (const match of attributes.matchAll(/\bdata-([a-z-]+)="([^"]*)"/g)) node.dataset[match[1].replace(/-([a-z])/g, (_, character) => character.toUpperCase())] = decode(match[2]);
     let html = "";
     Object.defineProperty(node, "innerHTML", { get() { return html; }, set(value) {
       for (const key of children) { nodes.get(key)?.disconnect(); nodes.delete(key); } children.clear();
@@ -378,4 +379,247 @@ test("real Passkey session rotation still stops changed device or permission met
   assert.equal(p.requests.length, 8);
   assert.match(p.node("#device-error").textContent, /已改变/);
   assert.equal(p.requests.some((request) => request.url.endsWith("/approve")), false);
+});
+
+function activeOptions({ kind = "shop.pipeline", existing = false, restore = false } = {}) {
+  const expires = Date.now() / 1000 + 86400;
+  const requested = ["queue.view", "queue.process", "queue.retry"];
+  const products = [{ id: ids.product, name: "Word 文档", mode: "manual" }, ...(kind === "shop.pipeline" ? [{ id: ids.other, name: "PPT 演示", mode: "manual" }] : [])];
+  const current = existing ? { id: "66666666-6666-4666-8666-666666666666", shop_id: ids.shop, kind, product_ids: [ids.product], permissions: ["queue.view"], expires, revision: 3, client_name: "已绑定 Bot", fingerprint: "a".repeat(64) } : null;
+  return { flow: "scope", request: { ...details(), kind, shop_id: ids.shop, requested_product_ids: products.map((product) => product.id), requested_permissions: requested,
+    grant_expires: expires, authorization_id: current && !restore ? current.id : null, expected_revision: current && !restore ? current.revision : null, reason: "制作文档与 PPT" },
+    shop: { id: ids.shop, name: "lightstore" }, products, current,
+    selected: { shop_id: ids.shop, kind, product_ids: products.map((product) => product.id), permissions: requested, expires }, review_digest: "b".repeat(64), snapshot_digest: "9".repeat(64) };
+}
+async function activeReview(p, value, draft = {}) {
+  await enter(p, value);
+  const selected = { ...value.selected, ...draft };
+  for (const product of value.products) p.node("#device-product-" + product.id).checked = selected.product_ids.includes(product.id);
+  for (const permission of value.request.requested_permissions) p.node("#device-permission-" + permission.replaceAll(".", "-")).checked = selected.permissions.includes(permission);
+  const pending = p.node("#device-active-selection").emit("submit");
+  await resolve(p, 2, p.auth);
+  const reviewed = { ...value, selected };
+  await resolve(p, 3, reviewed); await pending;
+  return reviewed;
+}
+
+test("active shop request freezes current products and allows explicit smaller selection", async () => {
+  const p = fixture({ auth: shopAuth }), value = activeOptions();
+  const reviewed = await activeReview(p, value, { product_ids: [ids.product], permissions: ["queue.view", "queue.process"] });
+  assert.equal(p.instance.state, "review");
+  assert.match(p.root.innerHTML, /之后的新商品不会自动/);
+  assert.match(p.root.innerHTML, /本次未批准/);
+  assert.match(p.root.innerHTML, /未批准的权限/);
+  assert.deepEqual(JSON.parse(JSON.stringify(p.requests[3].body)), { user_code: code, product_ids: [ids.product], permissions: ["queue.view", "queue.process"], expires: reviewed.selected.expires });
+  assert.equal(p.requests.some((request) => request.url.endsWith("/approve")), false);
+  await p.node("#device-back").emit("click");
+  assert.equal(p.node("#device-product-" + ids.product).checked, true);
+  assert.equal(p.node("#device-product-" + ids.other).checked, false);
+  assert.equal(p.node("#device-permission-queue-retry").checked, false);
+});
+
+test("active scope approval requires owner confirmation and only enters awaiting-claim state", async () => {
+  const fresh = { ...shopAuth, session_id: "active-fresh-session" };
+  const p = fixture({ auth: shopAuth, realAccount: true, passkey: async () => fresh });
+  const value = await activeReview(p, activeOptions());
+  await approvePrelude(p, value);
+  assert.equal(p.instance.state, "confirm");
+  const pending = p.node("#account-fresh-passkey").emit("click"); await flush();
+  const latest = { ...value, review_digest: "c".repeat(64) };
+  await resolve(p, 6, fresh); await resolve(p, 7, latest);
+  assert.equal(p.requests[8].url, "/manage/device/approve");
+  assert.deepEqual(JSON.parse(JSON.stringify(p.requests[8].body)), { user_code: code, product_ids: value.selected.product_ids, permissions: value.selected.permissions, expires: value.selected.expires, review_digest: "c".repeat(64) });
+  await resolve(p, 8, { ok: true, status: "approved" }); await pending;
+  assert.equal(p.instance.state, "approved");
+  assert.match(p.root.innerHTML, /已批准，等待 CLI 领取/);
+  assert.match(p.root.innerHTML, /领取后生效/);
+  assert.doesNotMatch(p.root.innerHTML, /a{64}|access_token|grant_token|browser-session/);
+});
+
+test("upgrade preserves existing products, permissions and exact expiry while additions start unchecked", async () => {
+  const p = fixture({ auth: shopAuth }), value = activeOptions({ existing: true });
+  await enter(p, value);
+  assert.equal(p.node("#device-product-" + ids.product).checked, true);
+  assert.equal(p.node("#device-product-" + ids.product).disabled, true);
+  assert.equal(p.node("#device-product-" + ids.other).checked, false);
+  assert.equal(p.node("#device-permission-queue-view").checked, true);
+  assert.equal(p.node("#device-permission-queue-view").disabled, true);
+  assert.equal(p.node("#device-permission-queue-process").checked, false);
+  assert.equal(p.node("#device-permission-queue-retry").checked, false);
+  assert.equal(p.node("#device-grant-expires").disabled, true);
+  assert.match(p.root.innerHTML, /拒绝本次申请，保留原授权/);
+  p.node("#device-product-" + ids.other).checked = true;
+  p.node("#device-permission-queue-process").checked = true;
+  const pending = p.node("#device-active-selection").emit("submit");
+  await resolve(p, 2, p.auth);
+  const selected = { ...value.selected, permissions: ["queue.view", "queue.process"] };
+  await resolve(p, 3, { ...value, selected }); await pending;
+  assert.equal(p.requests[3].body.expires, value.current.expires);
+  assert.match(p.root.innerHTML, /现有授权，保持不变/);
+  assert.match(p.root.innerHTML, /新增商品/);
+  assert.match(p.root.innerHTML, /本次新增权限/);
+  assert.match(p.root.innerHTML, /已有设备名称/);
+});
+
+test("denying upgrade does not revoke or modify existing access", async () => {
+  const p = fixture({ auth: shopAuth }), value = activeOptions({ existing: true });
+  await enter(p, value);
+  const pending = p.node("#device-deny").emit("click");
+  await resolve(p, 2, p.auth);
+  assert.equal(p.requests[3].url, "/manage/device/deny");
+  assert.deepEqual(JSON.parse(JSON.stringify(p.requests[3].body)), { user_code: code });
+  await resolve(p, 3, { ok: true, status: "denied" }); await pending;
+  assert.match(p.root.innerHTML, /原有授权与正在处理的任务保持不变/);
+  assert.equal(p.requests.some((request) => /revoke|logout|DELETE|authorization\//.test(request.url)), false);
+});
+
+test("single-product delegation is never preselected and explains restricted child-link binding", async () => {
+  const p = fixture({ auth: shopAuth }), value = activeOptions({ kind: "product" });
+  value.request.requested_permissions = [...value.request.requested_permissions, "product.edit", "links.delegate"];
+  value.selected.permissions = [...value.request.requested_permissions];
+  await enter(p, value);
+  assert.equal(p.node("#device-permission-links-delegate").checked, false);
+  assert.match(p.root.innerHTML, /生成更小权限的管理链接/);
+  assert.match(p.root.innerHTML, /最多 1 次浏览器 \/ CLI/);
+  assert.doesNotMatch(p.root.innerHTML, /owner\.admin/);
+});
+
+test("active requests reject unauthorized, dynamic, cross-shop and non-queue scopes", async () => {
+  const cases = [
+    (value) => { value.request.kind = "owner.admin"; },
+    (value) => { value.request.requested_product_ids = ["*"]; },
+    (value) => { value.request.requested_permissions.push("cards.manage"); value.selected.permissions.push("cards.manage"); },
+    (value) => { value.products[1].mode = "script"; },
+    (value) => { value.products[1].id = value.products[0].id; },
+    (value) => { value.shop.id = "66666666-6666-4666-8666-666666666666"; },
+    (value) => { value.request.shop_id = ids.other; value.shop.id = ids.other; value.selected.shop_id = ids.other; },
+    (value) => { value.products.push({ id: "66666666-6666-4666-8666-666666666666", name: "以后创建的商品", mode: "manual" }); },
+  ];
+  for (const change of cases) {
+    const p = fixture({ auth: shopAuth }), value = activeOptions(); change(value);
+    await enter(p, value);
+    assert.equal(p.instance.state, "code");
+    assert.equal(p.requests.length, 2);
+    assert.equal(p.node("#device-active-selection"), undefined);
+    assert.match(p.node("#device-error").textContent, /授权范围/);
+  }
+  const staff = fixture(); await enter(staff, activeOptions());
+  assert.equal(staff.instance.state, "code");
+  assert.equal(staff.requests.length, 2);
+});
+
+test("selected scope cannot expand the owner's draft or remove existing upgrade rights", async () => {
+  for (const type of ["extra-permission", "extra-product", "remove-existing", "extend-expiry"]) {
+    const p = fixture({ auth: shopAuth }), value = activeOptions({ existing: type === "remove-existing" });
+    await enter(p, value);
+    for (const product of value.products) p.node("#device-product-" + product.id).checked = true;
+    for (const permission of value.request.requested_permissions) p.node("#device-permission-" + permission.replaceAll(".", "-")).checked = true;
+    const pending = p.node("#device-active-selection").emit("submit");
+    await resolve(p, 2, p.auth);
+    const invalid = JSON.parse(JSON.stringify(value));
+    if (type === "extra-permission") invalid.selected.permissions.push("cards.manage");
+    if (type === "extra-product") invalid.selected.product_ids.push("66666666-6666-4666-8666-666666666666");
+    if (type === "remove-existing") invalid.selected.product_ids = [ids.other];
+    if (type === "extend-expiry") invalid.selected.expires += 3600;
+    await resolve(p, 3, invalid); await pending;
+    assert.equal(p.instance.state, "scope");
+    assert.equal(p.requests.length, 4);
+    assert.match(p.node("#device-error").textContent, /授权范围/);
+  }
+});
+
+test("scope review changes to current revision, future products, permissions or expiry require a new decision", async () => {
+  for (const change of ["current", "new-product", "permissions", "expiry"]) {
+    const p = fixture({ auth: shopAuth }), value = await activeReview(p, activeOptions({ existing: true }));
+    const newer = JSON.parse(JSON.stringify(value));
+    if (change === "current") { newer.current.revision++; newer.request.expected_revision++; }
+    if (change === "new-product") { newer.products[1].name = "商品名称已修改"; }
+    if (change === "permissions") { newer.request.requested_permissions = ["queue.view", "queue.process"]; newer.selected.permissions = [...newer.request.requested_permissions]; }
+    if (change === "expiry") { newer.current.expires -= 3600; newer.selected.expires = newer.current.expires; newer.request.grant_expires = newer.current.expires; }
+    const pending = p.node("#device-approve").emit("click");
+    await resolve(p, 4, p.auth); await resolve(p, 5, newer); await pending;
+    assert.equal(p.requests.some((request) => request.url.endsWith("/approve")), false);
+    assert.equal(p.accounts.length, 0);
+    assert.equal(p.instance.state, "review");
+    assert.match(p.node("#device-error").textContent, /已改变|授权范围/);
+  }
+});
+
+test("fresh reauthentication cannot silently apply changed scope authorization", async () => {
+  const fresh = { ...shopAuth, session_id: "scope-new-session" };
+  const p = fixture({ auth: shopAuth, realAccount: true, passkey: async () => fresh }), value = await activeReview(p, activeOptions());
+  await approvePrelude(p, value);
+  const pending = p.node("#account-fresh-passkey").emit("click"); await flush();
+  const newer = JSON.parse(JSON.stringify(value)); newer.shop.name = "改名后的店铺"; newer.review_digest = "d".repeat(64);
+  await resolve(p, 6, fresh); await resolve(p, 7, newer); await pending;
+  assert.equal(p.instance.state, "review");
+  assert.equal(p.requests.length, 8);
+  assert.match(p.node("#device-error").textContent, /已改变/);
+  assert.equal(p.requests.some((request) => request.url.endsWith("/approve")), false);
+});
+
+test("scope selection is escaped, dependency checked and cannot authorize after disposal", async () => {
+  const p = fixture({ auth: shopAuth }), value = activeOptions();
+  value.products[0].name = '<img onerror="steal">'; value.request.reason = '<script>steal()</script>';
+  await enter(p, value);
+  assert.doesNotMatch(p.root.innerHTML, /<img onerror|<script>steal/);
+  p.node("#device-permission-queue-view").checked = false;
+  await p.node("#device-active-selection").emit("submit");
+  assert.equal(p.requests.length, 2);
+  assert.match(p.node("#device-error").textContent, /需同时选择查看队列/);
+  const q = fixture({ auth: shopAuth }), next = await activeReview(q, activeOptions());
+  const pending = q.node("#device-approve").emit("click");
+  await resolve(q, 4, q.auth);
+  q.instance.dispose(); q.root.innerHTML = "Other page";
+  await resolve(q, 5, next); await pending;
+  assert.equal(q.root.innerHTML, "Other page");
+  assert.equal(q.requests.length, 6);
+  assert.equal(q.requests[5].extra.signal.aborted, true);
+});
+
+test("restoration retains existing scope and old expiry with no implied new grants", async () => {
+  const p = fixture({ auth: shopAuth }), value = activeOptions({ existing: true, restore: true });
+  value.request.requested_product_ids = [...value.current.product_ids]; value.products = value.products.slice(0, 1);
+  value.request.requested_permissions = [...value.current.permissions];
+  value.selected.product_ids = [...value.current.product_ids]; value.selected.permissions = [...value.current.permissions];
+  await enter(p, value);
+  assert.match(p.root.innerHTML, /恢复或追加设备授权/);
+  assert.equal(p.node("#device-product-" + ids.product).disabled, true);
+  assert.equal(p.node("#device-permission-queue-view").disabled, true);
+  assert.equal(p.node("#device-grant-expires").disabled, true);
+  assert.equal(p.requests.length, 2);
+  const pending = p.node("#device-active-selection").emit("submit");
+  await resolve(p, 2, p.auth); await resolve(p, 3, value); await pending;
+  assert.match(p.root.innerHTML, /仅恢复当前授权，没有新增商品或权限/);
+  assert.match(p.root.innerHTML, /恢复当前授权/);
+});
+
+test("scope accepts the backend limit of 500 frozen current products and rejects overflow", async () => {
+  for (const count of [201, 500, 501]) {
+    const p = fixture({ auth: shopAuth }), value = activeOptions();
+    value.products = Array.from({ length: count }, (_, index) => ({ id: `${index.toString(16).padStart(8, "0")}-7777-4777-8777-777777777777`, name: `队列商品 ${index}`, mode: "manual" }));
+    value.request.requested_product_ids = value.products.map((product) => product.id);
+    value.selected.product_ids = [...value.request.requested_product_ids];
+    await enter(p, value);
+    assert.equal(p.instance.state, count <= 500 ? "scope" : "code");
+    if (count <= 500) assert.match(p.root.innerHTML, /选择上述全部当前商品/);
+    else assert.match(p.node("#device-error").textContent, /授权范围/);
+    assert.equal(p.requests.length, 2);
+  }
+});
+
+test("fresh session rotation cannot hide a changed server snapshot in either approval flow", async () => {
+  for (const scoped of [false, true]) {
+    const fresh = { ...shopAuth, session_id: "snapshot-fresh-session" };
+    const p = fixture({ auth: shopAuth, realAccount: true, passkey: async () => fresh });
+    const value = scoped ? await activeReview(p, activeOptions()) : await review(p);
+    await approvePrelude(p, value);
+    const pending = p.node("#account-fresh-passkey").emit("click"); await flush();
+    const changedSnapshot = { ...value, review_digest: "c".repeat(64), snapshot_digest: "d".repeat(64) };
+    await resolve(p, 6, fresh); await resolve(p, 7, changedSnapshot); await pending;
+    assert.equal(p.instance.state, "review");
+    assert.equal(p.requests.length, 8);
+    assert.match(p.node("#device-error").textContent, /已改变/);
+    assert.equal(p.requests.some((request) => request.url.endsWith("/approve")), false);
+  }
 });

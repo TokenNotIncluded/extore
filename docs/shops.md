@@ -11,6 +11,8 @@ Extore 一个实例可以服务多个独立店铺。商品、卡密、队列、�
 | 平台管理员（root） | 店铺创建、启停、存储额度、注册开关、SMTP；跨店管理需明确店铺或商品 | 首次初始化密码只用于注册 Passkey，之后使用已注册 Passkey；可配置多个 |
 | 店主 | 自己店铺的账号、商品、卡密、队列、附件、处理器配置档案和授权 | 已验证邮箱与密码；可选 TOTP；也可注册多个 Passkey |
 | 商品管理链接 | 指定商品的授权权限，最多向下委派更小权限 | 浏览器绑定或独立 CLI 设备绑定 |
+| 商品 CLI 授权 | 一个商品的指定权限 | CLI 申请设备码，店主本人核对并批准 |
+| 本店流水线 CLI 授权 | 本次批准的队列商品，只能查看、处理和重试任务 | CLI 申请本店当前商品快照，店主本人选择商品并批准 |
 | 顾客 | 有效卡密及领取凭证对应的任务与交付 | 卡密和私密领取链接 |
 
 店主注册 Passkey 后，自己的邮箱密码登录仍可用。平台首次密码失效规则只针对平台管理员。店主不能取得其他店铺商品的权限，也不能配置平台 SMTP 或打开公众注册。
@@ -80,9 +82,63 @@ TOTP 密钥与恢复码只保存到新建的私密输出文件，标准输出显
 
 店主密码忘记时使用 `/account/reset` 发送邮件重置链接，有效 30 分钟且只能使用一次。已启用 TOTP 时还需验证码或恢复码。改密码或密码重置会撤销本店既有账号会话、店主 CLI 设备，以及商品处理设备和当前会话；商品管理链接配置、商品和任务保留。平台管理员全部 Passkey 丢失时使用服务器命令 `extore reset-auth`，它恢复平台首次密码，不重置各店的密码或 Passkey。
 
+## 给 AI 授权商品与流水线
+
+日常制作任务使用 `extore manage`，无需交出店主密码或私密管理链接。AI 在自己的设备生成密钥，申请设备码；你在返回的公开网址输入设备码，核对设备名称、完整指纹、店铺、商品、权限和期限，再亲自批准。申请理由只是 AI 提供的说明，不能代替你的判断。网页「复制给 AI 的提示词」提供命令与公开商品资料，不包含授权凭据，也不会自动发起申请。
+
+只处理一个商品：
+
+```sh
+extore manage login --device-code --origin https://extore.example.com --product PRODUCT_ID --no-wait
+```
+
+同时处理本店当前多个队列商品：
+
+```sh
+extore manage login --device-code --origin https://extore.example.com --shop SHOP_ID --pipelines-all --no-wait
+```
+
+两种申请默认请求 `queue.view,queue.process,queue.retry`。单商品可通过 `--permissions` 请求该商品其他管理权限，最终由你选择；本店流水线始终仅支持这三个队列权限，不授予商品编辑、制卡、配置秘密、下级委派或账号管理。流水线商品必须属于同一店铺，处理方式为队列（协议 `mode="manual"`）；审批页面明确列出申请时的商品快照，你可以选择其中一部分。
+
+批准后，AI 使用同一 profile、origin、设备名和目标再执行原命令，去掉 `--no-wait`，完成领取授权。`extore manage queues` 聚合已授权商品的待处理任务；读取与操作任务仍按单个商品的实际权限验证。多条授权的权限不会拼接成更大的管理权限。操作示例和文件上传见 [CLI 文档](cli.md)。
+
+流水线授权保存的是本次选择的商品快照。以后新增的商品不会自动进入 AI 的范围；AI 必须重新申请追加，再由你批准：
+
+```sh
+# 明确申请新增的商品，可重复 --product
+extore manage authorize --origin https://extore.example.com --authorization AUTHORIZATION_ID --product NEW_PRODUCT_ID --reason '需要接手新商品的制作任务' --no-wait
+
+# 重新请求本店当前队列商品，仍由你逐项核对与选择
+extore manage authorize --origin https://extore.example.com --authorization AUTHORIZATION_ID --pipelines-all --no-wait
+```
+
+单商品申请增加权限时，`--permissions` 写完整的目标权限集合，并保留已有权限；不能把已有单商品授权改成另一商品：
+
+```sh
+extore manage authorize --origin https://extore.example.com --authorization AUTHORIZATION_ID --permissions queue.view,queue.process,queue.retry,product.edit --reason '需要改善本商品的输入教程' --no-wait
+```
+
+追加申请通过同一设备私钥证明身份，引用已有授权 ID 与修订。审批时保留原商品、原权限和原到期时间；只能批准申请内的新增项，不能借追加延长有效期或跨店授权。拒绝、超时或追加失败保留原授权。既有管理链接设备也可通过 `--grant GRANT_ID` 申请本商品的新独立授权，原管理链接及其浏览器权限不会被改写。
+
+后台可以按店铺查看设备的商品范围、权限、到期时间、修订和批准来源，撤销不用的授权。店主 CLI 也支持同样操作：
+
+```sh
+extore admin api GET /api/admin/pipeline-authorizations --query view=active
+extore admin api GET /api/admin/pipeline-authorizations --query view=revoked
+extore admin api DELETE /api/admin/pipeline-authorizations/AUTHORIZATION_ID --json-file ./revoke-scope.json
+```
+
+GET 的 CLI 输出为 `{ok:true,result:[...]}`，仅包含安全元数据；`view=revoked` 包括已撤销和已到期记录。撤销文件必须包含刚核对的真实修订，例如 `{"expected_revision":3}`，不能盲用示例数字；也可用 `--json-stdin` 从标准输入读取同样的 JSON。CLI 自动为 DELETE 的路径与实际请求体取得挑战并签名；修订改变时返回 409，不撤销也不交还任务，重新核对后再决定。明确撤销授权会结束派生会话与下级管理链接，并将未完成任务放回各自商品队列；交付记录保留。
+
+普通浏览器退出不会结束已经领取授权的 CLI。撤销授权或设备后，旧私钥、旧 Bearer 和重放申请不能恢复被撤销的身份；到期后也不能通过续签延长期限。需要新的权限时重新申请并由你批准。店主修改或重置密码会撤销本店流水线授权；平台 `reset-auth` 只撤销最后完整审核由平台管理员批准的流水线授权，最后完整审核由店主批准的授权保留。追加在 CLI 签名领取成功后更新批准来源，审计记录保留之前与之后的批准者；仅申请或网页批准不改变既有授权。
+
+`extore admin` 是另外的店主管理登录流程，具有本店完整管理能力，协议身份仍为 `role="admin",scope="shop.owner"`。它与商品 `kind="product"`、本店流水线 `kind="shop.pipeline"` 分开；不要把全店账号管理授权作为 AI 处理队列的默认选择。安全元数据、撤销接口与签名规则见 [协议](protocol.md#cli-设备授权)。
+
 ## 处理器配置档案
 
-预设定义中的 `configuration` / `shop_configuration` 声明允许配置的字段。店主创建自己的加密档案，再把指定档案修订绑定到同店铺、同处理器商品。档案查询只返回 ID、名称、处理器 ID、修订、禁用状态和时间；即使请求私密导出也不能取得配置明文。
+预设定义中的 `configuration` / `shop_configuration` 声明允许配置的字段及其敏感性。店主创建自己的加密档案，再把指定档案修订绑定到同店铺、同处理器商品。处理器目录只提供代码定义的字段、说明和默认值，不包含商家保存的实际配置。
+
+本店店主和平台管理员读取档案时，除 ID、名称、修订等元数据，还可在 `configuration` 中读回明确标为 `secret:false` 的模板、说明等内容，并继续编辑。`configured_fields` 只列出已保存且非空的字段名，用于表示配置状态，不返回凭据值。标为秘密、没有声明 `secret`、不是严格 `false` 或已经不在字段定义中的值，一律隐藏；私密导出也不能读回真实凭据。商品绑定返回的 `profile.configuration` 对应绑定的修订，不自动使用档案最新修订。
 
 ```sh
 extore admin processors --detail
@@ -106,9 +162,50 @@ extore admin processor-profiles revoke PROFILE_ID
 
 修改配置创建新修订，但商品绑定仍指向原修订；需要再执行 `bind PROFILE_ID --product PRODUCT_ID`，让以后发行的卡密使用新修订。已有卡密保留发行时的修订。多个商品共享档案时，分别决定何时更新各自绑定；使用旧 `processor_config` 修改单个商品则创建独立档案，不改写共享档案。停用档案会阻止继续使用该档案，包括旧修订；不能跨店绑定配置，也不能把付款账号字段随意塞进现有模板。
 
-旧 `processor_config` 写入方式仍可创建独立的本店配置档案，但读取商品时返回空配置对象。实际执行前由 worker 校验卡密、商品、店铺和绑定修订，解密本任务需要的配置；子进程收到单独的 `configuration` 和不可变 `shop_context={shop_id,profile_id,revision}`，顾客参数不能覆盖这些上下文。
+更新档案时，省略字段会保留原值，秘密字段传空字符串也保留原凭据；可选非秘密说明传 `""` 则明确清空。必填模板不能用空字符串保存，接口返回 422，不会悄悄恢复默认模板。读取结果中的隐藏字段状态不能当成凭据重新写入。
+
+旧 `processor_config` 写入方式仍可创建独立的本店配置档案。店主和平台管理员的商品编辑接口可读回其中明确标为 `secret:false` 的值及配置状态；商品管理链接和顾客读取仍返回空配置对象。复制商品资料给其他平台的提示词不包含任何处理器配置，包括可读的模板。实际执行前由 worker 校验卡密、商品、店铺和绑定修订，解密本任务需要的配置；子进程收到单独的 `configuration` 和不可变 `shop_context={shop_id,profile_id,revision}`，顾客参数不能覆盖这些上下文。
 
 SMTP、TOTP 和处理器配置使用 `EXTORE_DATA/master-secrets.key` 加密。备份需同时保留数据库、此密钥及用于制卡幂等响应的 `issuance.key`。密钥丢失后系统拒绝读取原密文，不会自动生成替代密钥伪装恢复成功。
+
+## 工作流变量、秘密与运行限制
+
+工作流配置与隔离执行需要 Extore 0.7.0 及以上。处理器配置档案可保存 `workflow`，由本店店主或平台管理员通过网页和店主 CLI 管理。普通变量放在 `variables`，可以读回和编辑；访问密钥等放在 `secrets`，只写入，不读回。秘密配置的查询结果只有 `configured_secret_names`，不会在字段里回填原值。商品管理链接、顾客页面和复制商品资料的提示词都不包含工作流配置。
+
+创建档案时，可在前面的 `private-profile.json` 中加入：
+
+```json
+{
+  "workflow": {
+    "variables": {"BRAND_NAME": "示例店铺"},
+    "secrets": {"SERVICE_TOKEN": "在本地私密文件中填写真实值"},
+    "runtime": {
+      "timeout_seconds": 120,
+      "memory_mb": 256,
+      "cpu_seconds": 120,
+      "max_output_bytes": 1000000
+    }
+  }
+}
+```
+
+变量名为 1–64 字符的大写字母、数字和下划线，首位必须是字母，不能以 `EXTORE_` 开头。系统环境、语言运行时、动态加载器和代理名称也保留，例如 `PATH`、`HOME`、`PYTHON*`、`LD*` 和 `*_PROXY`。同一名称不能同时是变量和秘密。两组各最多 64 项，单值最多 8 KiB，两组值合计最多 64 KiB，按 UTF-8 字节计算，值不能含 NUL。配置不支持自定义命令、容器镜像、挂载或联网权限。
+
+`update` 的 `workflow` 按名称合并，省略原项会保留；普通变量 `""` 保存为空，已有秘密 `""` 保留原值。`runtime` 也逐项合并，只修改需要调整的上限。删除必须在更新时明确使用 `delete_variables` 或 `delete_secrets` 名称数组，创建时不接受删除字段；不能同时设置与删除同一组里的同名项。下面只删除指定秘密，其他设置保留：
+
+```json
+{"workflow":{"delete_secrets":["SERVICE_TOKEN"]}}
+```
+
+工作流与处理器配置保存在同一个加密修订中。更新后重新绑定商品，只影响以后发行的卡密；已有卡密和重试仍使用发行时的变量、秘密与运行限制。读取商品绑定时，`profile.workflow` 同样对应绑定修订；旧档案自动按默认工作流兼容，不重新发行卡密。
+
+运行限制的默认值为 120 秒墙钟时间、256 MiB 进程地址空间、120 秒 CPU 时间和 1000000 字节输出。字段 `memory_mb` 实际按 MiB 计算；可调范围见[协议](protocol.md#工作流配置协议)。档案完整 JSON 编码最多 200000 字节，超限不会创建修订。送入处理器的整份任务输入也最多 200000 字节，包含顾客参数、规格和步骤快照、处理器配置与工作流环境；变量容量没有超限也仍可能因为整份输入过大而被拒绝，不能靠拆字段绕过。
+
+处理器通过只读 `Task.environment` 或 `ProcessorContext.environment` 按原名称读取变量与秘密。运行进程的环境名统一加前缀，例如 `BRAND_NAME` 对应 `EXTORE_WORKFLOW_BRAND_NAME`，不能覆盖 worker 的系统环境。顾客参数不能改变这些配置。现有文本处理器仍只替换它代码支持的 `$name`、`${name}` 和 `$$`；工作流秘密不会自动变成交付模板变量。
+
+处理器可以读取为它配置的秘密，因此仍只运行审核后固定版本的可信代码。不要在进度、交付内容或日志中输出秘密。工作流配置本身不提供支付能力；内置处理器不能直接联网付款，未来的支付对接需要另行实现按店铺校验目标、额度与幂等键的受控服务。
+
+自动处理需要服务器具备 Linux、bubblewrap 0.12 及以上（`bwrap`）、libseccomp 和可用的内核命名空间。当前内置环境只运行固定的文本与资源链接预设，使用 stdin/stdout 传递任务与结果；不能联网、fork、启动外部程序或创建文件。代码只读，数据库和主密钥不挂载。依赖缺失或隔离不可用时任务不会退回宿主直接执行，而是失败待商家核实。复杂文档和 PPT 仍由外部 AI 通过 CLI 处理商品队列、上传交付文件，不在这里生成；未来联网或写盘处理器需要另行设计受控服务和 cgroup。任意脚本上传仍不开放，完整边界见[协议](protocol.md#处理器运行边界)。
 
 ## 存储额度与付款边界
 

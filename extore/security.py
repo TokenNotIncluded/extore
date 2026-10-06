@@ -252,6 +252,8 @@ def _staff_permissions(value):
 
 def staff_authorization(c, staff_id):
     """Resolve a link and its ancestors under the caller's transaction."""
+    from .pipeline_scopes import validate_staff_scope
+
     now = time.time()
     seen = set()
     current_id = staff_id
@@ -271,6 +273,9 @@ def staff_authorization(c, staff_id):
             fail("商品管理链接已过期或撤销", 401)
         if not math.isfinite(expires) or expires <= now:
             fail("商品管理链接已过期或撤销", 401)
+        # A scope's dedicated link is also an ancestor of delegated links.
+        # Refresh every boundary on every use, including browser descendants.
+        validate_staff_scope(c, row)
         permissions = _staff_permissions(row["permissions"])
         if result is None:
             result = dict(row)
@@ -367,6 +372,16 @@ def authorize_management(c, s, permission=None):
         s["permissions"] = list(LINK_PERMISSIONS)
     elif s["role"] == "staff":
         staff = staff_authorization(c, s.get("staff_id"))
+        if current["channel"] == "cli":
+            from .pipeline_scopes import check_device_scope
+
+            pipeline_scope = check_device_scope(c, device, staff)
+            if pipeline_scope is not None:
+                s.update(
+                    authorization_id=pipeline_scope["id"],
+                    authorization_revision=pipeline_scope["revision"],
+                    scope=pipeline_scope["kind"],
+                )
         if current["shop_id"] not in (None, staff["shop_id"]):
             fail("商品管理登录与店铺不匹配", 401)
         s.update(

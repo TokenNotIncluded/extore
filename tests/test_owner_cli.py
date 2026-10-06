@@ -240,6 +240,21 @@ class OwnerMerchant:
             if request.method == "POST":
                 return httpx.Response(200, json={"id": "new-product", **body})
             return httpx.Response(200, json=[self.product])
+        if path == "/api/admin/pipeline-authorizations":
+            assert request.method == "GET"
+            return httpx.Response(200, json=[{"id": "scope-a", "revision": 2}])
+        if path == "/api/admin/pipeline-authorizations/scope-a":
+            assert request.method == "DELETE"
+            assert body == {"expected_revision": 2}
+            return httpx.Response(
+                200,
+                json={
+                    "ok": True,
+                    "id": "scope-a",
+                    "revoked_bindings": 2,
+                    "released_jobs": 1,
+                },
+            )
         if path == "/api/admin/products/product-a":
             self.updated = body
             return httpx.Response(200, json={"id": "product-a", **body})
@@ -529,6 +544,50 @@ def test_generic_api_has_exact_query_and_body_signature(tmp_path, merchant):
     )
     assert result["ok"]
     action = next(call for call in merchant.calls if call[1] == "/api/manage/batch")
+    assert action[3]["x-extore-cli-signature"]
+
+
+def test_owner_cli_lists_and_version_pins_pipeline_revocation(tmp_path, merchant):
+    profile = tmp_path / "private" / "owner.json"
+    authorize(profile, merchant)
+    rows = execute(
+        profile,
+        merchant,
+        "api",
+        "GET",
+        "/api/admin/pipeline-authorizations",
+        "--query",
+        "view=active",
+        "--query",
+        "shop_id=shop-a",
+    )
+    assert rows == {"ok": True, "result": [{"id": "scope-a", "revision": 2}]}
+    body = tmp_path / "revoke-scope.json"
+    body.write_text(json.dumps({"expected_revision": rows["result"][0]["revision"]}))
+    result = execute(
+        profile,
+        merchant,
+        "api",
+        "DELETE",
+        "/api/admin/pipeline-authorizations/scope-a",
+        "--json-file",
+        str(body),
+    )
+    assert result == {
+        "ok": True,
+        "result": {
+            "ok": True,
+            "id": "scope-a",
+            "revoked_bindings": 2,
+            "released_jobs": 1,
+        },
+    }
+    action = next(
+        call
+        for call in merchant.calls
+        if call[1] == "/api/admin/pipeline-authorizations/scope-a"
+    )
+    assert json.loads(action[2]) == {"expected_revision": 2}
     assert action[3]["x-extore-cli-signature"]
 
 

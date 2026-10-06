@@ -63,6 +63,27 @@ def resolve_audit_shop(c, actor, target):
     ).fetchone()
     if row:
         return row["shop_id"]
+    # This table is created after the historical audit migration. Older
+    # installations must still resolve their existing records during init.
+    if c.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' "
+        "AND name='pipeline_authorizations'"
+    ).fetchone():
+        row = c.execute(
+            "SELECT shop_id FROM pipeline_authorizations WHERE id=?", (target,)
+        ).fetchone()
+        if row:
+            return row["shop_id"]
+    if c.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='cli_scope_requests'"
+    ).fetchone():
+        row = c.execute(
+            "SELECT COALESCE(approved_shop_id,shop_id) AS shop_id "
+            "FROM cli_scope_requests WHERE id=?",
+            (target,),
+        ).fetchone()
+        if row:
+            return row["shop_id"]
     for sql in (
         "SELECT id AS shop_id FROM shops WHERE id=?",
         "SELECT shop_id FROM products WHERE id=?",

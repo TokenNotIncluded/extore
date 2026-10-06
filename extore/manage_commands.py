@@ -261,15 +261,14 @@ def _public(value):
     for key, item in value.items():
         if key == "processor_config":
             try:
-                from extore_processors import get_spec
+                from .processors import editable_configuration
 
-                fields = get_spec(value.get("processor_id"))["configuration"]
-                visible = {field["key"] for field in fields if not field.get("secret")}
+                visible = editable_configuration(value.get("processor_id"), item)
             except (ValueError, KeyError, TypeError):
-                visible = set()
+                visible = {}
             result[key] = (
                 {
-                    name: config if name in visible else "[redacted]"
+                    name: visible[name] if name in visible else "[redacted]"
                     for name, config in item.items()
                 }
                 if isinstance(item, dict)

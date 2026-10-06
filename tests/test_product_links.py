@@ -1150,7 +1150,14 @@ def test_full_manager_cannot_select_processor_accounts_and_owner_freezes_issued_
     assert response.status_code == 200, response.text
     config = response.json()
     assert config["script"] == ""
-    assert config["processor_id"] == processor_id and config["processor_config"] == {}
+    assert config["processor_id"] == processor_id
+    assert config["processor_config"] == {
+        key: value
+        for key, value in private_config.items()
+        if key == ("message" if processor_id == "resource_link" else "template")
+    }
+    if processor_id == "resource_link":
+        assert private_config["resource_url"] not in response.text
     assert config["parameters"] == specifications[processor_id]["parameters"]
     assert config["outputs"] == specifications[processor_id]["outputs"]
     assert (

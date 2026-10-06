@@ -37,6 +37,16 @@ AUDIT_ACTIONS = (
     "cli.product.approve",
     "cli.product.deny",
     "cli.product.claim",
+    "cli.scope.request",
+    "cli.scope.approve",
+    "cli.scope.deny",
+    "cli.scope.claim",
+    "cli.scope.create",
+    "cli.scope.upgrade",
+    "cli.scope.recover",
+    "cli.scope.revoke",
+    "cli.scope.issuer.root_to_shop",
+    "cli.scope.issuer.shop_to_root",
     "cli.owner.request",
     "cli.owner.approve",
     "cli.owner.device.create",
@@ -277,9 +287,18 @@ def _link_scope(c, s):
         return {
             row["id"]
             for row in c.execute(
+                "WITH RECURSIVE scoped_links(id,shop_id) AS ("
+                "SELECT pipeline_bindings.staff_id,pipeline_authorizations.shop_id "
+                "FROM pipeline_bindings JOIN pipeline_authorizations "
+                "ON pipeline_authorizations.id=pipeline_bindings.authorization_id "
+                "UNION SELECT child.id,scoped_links.shop_id FROM staff child "
+                "JOIN scoped_links ON child.parent_id=scoped_links.id) "
                 "SELECT staff.id FROM staff JOIN products ON products.id=staff.product_id "
-                "WHERE products.shop_id=?",
-                (s["shop_id"],),
+                "WHERE (products.shop_id=? AND NOT EXISTS "
+                "(SELECT 1 FROM scoped_links WHERE id=staff.id)) OR "
+                "(EXISTS (SELECT 1 FROM scoped_links WHERE id=staff.id AND shop_id=?) "
+                "AND NOT EXISTS (SELECT 1 FROM scoped_links WHERE id=staff.id AND shop_id!=?))",
+                (s["shop_id"], s["shop_id"], s["shop_id"]),
             )
         }
     ids = [s["staff_id"]]
@@ -298,7 +317,8 @@ def _link_scope(c, s):
 def _session_rows(c, scope, shop_id=None):
     sql = (
         "SELECT sessions.*,staff.name AS link_name,staff.product_id AS product_id,"
-        "products.config AS product_config,COALESCE(cli_devices.fingerprint,owner_cli_devices.fingerprint) AS device_fingerprint,"
+        "products.config AS product_config,products.shop_id AS product_shop_id,"
+        "COALESCE(cli_devices.fingerprint,owner_cli_devices.fingerprint) AS device_fingerprint,"
         "COALESCE(cli_devices.revoked,owner_cli_devices.revoked) AS device_revoked,owner_cli_devices.expires AS owner_grant_expires FROM sessions "
         "LEFT JOIN staff ON staff.id=sessions.staff_id "
         "LEFT JOIN products ON products.id=staff.product_id"
@@ -345,7 +365,12 @@ def _session_view(c, row, current_digest):
         from fastapi import HTTPException
 
         try:
-            staff_authorization(c, row["staff_id"])
+            if row["channel"] == "cli":
+                from .cli_auth import _device
+
+                _device(c, row["device_id"])
+            else:
+                staff_authorization(c, row["staff_id"])
         except HTTPException:
             active = False
     elif active and row["shop_id"] is not None:
@@ -358,7 +383,7 @@ def _session_view(c, row, current_digest):
         except HTTPException:
             active = False
     name = None
-    if row["product_config"]:
+    if row["product_config"] and row["shop_id"] in (None, row["product_shop_id"]):
         try:
             name = json.loads(row["product_config"]).get("name")
         except (TypeError, ValueError, AttributeError):
@@ -452,6 +477,22 @@ def _list_audit(request, roles, limit):
                             f"SELECT id FROM {table} WHERE shop_id=?", (shop_id,)
                         )
                     }
+                targets |= {
+                    row["id"]
+                    for row in c.execute(
+                        "SELECT id FROM pipeline_authorizations WHERE shop_id=?",
+                        (shop_id,),
+                    )
+                }
+                targets |= {
+                    row["id"]
+                    for row in c.execute(
+                        "SELECT id FROM cli_scope_requests WHERE approved_shop_id=? "
+                        "OR authorization_id IN (SELECT id FROM pipeline_authorizations "
+                        "WHERE shop_id=?)",
+                        (shop_id, shop_id),
+                    )
+                }
             targets |= {
                 row["id"]
                 for row in c.execute(
@@ -479,6 +520,12 @@ def _list_audit(request, roles, limit):
         safe_targets |= {
             r["id"] for r in c.execute("SELECT id FROM cli_device_requests")
         }
+        safe_targets |= {
+            r["id"] for r in c.execute("SELECT id FROM pipeline_authorizations")
+        }
+        safe_targets |= {
+            r["id"] for r in c.execute("SELECT id FROM cli_scope_requests")
+        }
         return [
             {
                 **{k: row[k] for k in ("id", "actor", "action", "target", "created")},
@@ -504,12 +551,24 @@ def _list_audit(request, roles, limit):
 def _audit_metadata(c, row):
     # Reconstruct safe metadata through opaque targets; never serialize the
     # credential or free-form contents of the common audit table.
+    target = c.execute(
+        "SELECT client_name,fingerprint FROM cli_scope_requests WHERE id=?",
+        (row["target"],),
+    ).fetchone()
+    if target is not None:
+        return {"channel": "cli", **dict(target)}
     pending = c.execute(
         "SELECT client_name,fingerprint FROM cli_device_requests WHERE id=?",
         (row["target"],),
     ).fetchone()
     if pending is not None:
         return {"channel": "cli", **dict(pending)}
+    target = c.execute(
+        "SELECT client_name,fingerprint FROM pipeline_authorizations WHERE id=?",
+        (row["target"],),
+    ).fetchone()
+    if target is not None:
+        return {"channel": "cli", **dict(target)}
     target = c.execute(
         "SELECT sessions.channel,sessions.client_name,COALESCE(cli_devices.fingerprint,owner_cli_devices.fingerprint) AS fingerprint "
         "FROM sessions LEFT JOIN cli_devices ON cli_devices.id=sessions.device_id AND cli_devices.staff_id=sessions.staff_id "
