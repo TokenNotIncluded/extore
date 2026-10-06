@@ -26,6 +26,7 @@ from .files import (
 from .files import (
     router as files_router,
 )
+from .flow_adapter import router as flow_router
 from .link_access import augment_link_view, consume_link, revoke_staff_sessions
 from .link_access import router as link_access_router
 from .link_cleanup import link_state
@@ -69,6 +70,7 @@ from .security import (
 from .service import (
     apply_update,
     bootstrap_progress_plan,
+    card_product,
     freeze_product_plans,
     freeze_product_schemas,
     issue_cards,
@@ -95,6 +97,7 @@ app.include_router(auth.router)
 app.include_router(account_auth_router)
 app.include_router(card_tracking_router)
 app.include_router(files_router)
+app.include_router(flow_router)
 app.include_router(source_router)
 app.include_router(link_access_router)
 app.include_router(cli_auth_router)
@@ -248,7 +251,7 @@ def _screen_exchange_card(c, card, index=None):
         ensure_card_usable(c, card)
         shops.require_enabled_product(c, card["product_id"])
         row = c.execute("SELECT * FROM jobs WHERE card_id=?", (card["id"],)).fetchone()
-        p = job_product(c, row) if row else product(c, card["product_id"])
+        p = job_product(c, row) if row else card_product(c, card)
         if row and (
             row["state"] == "destroyed"
             or (
@@ -280,7 +283,7 @@ def _batch_receipt(c, value):
                 "suffix": meta["code_suffix"] if meta and meta["code_suffix"] else "",
                 "variant": card_variant(c, card),
                 "product": public_product(
-                    job_product(c, row) if row else product(c, card["product_id"])
+                    job_product(c, row) if row else card_product(c, card)
                 ),
                 "job": job_view(c, row) if row else None,
             }
@@ -397,7 +400,7 @@ def receipt(body: TokenInput):
         row = c.execute("SELECT * FROM jobs WHERE card_id=?", (card["id"],)).fetchone()
         return {
             "product": public_product(
-                job_product(c, row) if row else product(c, card["product_id"])
+                job_product(c, row) if row else card_product(c, card)
             ),
             "variant": card_variant(c, card),
             "job": job_view(c, row) if row else None,
@@ -1013,7 +1016,7 @@ def jobs(
         elif not job_id:
             if view == "active":
                 conditions.append(
-                    "state IN ('queued','processing','failed','needs_input')"
+                    "state IN ('queued','processing','waiting','failed','needs_input')"
                 )
             elif view == "processed":
                 conditions.append("state IN ('succeeded','destroyed','rejected')")
@@ -1096,6 +1099,16 @@ def batch(body: BatchUpdate, request: Request):
                 )
                 r = job(c, jid)
             if body.action == "claim":
+                from . import task_flow
+
+                if task_flow.is_flow(c, r):
+                    if body.flow_epoch is None:
+                        fail("领取流程步骤必须指定 flow_epoch", 409)
+                    from .service import finalize_task_flow
+
+                    finalize_task_flow(c, task_flow.claim(c, r, actor, body.flow_epoch))
+                    audit(c, actor, "job.claim", jid)
+                    continue
                 if r["state"] != "queued":
                     fail("任务已被领取或完成，请刷新列表", 409)
                 c.execute("UPDATE jobs SET claimed_by=? WHERE id=?", (actor, jid))
@@ -1129,6 +1142,8 @@ def batch(body: BatchUpdate, request: Request):
                         output=body.output,
                         message=body.message,
                         retryable=body.retryable,
+                        flow_epoch=body.flow_epoch,
+                        action_id=body.action_id,
                     ),
                 )
             elif body.action in ("request_changes", "request_retry", "reject"):
@@ -1143,6 +1158,12 @@ def batch(body: BatchUpdate, request: Request):
                     retry_mode=body.retry_mode,
                     reason_type=body.reason_type,
                 )
+                from . import task_flow
+
+                if task_flow.is_flow(c, r):
+                    from .service import finalize_task_flow
+
+                    finalize_task_flow(c, task_flow.stop_for_outcome(c, job(c, jid)))
             elif body.action == "retry":
                 if r["state"] != "failed":
                     fail("只能放行失败的任务", 409)
@@ -1219,6 +1240,7 @@ def edit_managed_product(
                 "max_attempts",
                 "processor_id",
                 "processor_config",
+                "task_flow",
             ):
                 if values[field] != old[field]:
                     fail("修改发货、查看或重试配置需要配置发货权限", 403)
@@ -1429,6 +1451,10 @@ async def callback(pid: str, jid: str, request: Request):
         verify_signature(p["webhook_secret"], timestamp, nonce, body, signature)
         if job(c, jid)["product_id"] != pid:
             fail("任务不属于此商品", 403)
+        from . import task_flow
+
+        if task_flow.is_flow(c, job(c, jid)):
+            fail("步骤流程必须使用绑定执行身份的私有 Worker v2 回调", 409)
         c.execute("DELETE FROM callback_nonces WHERE created<?", (time.time() - 600,))
         nonce_key = digest(pid + ":" + nonce)
         if c.execute(

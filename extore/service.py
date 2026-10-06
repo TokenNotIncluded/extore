@@ -387,6 +387,25 @@ def job_view(c, row, staff=False):
         from .files import listfiles
 
         result["files"] = listfiles(c, row)
+    from . import task_flow
+
+    if task_flow.is_flow(c, row):
+        flow = task_flow.view(c, row, staff=staff)
+        result["task_flow"] = flow
+        if staff and flow["phase"] in ("queued", "processing"):
+            execution = task_flow.execution(c, row)
+            if execution:
+                fields = execution.get("parameters", [])
+                protected = {f["key"] for f in fields if f.get("sensitive")}
+                result["params"] = {
+                    key: value for key, value in execution["params"].items()
+                    if key not in protected
+                }
+                result["parameters"] = fields
+                result["outputs"] = execution["outputs"]
+                result["flow_epoch"] = execution["flow_epoch"]
+                result["action_id"] = execution["action_id"]
+                result["protected_fields"] = sorted(protected)
     return result
 
 
