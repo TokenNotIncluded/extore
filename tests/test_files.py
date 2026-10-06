@@ -397,3 +397,43 @@ def test_unknown_file_ids_do_not_produce_public_download_links(owner):
         "/api/files/download", json={"token": "invalid", "file_id": str(uuid.uuid4())}
     )
     assert response.status_code == 404
+
+
+def test_exact_job_file_preflight_filters_before_limit_and_preserves_scope(owner):
+    product = make_product(owner, parameters=[], outputs=[], delivery="service")
+    first = submit(owner, exchange(owner, product["id"]), {})
+    second = submit(owner, exchange(owner, product["id"]), {})
+    response = owner.get(
+        "/api/manage/jobs",
+        params={"product_id": product["id"], "job_id": second["id"], "limit": 1},
+    )
+    assert response.status_code == 200, response.text
+    assert [row["id"] for row in response.json()] == [second["id"]]
+    assert first["id"] != second["id"]
+    other = make_product(owner, parameters=[], outputs=[], delivery="service")
+    foreign = submit(owner, exchange(owner, other["id"]), {})
+    for identifier, state in ((foreign["id"], ""), (second["id"], "processing")):
+        response = owner.get(
+            "/api/manage/jobs",
+            params={
+                "product_id": product["id"],
+                "job_id": identifier,
+                "state": state,
+                "limit": 1,
+            },
+        )
+        assert response.status_code == 200 and response.json() == []
+    set_staff(owner, product["id"], ["queue.view"])
+    response = owner.get(
+        "/api/manage/jobs",
+        params={"product_id": product["id"], "job_id": second["id"], "limit": 1},
+    )
+    assert response.status_code == 200
+    assert [row["id"] for row in response.json()] == [second["id"]]
+    assert (
+        owner.get(
+            "/api/manage/jobs",
+            params={"product_id": other["id"], "job_id": foreign["id"]},
+        ).status_code
+        == 403
+    )

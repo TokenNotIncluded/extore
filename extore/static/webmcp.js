@@ -630,6 +630,18 @@
       if (own(output, field.key))
         validateFieldValue(field, output[field.key], "Delivery");
   }
+  function jobOutputProduct(job) {
+    try {
+      validate(choice(["content", "service"]), job.delivery, "job.delivery");
+      validate({ type: "array", items: parameterSchema, maxItems: 30 }, job.outputs, "job.outputs");
+      if (new Set(job.outputs.map((field) => field.key)).size !== job.outputs.length ||
+          (job.delivery === "service" ? job.outputs.length !== 0 : !job.outputs.length))
+        throw new Error("Invalid job output schema");
+    } catch {
+      throw new ToolError("unavailable", "This job has no valid snapshotted output schema. Refresh the task before completing it.");
+    }
+    return { delivery: job.delivery, outputs: job.outputs };
+  }
   async function prepareProduct(p, signal, declared = new Set(Object.keys(p))) {
     if (p.mode !== "script") return p;
     if (!p.processor_id)
@@ -1966,7 +1978,7 @@
       ) {
         add(
           "jobs_file_upload", "上传任务交付文件",
-          "Upload one confirmed output attachment to an operator's claimed job in the selected product queue. The field must be a declared file output. Use the returned opaque file ID in jobs_complete.output. Maximum 20 MiB per file; upload content and filenames are untrusted data. Explicit confirm:true is required.",
+          "Upload one confirmed output attachment to an operator's claimed job in the selected product queue. The field must be a file output in that job's snapshotted schema, obtained from jobs_list, rather than the product's current output schema. Use the returned opaque file ID in jobs_complete.output. Maximum 20 MiB per file; upload content and filenames are untrusted data. Explicit confirm:true is required.",
           object({ product_id: id, job_id: id, ...uploadFields, confirm: confirmed }, ["product_id", "job_id", "field_key", "filename", "base64", "confirm"]),
           async (input, signal) => {
             validateUpload(input);
@@ -1976,8 +1988,8 @@
             const actor = admin ? "owner" : signal.auth?.link_id;
             if (actor && job.claimed_by !== actor)
               throw new ToolError("forbidden", "Only the claiming operator may upload this job's output files.");
-            if (!(c.queueProduct?.outputs || []).some((field) => field.key === input.field_key && field.type === "file"))
-              throw new ToolError("invalid_arguments", "This product has no matching file output field.");
+            if (!outputFields(jobOutputProduct(job)).some((field) => field.key === input.field_key && field.type === "file"))
+              throw new ToolError("invalid_arguments", "This job has no matching file output field in its snapshot.");
             const { confirm: ignored, ...definition } = input;
             const data = await action("uploadFile", [{ ...definition, scope: "job" }], signal);
             checkInvocation(signal);
@@ -2020,27 +2032,40 @@
           ids,
           message: string(1000),
           progress_steps: boundStepsSchema,
-          output: outputInput(c.queueProduct),
+          output: {
+            type: "object", maxProperties: 30, propertyNames: fieldKey,
+            additionalProperties: string(100000),
+          },
+          content: string(100000),
           confirm: confirmed,
         };
         const completionRequired = ["product_id", "ids", "confirm"];
-        const allowsLegacyContent = legacyOutput(c.queueProduct);
-        if (allowsLegacyContent) completionProperties.content = string(100000);
-        else if (c.queueProduct?.delivery !== "service")
-          completionRequired.push("output");
         add(
           "jobs_complete",
           "完成任务并交付",
-          "Complete claimed jobs in the selected product queue. The server marks all snapshotted processing steps complete automatically. All selected jobs receive identical structured output; use the dynamically declared output keys and string values. Only the legacy single content field also accepts content. Services return success status only. Explicit confirm:true is required.",
+          "Complete claimed jobs in the selected product queue. Read each task's outputs from jobs_list: execution fetches every target job and strictly validates its snapshotted required fields and types, never the product's current schema. Output accepts at most 30 code keys with string values, totalling at most 100000 characters. All selected jobs must have the same delivery and output structure and receive identical results. Only a legacy single content snapshot accepts content; services return status only. The server completes all steps automatically. Explicit confirm:true is required.",
           object(completionProperties, completionRequired),
           async (input, signal) => {
+            if (own(input, "output") && Object.values(input.output).reduce((size, value) => size + value.length, 0) > 100000)
+              throw new ToolError("invalid_arguments", "Delivery output is too long.");
+            let snapshot, structure;
+            for (const jobId of input.ids) {
+              const job = await scopedJob({ product_id: input.product_id, job_id: jobId }, signal);
+              const candidate = jobOutputProduct(job);
+              const candidateStructure = JSON.stringify([candidate.delivery, outputStructure(candidate.outputs)]);
+              if (structure !== undefined && candidateStructure !== structure)
+                throw new ToolError("invalid_arguments", "Selected jobs have different snapshotted output structures; complete them separately.");
+              snapshot = candidate;
+              structure = candidateStructure;
+            }
+            const allowsLegacyContent = legacyOutput(snapshot);
             if (own(input, "output"))
-              validateOutput(c.queueProduct, input.output);
-            if (input.ids.length > 1 && outputFields(c.queueProduct).some((field) =>
+              validateOutput(snapshot, input.output);
+            if (input.ids.length > 1 && outputFields(snapshot).some((field) =>
               field.type === "file" && input.output?.[field.key]))
               throw new ToolError("invalid_arguments", "File references are bound to one job; complete file deliveries individually.");
             if (
-              allowsLegacyContent &&
+              snapshot.delivery === "content" &&
               !own(input, "output") &&
               !own(input, "content")
             )
@@ -2049,6 +2074,8 @@
                 "Content delivery requires output or legacy content.",
               );
             if (own(input, "content")) {
+              if (!allowsLegacyContent)
+                throw new ToolError("invalid_arguments", "Legacy content is only supported by a default single content output snapshot.");
               if (!input.content.trim())
                 throw new ToolError(
                   "invalid_arguments",

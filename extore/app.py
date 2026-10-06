@@ -655,8 +655,9 @@ def jobs(
         product_id = queue_product_id(s, product_id)
         product(c, product_id)
         rows = c.execute(
-            "SELECT * FROM jobs WHERE product_id=? AND (?='' OR state=?) ORDER BY created,id LIMIT ?",
-            (product_id, state, state, max(1, min(limit, 500))),
+            "SELECT * FROM jobs WHERE product_id=? AND (?='' OR state=?) "
+            "AND (?='' OR id=?) ORDER BY created,id LIMIT ?",
+            (product_id, state, state, job_id, job_id, max(1, min(limit, 500))),
         ).fetchall()
         return [job_view(c, r, True) for r in rows]
 

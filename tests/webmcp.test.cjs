@@ -90,6 +90,12 @@ async function harness(t, options = {}) {
   };
   const calls = [];
   const products = options.products || [product()];
+  const queueProduct = state.queueProduct || products[0];
+  const jobs = options.jobs || ["j1", "j2"].map((id) => ({
+    id, state: "queued", product_id: state.queueProductId || "p1",
+    delivery: queueProduct.delivery,
+    outputs: queueProduct.delivery === "service" ? [] : queueProduct.outputs || [outputField("content", { type: "textarea" })],
+  }));
   let receipt = options.receipt || { product: state.product || products[0], job: null };
   const actions = {
     navigate: async (url, tab) => {
@@ -118,7 +124,11 @@ async function harness(t, options = {}) {
     if (["/products", "/admin/products", "/manage/products"].includes(url)) return products;
     if (["/admin/processors", "/manage/processors"].includes(url)) return processorCatalog;
     if (url === "/manage/product" && method === "GET") return products.find((p) => p.id === state.productId);
-    if (url.startsWith("/manage/jobs")) return [{ id: "j1", state: "queued", product_id: state.queueProductId }];
+    if (url.startsWith("/manage/jobs")) {
+      const filters = new URL("https://extore.test" + url).searchParams;
+      return jobs.filter((job) => job.product_id === filters.get("product_id") &&
+        (!filters.has("job_id") || job.id === filters.get("job_id")));
+    }
     if (url === "/manage/batch") return { updated: 1 };
     if (["/admin/cards", "/manage/cards"].includes(url) && method === "POST") return { codes: ["CODE-PRIVATE"], digest: "HASH-PRIVATE" };
     if (["/admin/staff", "/manage/links"].includes(url) && method === "POST") return { id: "s1", url: "https://extore.test/staff#staff-private", token: "staff-private" };
@@ -708,7 +718,7 @@ test("job reads and batch writes require the selected product ID and cannot cros
   assert.equal(Object.hasOwn(batch.body, "confirm"), false);
 });
 
-test("multi-field delivery schemas enforce configured required fields and forward output values to the batch API", async (t) => {
+test("completion registration accepts bounded output while execution enforces target snapshots and forwards values to the batch API", async (t) => {
   const outputs = [
     outputField("email", { type: "email" }),
     outputField("count", { type: "number" }),
@@ -717,10 +727,11 @@ test("multi-field delivery schemas enforce configured required fields and forwar
   ];
   const h = await harness(t, { context: { page: "admin", role: "admin", tab: "jobs", queueProductId: "p1", queueProduct: product({ outputs }) } });
   const schema = h.tool("jobs_complete").inputSchema;
-  assert.ok(schema.required.includes("output"));
-  assert.deepEqual(plain(schema.properties.output.required).sort(), ["count", "download", "email"]);
-  assert.deepEqual(Object.keys(schema.properties.output.properties).sort(), ["count", "download", "email", "notes"]);
-  assert.equal(schema.properties.output.additionalProperties, false);
+  assert.equal(schema.required.includes("output"), false, "Old jobs must not inherit current product required fields");
+  assert.equal(schema.properties.output.maxProperties, 30);
+  assert.equal(schema.properties.output.propertyNames.maxLength, 40);
+  assert.equal(schema.properties.output.additionalProperties.type, "string");
+  assert.equal(schema.properties.output.additionalProperties.maxLength, 100000);
   const output = { email: "customer@example.test", count: "1.5e2", download: "http://fulfillment.test/download?id=1", notes: "Save this receipt" };
   const result = await h.call("jobs_complete", { product_id: "p1", ids: ["j1", "j2"], output, confirm: true });
   assert.equal(result.ok, true);
@@ -2123,7 +2134,7 @@ test("output file uploads require fresh processing authority, a claimed job and 
   const auth = { role: "staff", product_id: "p1", link_id: "s1", permissions: ["queue.view", "queue.process"] };
   const h = await harness(t, {
     context: staffContext({ queueProduct: p }),
-    api: attachmentAPI({ id: "j1", product_id: "p1", state: "processing", claimed_by: "s1" }, [], auth),
+    api: attachmentAPI({ id: "j1", product_id: "p1", state: "processing", claimed_by: "s1", delivery: "content", outputs: p.outputs }, [], auth),
     actions: { uploadFile: async (definition) => {
       assert.equal(definition.scope, "job");
       assert.equal(definition.product_id, "p1");
@@ -2174,6 +2185,122 @@ test("file output IDs stay bound to one completed job while optional empty file 
   assert.equal(mutations(h).length, 0);
   assert.equal((await h.call("jobs_complete", { ...base, output: { document: "", message: "Complete" } })).ok, true);
   assert.equal((await h.call("jobs_complete", { ...base, ids: ["j1"], output: { document: attachmentId } })).ok, true);
+});
+
+test("older task output snapshots accept their original fields without inheriting current product additions or types", async (t) => {
+  const context = {
+    page: "admin", role: "admin", tab: "jobs", queueProductId: "p1",
+    queueProduct: product({ outputs: [outputField("new_required"), outputField("account", { type: "number" })] }),
+  };
+  const h = await harness(t, {
+    context,
+    jobs: [{ id: "j1", product_id: "p1", delivery: "content", outputs: [outputField("account")] }],
+  });
+  const tool = h.tool("jobs_complete");
+  const base = { product_id: "p1", ids: ["j1"], confirm: true };
+  assert.equal((await tool.execute({ ...base, output: { account: "Original text result" } })).ok, true);
+  assert.deepEqual(mutations(h)[0].body.output, { account: "Original text result" });
+  rejected(await h.call("jobs_complete", { ...base, output: { new_required: "Current schema" } }));
+  rejected(await h.call("jobs_complete", { ...base, output: { account: "Correct", new_required: "Extra" } }));
+  rejected(await h.call("jobs_complete", base));
+  assert.equal(mutations(h).length, 1);
+  assert.equal(h.tool("jobs_complete"), tool, "Fetching task snapshots must not churn native registration");
+
+  const legacy = await harness(t, {
+    context, jobs: [{ id: "j1", product_id: "p1", delivery: "content", outputs: [outputField("content", { type: "textarea" })] }],
+  });
+  assert.equal((await legacy.call("jobs_complete", { ...base, content: "Original legacy goods" })).ok, true);
+});
+
+test("file upload validates the claimed task snapshot even when the current product removed or added file outputs", async (t) => {
+  const context = staffContext({ queueProduct: product({ outputs: [outputField("new_document", { type: "file" })] }) });
+  const auth = { role: "staff", product_id: "p1", link_id: "s1", permissions: ["queue.view", "queue.process"] };
+  const job = {
+    id: "j1", product_id: "p1", state: "processing", claimed_by: "s1", delivery: "content",
+    outputs: [outputField("document", { type: "file" })],
+  };
+  const h = await harness(t, {
+    context, api: attachmentAPI(job, [], auth),
+    actions: { uploadFile: async () => attachment({ kind: "output" }) },
+  });
+  const input = { product_id: "p1", job_id: "j1", field_key: "document", filename: "hello.txt", base64: "aGVsbG8=", confirm: true };
+  assert.equal((await h.call("jobs_file_upload", input)).ok, true);
+  rejected(await h.call("jobs_file_upload", { ...input, field_key: "new_document" }));
+  assert.equal(h.calls.filter((call) => call.name === "uploadFile").length, 1);
+  const textTask = await harness(t, {
+    context: staffContext({ queueProduct: product({ outputs: [outputField("document", { type: "file" })] }) }),
+    api: attachmentAPI({ ...job, outputs: [outputField("document")] }, [], auth),
+    actions: { uploadFile: async () => assert.fail("Current product file fields cannot override old task text fields") },
+  });
+  rejected(await textTask.call("jobs_file_upload", input));
+});
+
+test("completion refuses mixed task output snapshots before submitting any batch mutation", async (t) => {
+  const context = { page: "admin", role: "admin", tab: "jobs", queueProductId: "p1", queueProduct: product() };
+  const first = { id: "j1", product_id: "p1", delivery: "content", outputs: [outputField("account")] };
+  for (const second of [
+    { ...first, id: "j2", outputs: [outputField("other")] },
+    { ...first, id: "j2", outputs: [outputField("account", { type: "number" })] },
+    { ...first, id: "j2", outputs: [outputField("account", { required: false })] },
+    { ...first, id: "j2", delivery: "service", outputs: [] },
+  ]) {
+    const h = await harness(t, { context, jobs: [first, second] });
+    rejected(await h.call("jobs_complete", { product_id: "p1", ids: ["j1", "j2"], output: { account: "Value" }, confirm: true }));
+    assert.equal(mutations(h).length, 0);
+    assert.deepEqual(h.calls.filter((call) => call.url?.startsWith("/manage/jobs?")).map((call) => call.url), [
+      "/manage/jobs?product_id=p1&job_id=j1&limit=1", "/manage/jobs?product_id=p1&job_id=j2&limit=1",
+    ]);
+  }
+});
+
+test("missing or invalid task snapshots never fall back to the current product or another product's job", async (t) => {
+  const context = { page: "admin", role: "admin", tab: "jobs", queueProductId: "p1", queueProduct: product() };
+  const base = { product_id: "p1", ids: ["j1"], content: "Goods", confirm: true };
+  for (const job of [
+    { id: "j1", product_id: "p1", delivery: "content" },
+    { id: "j1", product_id: "p1", delivery: "content", outputs: [] },
+    { id: "j1", product_id: "p1", delivery: "content", outputs: [outputField("content"), outputField("content")] },
+    { id: "j1", product_id: "p1", delivery: "service", outputs: [outputField("content")] },
+  ]) {
+    const h = await harness(t, { context, jobs: [job] });
+    rejected(await h.call("jobs_complete", base), "unavailable");
+    assert.equal(mutations(h).length, 0);
+  }
+  const other = await harness(t, { context, jobs: [{ id: "j1", product_id: "p2", delivery: "content", outputs: [outputField("content")] }] });
+  rejected(await other.call("jobs_complete", base), "not_found");
+  assert.equal(mutations(other).length, 0);
+});
+
+test("completion's generic registration still rejects unbounded or malformed output data", async (t) => {
+  const h = await harness(t, { context: { page: "admin", role: "admin", tab: "jobs", queueProductId: "p1" } });
+  const base = { product_id: "p1", ids: ["j1"], confirm: true };
+  for (const output of [
+    Object.fromEntries(Array.from({ length: 31 }, (_, index) => ["field_" + index, "Value"])),
+    { "not-a-code": "Value" }, { ["a".repeat(41)]: "Value" },
+    { content: "x".repeat(100001) }, { content: 1 },
+  ]) rejected(await h.call("jobs_complete", { ...base, output }));
+  assert.equal(h.calls.length, 0, "Invalid generic schema must fail before authentication or preflight requests");
+});
+
+test("a context change while fetching a completion snapshot prevents the dependent batch write", async (t) => {
+  let release;
+  let started;
+  const waiting = new Promise((resolve) => { release = resolve; });
+  const readStarted = new Promise((resolve) => { started = resolve; });
+  const h = await harness(t, {
+    context: { page: "admin", role: "admin", tab: "jobs", queueProductId: "p1", queueProduct: product() },
+    api: async (url) => {
+      if (url === "/auth/status") return { role: "admin" };
+      if (url === "/manage/jobs?product_id=p1&job_id=j1&limit=1") { started(); return waiting; }
+      assert.fail("Stale completion reached the batch endpoint");
+    },
+  });
+  const operation = h.call("jobs_complete", { product_id: "p1", ids: ["j1"], content: "Goods", confirm: true });
+  await readStarted;
+  h.state.queueProductId = "p2";
+  release([{ id: "j1", product_id: "p1", delivery: "content", outputs: [outputField("content", { type: "textarea" })] }]);
+  rejected(await operation, "stale_context");
+  assert.equal(mutations(h).length, 0);
 });
 
 test("management link login limits use bounded defaults and fresh parent ceilings", async (t) => {

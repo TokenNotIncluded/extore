@@ -164,11 +164,11 @@ window.ExtoreWebMCP.dispose();
 | `jobs_list` | `product_id`、`state?`、`limit?`；state 为 `queued` / `processing` / `succeeded` / `failed` / `destroyed`，limit 为 1–500 |
 | `jobs_files_list` | `product_id`、`job_id`；任务必须属于当前选择的商品队列 |
 | `jobs_file_read` | `product_id`、`job_id`、`file_id`；先验证任务和附件所属范围，再读取限量内容 |
-| `jobs_file_upload` | `product_id`、`job_id`、`field_key`、`filename`、`base64`、`content_type?` + confirm；必须为自己领取任务的文件输出字段 |
+| `jobs_file_upload` | `product_id`、`job_id`、`field_key`、`filename`、`base64`、`content_type?` + confirm；必须为自己领取任务的输出快照中的文件字段 |
 | `jobs_claim` | `product_id`、`ids`、`progress_steps?` + confirm；ids 为 1–100 个不重复任务 ID，步骤计划只能为尚无计划的任务绑定一次 |
 | `jobs_allow_retry` | `product_id`、`ids` + confirm；放行重试，不修改步骤 |
 | `jobs_progress` | `product_id`、`ids`、`progress?`、`progress_steps?`、`completed_steps?`、`message?` + confirm；progress 为 0–99 的整数，步骤型任务由服务端计算百分比；completed_steps 是任务快照中的完整已完成 ID 集合，省略则保留 |
-| `jobs_complete` | `product_id`、`ids`、`message?`、`progress_steps?`、`output?`、`content?` + confirm；成功会自动完成全部步骤；output 根据当前 queueProduct.outputs 验证，所有所选任务收到相同结果；仅默认单 content 字段兼容 content，服务型任务只提交成功状态 |
+| `jobs_complete` | `product_id`、`ids`、`message?`、`progress_steps?`、`output?`、`content?` + confirm；成功会自动完成全部步骤；执行时读取目标任务的输出快照严格验证，批内交付类型、字段代码、类型和必填规则必须相同；仅默认单 content 快照兼容 content，服务型任务只提交成功状态 |
 | `jobs_fail` | `product_id`、`ids`、`message?`、`progress_steps?`、`retryable?` + confirm；仅确认未交付时设置 retryable=true |
 | `event_retry` | `event_id` + confirm |
 
@@ -239,9 +239,11 @@ window.ExtoreWebMCP.dispose();
 }
 ```
 
-工具依据当前 `queueProduct.outputs` 生成动态 Schema 并再次验证：拒绝未知字段或非字符串，总字段值长度最多 100000 字符，必填值去除空白后不能为空。邮箱须合法；数字须为有限十进制数字；URL 仅允许有主机名的 HTTP/HTTPS 地址，禁止任何用户信息段（包括 `https://@host`）、反斜线、内部空格或控制字符。文本保留原格式。批量完成时所有选中任务收到同一组结果，不能拿同一批操作发送不同客户的私密结果。
+`jobs_list` 返回每个任务的 `parameters` 与 `outputs` 快照。应按目标任务的 `outputs` 填写结果，而不是按商品当前的 `queueProduct.outputs`；商品后续修改字段不会改变旧任务的要求。完成工具注册的 Schema 只接受最多 30 个合法字段代码与字符串值，不把当前商品的必填字段强加给旧任务。执行时通过 `GET /api/manage/jobs?product_id=…&job_id=…&limit=1` 逐个核对目标任务，再按快照拒绝未知字段、缺失必填值或错误类型；快照缺失时直接拒绝，不回退当前商品。文件上传也先读取对应任务快照，只接受该任务的 `file` 输出字段。
 
-旧 `content` 入参只兼容默认必填的单个 `content` textarea 输出字段，多字段商品必须提交 `output`。同时传入 `content` 与 `output.content` 时两者必须一致。服务型商品完成时不提交 `content` 或交付结果。状态查询不返回结果，仍通过显式 `receipt_reveal` 领取，并遵守一次查看和销毁规则。商品发行过卡密后，输入和输出字段的代码名、类型、必填规则不能再改变。
+总字段值长度最多 100000 字符，必填值去除空白后不能为空。邮箱须合法；数字须为有限十进制数字；URL 仅允许有主机名的 HTTP/HTTPS 地址，禁止任何用户信息段（包括 `https://@host`）、反斜线、内部空格或控制字符。文本保留原格式。批量完成时，所有任务必须具有相同交付类型、输出字段代码、类型与必填规则；不一致时须分别完成。所有选中任务收到同一组结果，不能拿同一批操作发送不同客户的私密结果。
+
+旧 `content` 入参只兼容默认必填的单个 `content` textarea 输出快照，多字段任务必须提交 `output`。同时传入 `content` 与 `output.content` 时两者必须一致。服务型任务完成时不提交 `content` 或交付结果。状态查询不返回结果，仍通过显式 `receipt_reveal` 领取，并遵守一次查看和销毁规则。队列商品修改输入、输出定义时，已有任务保留自己的快照；自动处理商品发行后的字段架构仍受服务端锁定。
 
 协议仍使用 `manual` / `webhook` / `script`：界面分别对应队列、Webhook 和官方处理器。官方处理器使用 `processor_id` 与 `processor_config`，不能输入任意脚本文件名。`extore_processors_list` 使用 `GET /api/admin/processors`；具有 `product.edit` 的商品管理链接使用 `GET /api/manage/processors`。目录只有官方配置、输入与输出 Schema，没有实际配置值；普通 WebMCP 商品结果整块移除 `processor_config`。工具从最新目录填入官方顾客输入与交付输出，不能由商品配置覆盖；更换处理器 ID 且未显式给出配置时，旧配置会清空。草稿配置可以暂不完整，发行卡密和运行处理器时必须满足完整配置要求。
 
