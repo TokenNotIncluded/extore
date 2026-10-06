@@ -334,6 +334,16 @@ def _customer_action(operation, body, request):
             epoch, revision = current["flow_epoch"], current["revision"]
         if not task_flow.is_flow(c, row):
             fail("此任务没有步骤流程", 409)
+        if operation == "restart":
+            if body.values:
+                fail("重新开始不能提交字段值")
+            current = task_flow.view(c, row)
+            if current["flow_epoch"] != epoch or current["revision"] != revision:
+                fail("任务流程已改变，请刷新", 409)
+            updated = submit_flow(c, card, {})
+            response = job_view(c, updated)
+            audit(c, "customer", "task_flow.restart", row["id"])
+            return response
         fn = {
             "start": task_flow.start,
             "answer": task_flow.answer,
@@ -378,3 +388,8 @@ def continue_flow(body: FlowAction, request: Request):
 @router.post("/api/task-flow/cancel")
 def cancel(body: FlowAction, request: Request):
     return _customer_action("cancel", body, request)
+
+
+@router.post("/api/task-flow/restart")
+def restart(body: FlowAction, request: Request):
+    return _customer_action("restart", body, request)

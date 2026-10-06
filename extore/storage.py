@@ -66,6 +66,23 @@ def require_disk_space(additional, *, pending=0):
         fail("服务器文件空间不足，请联系商家", 507)
 
 
+def _flow_allocated(c, shop_id=None):
+    tables = {row[0] for row in c.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+    if "card_task_flows" not in tables:
+        return 0
+    total = c.execute(
+        "SELECT COALESCE(SUM(length(snapshot_ciphertext)),0) FROM card_task_flows "
+        "WHERE (? IS NULL OR shop_id=?)", (shop_id, shop_id)
+    ).fetchone()[0]
+    if "task_flow_steps" in tables:
+        total += c.execute(
+            "SELECT COALESCE(SUM(length(s.payload_ciphertext)),0) FROM task_flow_steps s "
+            "JOIN jobs j ON j.id=s.job_id JOIN card_task_flows f ON f.card_id=j.card_id "
+            "WHERE (? IS NULL OR f.shop_id=?)", (shop_id, shop_id)
+        ).fetchone()[0]
+    return total
+
+
 def _totals(c):
     from .text_cards import allocated_bytes
 
@@ -75,7 +92,7 @@ def _totals(c):
     pending = c.execute(
         "SELECT COALESCE(SUM(size),0) FROM upload_reservations"
     ).fetchone()[0]
-    return stored + allocated_bytes(c), pending
+    return stored + allocated_bytes(c) + _flow_allocated(c), pending
 
 
 def _product_shop(c, product_id):
@@ -102,7 +119,7 @@ def _shop_totals(c, shop_id):
         "SELECT COALESCE(SUM(size),0) FROM upload_reservations WHERE shop_id=?",
         (shop_id,),
     ).fetchone()[0]
-    return stored + allocated_bytes(c, shop_id), pending
+    return stored + allocated_bytes(c, shop_id) + _flow_allocated(c, shop_id), pending
 
 
 def check_storage_quota(c, additional, *, reservation_id=None, product_id=None):
