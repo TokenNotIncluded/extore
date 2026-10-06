@@ -13,6 +13,7 @@ from fastapi.staticfiles import StaticFiles
 from . import auth, shops
 from .account_auth import router as account_auth_router
 from .batch_redemption import router as batch_redemption_router
+from .automation import router as automation_router
 from .card_tracking import router as card_tracking_router
 from .cli_auth import router as cli_auth_router
 from .config import ORIGIN, check_config
@@ -108,6 +109,7 @@ app.include_router(link_access_router)
 app.include_router(cli_auth_router)
 app.include_router(device_login_router)
 app.include_router(scope_auth_router)
+app.include_router(automation_router)
 app.include_router(owner_cli_router)
 app.include_router(processor_profiles_router)
 app.include_router(private_worker_router)

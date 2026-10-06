@@ -48,6 +48,7 @@ PERMISSIONS = (
     "links.delegate",
 )
 JSON_LIMIT = 256000
+TEXT_IMPORT_LIMIT = 2 * 1024 * 1024
 
 
 def _scope(parser, *, product=True):
@@ -144,7 +145,16 @@ def add_commands(subcommands):
     cards = _group(
         subcommands,
         "cards",
-        ("list", "inventory", "stats", "history", "issue", "revoke", "batch"),
+        (
+            "list",
+            "inventory",
+            "stats",
+            "history",
+            "issue",
+            "import-text",
+            "revoke",
+            "batch",
+        ),
     )
     cards["list"].add_argument("--limit", type=_limit, default=50)
     for action in ("inventory", "batch"):
@@ -164,6 +174,22 @@ def add_commands(subcommands):
     cards["issue"].add_argument(
         "--expires", type=float, help="future Unix timestamp, omitted for no expiry"
     )
+    text_import = cards["import-text"]
+    text_source = text_import.add_mutually_exclusive_group(required=True)
+    text_source.add_argument(
+        "--file", type=Path, help="UTF-8 text file; one delivery per nonempty line"
+    )
+    text_source.add_argument(
+        "--stdin",
+        action="store_true",
+        help="read private UTF-8 delivery text from standard input",
+    )
+    text_source.add_argument(
+        "--text", help="inline text; use --file or --stdin for private delivery content"
+    )
+    text_import.add_argument("--variant", default="default")
+    text_import.add_argument("--label", default="")
+    text_import.add_argument("--expires", type=float)
     links = _group(subcommands, "links", ("list", "create", "revoke", "cleanup"))
     _json_arguments(links["create"])
     links["revoke"].add_argument("id", help="child management-link ID")
@@ -702,6 +728,32 @@ def product_command(client, grant, args):
     return {"ok": True, "product": result}
 
 
+def _import_text(args):
+    if args.file:
+        fd = os.open(args.file, os.O_RDONLY | os.O_NOFOLLOW)
+        with os.fdopen(fd, "rb") as source:
+            if not stat.S_ISREG(os.fstat(source.fileno()).st_mode):
+                raise ManageError(
+                    "Import source must be a regular file", code="invalid_input"
+                )
+            raw = source.read(TEXT_IMPORT_LIMIT + 1)
+    elif args.stdin:
+        raw = getattr(sys.stdin, "buffer", sys.stdin).read(TEXT_IMPORT_LIMIT + 1)
+    else:
+        raw = args.text
+    if isinstance(raw, str):
+        raw = raw.encode("utf-8")
+    if len(raw) > TEXT_IMPORT_LIMIT:
+        raise ManageError("Text import exceeds 2 MiB UTF-8", code="invalid_input")
+    try:
+        value = raw.decode("utf-8")
+    except UnicodeError:
+        raise ManageError("Text import must use UTF-8", code="invalid_input") from None
+    if not value.strip():
+        raise ManageError("Text import is empty", code="invalid_input")
+    return value
+
+
 def cards_command(client, grant, args):
     operation = args.operation
     if operation == "list":
@@ -732,6 +784,41 @@ def cards_command(client, grant, args):
                 **saved,
                 "count": len(result.get("codes", [])),
                 "batch_id": result.get("batch_id"),
+            }
+    if operation == "import-text":
+        text = _import_text(args)
+        with OutputFile(args, "text-cards") as output:
+            result = _object(
+                client.request(
+                    grant,
+                    "POST",
+                    "/api/manage/cards/import-text",
+                    json={
+                        "product_id": grant["product_id"],
+                        "variant_id": args.variant,
+                        "text": text,
+                        "label": args.label,
+                        "expires": args.expires,
+                    },
+                )
+            )
+            codes, items = result.get("codes"), result.get("items")
+            if (
+                not isinstance(codes, list)
+                or not isinstance(items, list)
+                or len(codes) != len(items)
+            ):
+                raise ManageError(
+                    "Invalid text import response", code="invalid_response"
+                )
+            saved = output.write(result)
+            return {
+                **saved,
+                "count": len(codes),
+                "batch_id": result.get("batch_id"),
+                "stats": _only(
+                    result.get("stats", {}), ("lines", "blank", "duplicates", "created")
+                ),
             }
     if operation == "stats":
         result = _object(_request(client, grant, "GET", "/api/manage/card-stats"))
@@ -930,6 +1017,7 @@ _API_ROUTES = (
     ("POST", r"batch", "queue.process"),
     ("GET", r"cards", "cards.manage"),
     ("POST", r"cards", "cards.manage"),
+    ("POST", r"cards/import-text", "cards.manage"),
     ("POST", r"cards/[^/]+/revoke", "cards.manage"),
     ("GET", r"card-stats", "cards.manage"),
     ("GET", r"card-inventory", "cards.manage"),
@@ -997,7 +1085,12 @@ def api_request(client, args, origin):
     query["product_id"] = grant["product_id"]
     if body and body.get("product_id", grant["product_id"]) != grant["product_id"]:
         raise ManageError("JSON belongs to a different product", code="no_scope")
-    if args.method in ("POST", "PUT") and relative in ("cards", "links", "batch"):
+    if args.method in ("POST", "PUT") and relative in (
+        "cards",
+        "cards/import-text",
+        "links",
+        "batch",
+    ):
         if body is None:
             raise ManageError(
                 "This operation requires a JSON input object", code="invalid_input"
@@ -1008,7 +1101,11 @@ def api_request(client, args, origin):
     if relative == "jobs":
         query.setdefault("compact", "true" if not args.detail else "false")
         query.setdefault("view", "active")
-    secret_result = args.method == "POST" and relative in ("cards", "links")
+    secret_result = args.method == "POST" and relative in (
+        "cards",
+        "cards/import-text",
+        "links",
+    )
     if secret_result:
         with OutputFile(args, "api-export") as output:
             return output.write(
