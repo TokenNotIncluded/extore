@@ -594,3 +594,26 @@ def test_shop_disabled_after_exchange_is_a_per_card_failure(owner, setup_product
     assert [item["status"] for item in result["results"]] == ["submitted", "error"]
     assert result["items"][1]["accepted"] is False
     assert len(inspect()["jobs"]) == 1
+
+
+def test_disabling_shop_preserves_accepted_task_read_only(owner, setup_product):
+    pid, code = setup_product()
+    receipt = exchange(owner, code)
+    cid = receipt["items"][0]["card_id"]
+    params = {"email": "original@example.test"}
+    launched = redeem(owner, receipt, {"card_id": cid, "params": params})
+    jid = launched["results"][0]["job"]["id"]
+    with db() as c:
+        c.execute(
+            "UPDATE shops SET enabled=0 WHERE id=(SELECT shop_id FROM products WHERE id=?)",
+            (pid,),
+        )
+    response = owner.post("/api/batch/receipt", json={"token": receipt["token"]})
+    assert response.status_code == 200
+    item = response.json()["items"][0]
+    assert item["accepted"] is True and item["job"]["id"] == jid
+    result = redeem(owner, receipt, {"card_id": cid, "params": params})
+    assert result["results"][0]["status"] == "error"
+    assert result["results"][0]["http_status"] == 404
+    assert result["items"][0]["job"]["id"] == jid
+    assert len(inspect()["jobs"]) == len(inspect()["events"]) == 1
