@@ -37,6 +37,7 @@ MAX_OUTPUT_BYTES = 256 * 1024
 MAX_RESPONSE_BYTES = 16 * 1024 * 1024
 PROFILE_VERSION = 1
 DEVICE_LOGIN_TTL = 600
+AUTOMATION_RECEIPT_TTL = 600
 
 
 class ManageError(Exception):
@@ -1419,6 +1420,284 @@ class ManageClient:
             self._renew(grant)
             return self._json(grant["origin"], method, path, grant=grant, **kwargs)
 
+    def next(
+        self,
+        *,
+        all_products=False,
+        product=None,
+        origin=None,
+        grant_id=None,
+        wait=25,
+        limit=1,
+        new_request=False,
+    ):
+        if (
+            (all_products and (product or grant_id))
+            or (not all_products and not (product or grant_id))
+            or type(wait) is not int
+            or not 0 <= wait <= 25
+            or type(limit) is not int
+            or not 1 <= limit <= 10
+        ):
+            raise ManageError(
+                "Select --all or --product/--grant; wait must be 0 to 25 and limit 1 to 10",
+                code="invalid_input",
+            )
+        local = [
+            grant
+            for grant in self.data["grants"]
+            if (not product or grant.get("product_id") == product)
+            and (not origin or grant.get("origin") == origin)
+            and (not grant_id or grant.get("id") == grant_id)
+        ]
+        origins = {grant["origin"] for grant in local}
+        if len(origins) > 1:
+            raise ManageError(
+                "Select --origin to wait on one server", code="ambiguous_scope"
+            )
+        if not local:
+            raise ManageError(
+                "No single grant authorizes this product and operation", code="no_scope"
+            )
+        origin = next(iter(origins))
+        if grant_id and not product:
+            product = local[0]["product_id"]
+        selector = {
+            "all_products": all_products,
+            "product_id": product,
+            "grant_id": grant_id,
+        }
+        now = int(time.time())
+        pending = self.data.setdefault("automation_next_requests", [])
+        if not isinstance(pending, list) or any(
+            not isinstance(item, dict) for item in pending
+        ):
+            raise ManageError(
+                "Invalid saved automation request", code="invalid_profile"
+            )
+        saved = next(
+            (
+                item
+                for item in pending
+                if item.get("origin") == origin and item.get("selector") == selector
+            ),
+            None,
+        )
+        abandoned = saved if new_request else None
+        if new_request:
+            saved = None
+        if saved is not None:
+            if type(saved.get("issued_at")) is not int:
+                raise ManageError(
+                    "Invalid saved automation request", code="invalid_profile"
+                )
+            if now - saved["issued_at"] >= AUTOMATION_RECEIPT_TTL:
+                raise ManageError(
+                    "The saved claim response expired; inspect the original task and lease before using --new-request",
+                    code="request_expired",
+                )
+            if saved.get("wait_seconds") != wait or saved.get("limit") != limit:
+                raise ManageError(
+                    "Repeat next with the original wait and limit to recover its response",
+                    code="pending_request",
+                )
+            descriptors = saved.get("grants")
+            if (
+                not isinstance(descriptors, list)
+                or not 1 <= len(descriptors) <= 500
+                or not isinstance(saved.get("request_id"), str)
+                or not re.fullmatch(r"[A-Za-z0-9_-]{16,100}", saved["request_id"])
+                or any(
+                    not isinstance(item, dict)
+                    or set(item) != {"device_id", "product_id"}
+                    or not all(
+                        isinstance(value, str) and value for value in item.values()
+                    )
+                    for item in descriptors
+                )
+            ):
+                raise ManageError(
+                    "Invalid saved automation request", code="invalid_profile"
+                )
+            # Keep the original descriptor set even if another scope was approved
+            # after a response was lost. A new request must not hide that claim.
+            wanted = {(item["device_id"], item["product_id"]) for item in descriptors}
+        grants, errors = self.grants(
+            product=product,
+            origin=origin,
+            grant_id=grant_id,
+            permissions=("queue.view", "queue.process"),
+        )
+        if saved is not None:
+            grants = [
+                grant
+                for grant in grants
+                if (grant.get("device_id"), grant.get("product_id")) in wanted
+            ]
+        selected = {}
+        selected_products = set()
+        for grant in grants:
+            pair = (grant["device_id"], grant["product_id"])
+            if grant["product_id"] not in selected_products:
+                selected[pair] = grant
+                selected_products.add(grant["product_id"])
+        if not selected or (saved is not None and set(selected) != wanted):
+            if errors:
+                raise ManageError(
+                    errors[0]["error"],
+                    code=errors[0]["code"],
+                    status=errors[0].get("status"),
+                )
+            raise ManageError(
+                "No single grant authorizes this product and operation", code="no_scope"
+            )
+        if len(selected) > 500:
+            raise ManageError(
+                "Select at most 500 device/product grants", code="invalid_input"
+            )
+        if len({device_id for device_id, _ in selected}) != len(selected):
+            raise ManageError(
+                "Each selected product needs a distinct CLI device",
+                code="invalid_input",
+            )
+        if saved is None:
+            descriptors = [
+                {"device_id": device_id, "product_id": product_id}
+                for device_id, product_id in sorted(selected)
+            ]
+            saved = {
+                "origin": origin,
+                "selector": selector,
+                "request_id": secrets.token_urlsafe(32),
+                "issued_at": now,
+                "wait_seconds": wait,
+                "limit": limit,
+                "grants": descriptors,
+            }
+            if abandoned is not None:
+                pending.remove(abandoned)
+            pending.append(saved)
+            self.persist()
+        body = {
+            key: saved[key]
+            for key in ("request_id", "issued_at", "wait_seconds", "limit", "grants")
+        }
+        canonical = json.dumps(
+            body, sort_keys=True, separators=(",", ":"), ensure_ascii=True
+        )
+        proofs = []
+        for descriptor in body["grants"]:
+            grant = selected[(descriptor["device_id"], descriptor["product_id"])]
+            private = Ed25519PrivateKey.from_private_bytes(_unb64(grant["private_key"]))
+            message = (
+                "extore-automation-next-v1\n"
+                + origin
+                + "\nPOST\n/api/manage/next\n"
+                + descriptor["device_id"]
+                + "\n"
+                + canonical
+            )
+            proofs.append(
+                {**descriptor, "signature": _b64(private.sign(message.encode()))}
+            )
+        result = _object(
+            self.request(
+                selected[
+                    (body["grants"][0]["device_id"], body["grants"][0]["product_id"])
+                ],
+                "POST",
+                "/api/manage/next",
+                json={**body, "grants": proofs},
+                timeout=30,
+            )
+        )
+        items = result.get("items")
+        if (
+            result.get("request_id") != saved["request_id"]
+            or type(result.get("idle")) is not bool
+            or type(result.get("replayed")) is not bool
+            or not isinstance(items, list)
+            or len(items) > limit
+            or result["idle"] != (not items)
+            or ("stale" in result and type(result["stale"]) is not bool)
+        ):
+            raise ManageError("Invalid automation response", code="invalid_response")
+        output = []
+        seen = set()
+        for item in items:
+            if not isinstance(item, dict):
+                raise ManageError(
+                    "Invalid automation response", code="invalid_response"
+                )
+            pair = (item.get("device_id"), item.get("product_id"))
+            job = item.get("job")
+            if (
+                pair not in selected
+                or not isinstance(job, dict)
+                or not isinstance(job.get("id"), str)
+                or not job["id"]
+                or job.get("state") != "processing"
+                or type(job.get("attempt")) is not int
+                or job["attempt"] < 1
+                or job.get("product_id", pair[1]) != pair[1]
+                or not isinstance(item.get("execution"), dict)
+                or (pair[1], job["id"]) in seen
+            ):
+                raise ManageError(
+                    "The server returned a different task or device scope",
+                    code="invalid_response",
+                )
+            seen.add((pair[1], job["id"]))
+            output.append(
+                {
+                    "product_id": pair[1],
+                    "device_id": pair[0],
+                    "grant_id": selected[pair]["id"],
+                    "job": {
+                        key: job[key]
+                        for key in (
+                            "id",
+                            "product_id",
+                            "attempt",
+                            "state",
+                            "product_name",
+                            "variant",
+                            "message",
+                            "progress",
+                            "steps",
+                            "completed_steps",
+                        )
+                        if key in job
+                    },
+                    "execution": {
+                        key: item["execution"][key]
+                        for key in (
+                            "params",
+                            "parameters",
+                            "outputs",
+                            "flow_epoch",
+                            "node_id",
+                            "action_id",
+                            "deadline",
+                            "attempt",
+                            "mode",
+                        )
+                        if key in item["execution"]
+                    },
+                }
+            )
+        pending.remove(saved)
+        self.persist()
+        return {
+            "ok": True,
+            "origin": origin,
+            "items": output,
+            "idle": result["idle"],
+            "request_id": result["request_id"],
+            "replayed": result["replayed"],
+            **({"stale": result["stale"]} if "stale" in result else {}),
+        }
+
     def products(self, *, origin=None, grant_id=None, detail=False):
         grants, errors = self.grants(origin=origin, grant_id=grant_id)
         products = {}
@@ -1577,6 +1856,110 @@ class ManageClient:
             },
         )
 
+    def delivery_output(
+        self,
+        grant,
+        job_id,
+        sources,
+        output,
+        *,
+        flow_epoch=None,
+        action_id=None,
+        attempt=None,
+    ):
+        current = self.job(grant, job_id)
+        if attempt is not None and attempt != current.get("attempt"):
+            raise ManageError(
+                "The task attempt changed; fetch the current task before uploading",
+                code="stale_task",
+            )
+        epoch = self._upload_epoch(current, flow_epoch)
+        if epoch is not None and (
+            not isinstance(current.get("action_id"), str) or not current["action_id"]
+        ):
+            raise ManageError("Invalid task flow action", code="invalid_response")
+        if epoch is not None and (
+            flow_epoch is None or action_id != current.get("action_id")
+        ):
+            raise ManageError(
+                "Flow delivery requires the current --flow-epoch and --action-id",
+                code="invalid_input",
+            )
+        fields = current.get("outputs")
+        if not isinstance(fields, list) or any(
+            not isinstance(field, dict) or not isinstance(field.get("key"), str)
+            for field in fields
+        ):
+            raise ManageError("Invalid task output schema", code="invalid_response")
+        schema = {field["key"]: field for field in fields}
+        if len(schema) != len(fields):
+            raise ManageError("Invalid task output schema", code="invalid_response")
+        grouped = {}
+        for key, source in sources:
+            grouped.setdefault(key, []).append(source)
+        for key, paths in grouped.items():
+            field = schema.get(key)
+            if field is None or field.get("type") not in ("file", "image", "images"):
+                raise ManageError(
+                    "--file must name an attachment field in the current output schema",
+                    code="invalid_input",
+                )
+            if key in output:
+                raise ManageError(
+                    "An output field cannot be supplied by both --output-file and --file",
+                    code="invalid_input",
+                )
+            maximum = field.get("max_items", 10) if field["type"] == "images" else 1
+            if type(maximum) is not int or not 1 <= maximum <= 20:
+                raise ManageError("Invalid task output schema", code="invalid_response")
+            if len(paths) > maximum:
+                raise ManageError(
+                    "Repeated --file is allowed only within an images field's max_items",
+                    code="invalid_input",
+                )
+        upload_limit = self._upload_limit(grant)
+        for paths in grouped.values():
+            for source in paths:
+                self._validate_upload(source, upload_limit)
+        result = dict(output)
+        uploaded_ids = {key: [] for key in grouped}
+        for key, source in sources:
+            ids = uploaded_ids[key]
+            uploaded = _object(
+                self.upload(
+                    grant,
+                    job_id,
+                    key,
+                    source,
+                    flow_epoch=epoch,
+                    action_id=action_id,
+                    job_checked=True,
+                    upload_limit=upload_limit,
+                )
+            )
+            fid = uploaded.get("id")
+            if (
+                not isinstance(fid, str)
+                or not re.fullmatch(
+                    r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}", fid
+                )
+                or uploaded.get("job_id", job_id) != job_id
+                or uploaded.get("field_key", key) != key
+                or fid in ids
+            ):
+                raise ManageError(
+                    "The server returned an invalid delivery attachment",
+                    code="invalid_response",
+                )
+            ids.append(fid)
+        for key, ids in uploaded_ids.items():
+            result[key] = (
+                json.dumps(ids, separators=(",", ":"))
+                if schema[key]["type"] == "images"
+                else ids[0]
+            )
+        return result
+
     def files(self, grant, job_id):
         self.job(grant, job_id)
         result = _objects(
@@ -1592,26 +1975,78 @@ class ManageClient:
             )
         return result
 
-    def upload(self, grant, job_id, field, source):
-        self.job(grant, job_id)
+    def _upload_limit(self, grant):
         limits = _object(self._json(grant["origin"], "GET", "/api/upload-limits"))
         limit = limits.get("max_file_bytes")
         if type(limit) is not int or limit < 1:
             raise ManageError(
                 "The server returned invalid upload limits", code="invalid_response"
             )
-        limit = min(limit, MAX_UPLOAD_BYTES)
+        return min(limit, MAX_UPLOAD_BYTES)
+
+    @staticmethod
+    def _validate_upload(source, limit):
         if not source.is_file() or source.stat().st_size > limit:
             raise ManageError(
                 f"Upload must be a regular file no larger than {limit} bytes",
                 code="invalid_upload",
             )
+
+    @staticmethod
+    def _upload_epoch(current, requested):
+        epoch = current.get("flow_epoch")
+        if epoch is not None and (
+            type(epoch) is not int or not 1 <= epoch <= 2**53 - 1
+        ):
+            raise ManageError("Invalid task flow epoch", code="invalid_response")
+        if requested is not None and requested != epoch:
+            raise ManageError(
+                "The task flow changed; fetch its current execution before uploading",
+                code="stale_task",
+            )
+        return epoch
+
+    def upload(
+        self,
+        grant,
+        job_id,
+        field,
+        source,
+        *,
+        flow_epoch=None,
+        action_id=None,
+        job_checked=False,
+        upload_limit=None,
+    ):
+        if not job_checked:
+            current = self.job(grant, job_id)
+            flow_epoch = self._upload_epoch(current, flow_epoch)
+            current_action = (
+                current.get("action_id") if flow_epoch is not None else None
+            )
+            if action_id is not None and action_id != current_action:
+                raise ManageError(
+                    "The task flow action changed; fetch its current execution before uploading",
+                    code="stale_task",
+                )
+            if flow_epoch is not None and (
+                not isinstance(current_action, str) or not current_action
+            ):
+                raise ManageError("Invalid task flow action", code="invalid_response")
+            action_id = current_action
+        limit = upload_limit if upload_limit is not None else self._upload_limit(grant)
+        self._validate_upload(source, limit)
+        values = {"job_id": job_id, "field_key": field}
+        if flow_epoch is not None:
+            values["flow_epoch"] = str(flow_epoch)
+        if action_id is not None:
+            values["action_id"] = action_id
         with source.open("rb") as upload:
             return self.request(
                 grant,
                 "POST",
                 "/api/manage/files/upload",
-                data={"job_id": job_id, "field_key": field},
+                data=values,
                 files={"file": (source.name, upload, "application/octet-stream")},
             )
 
@@ -1757,6 +2192,65 @@ def _limit(value):
     return parsed
 
 
+def _next_wait(value):
+    try:
+        parsed = int(value)
+    except ValueError:
+        raise argparse.ArgumentTypeError("must be an integer from 0 to 25") from None
+    if not 0 <= parsed <= 25:
+        raise argparse.ArgumentTypeError("must be an integer from 0 to 25")
+    return parsed
+
+
+def _next_limit(value):
+    try:
+        parsed = int(value)
+    except ValueError:
+        raise argparse.ArgumentTypeError("must be an integer from 1 to 10") from None
+    if not 1 <= parsed <= 10:
+        raise argparse.ArgumentTypeError("must be an integer from 1 to 10")
+    return parsed
+
+
+def _flow_epoch(value):
+    try:
+        parsed = int(value)
+    except ValueError:
+        raise argparse.ArgumentTypeError(
+            "must be an integer from 1 to 2**53-1"
+        ) from None
+    if not 1 <= parsed <= 2**53 - 1:
+        raise argparse.ArgumentTypeError("must be an integer from 1 to 2**53-1")
+    return parsed
+
+
+def _attempt(value):
+    try:
+        parsed = int(value)
+    except ValueError:
+        raise argparse.ArgumentTypeError("must be a positive integer") from None
+    if parsed < 1:
+        raise argparse.ArgumentTypeError("must be a positive integer")
+    return parsed
+
+
+def _action_id(value):
+    if (
+        not value
+        or not value.isascii()
+        or any(not 33 <= ord(char) <= 126 for char in value)
+    ):
+        raise argparse.ArgumentTypeError("must be a non-empty ASCII action token")
+    return value
+
+
+def _delivery_file(value):
+    key, separator, source = value.partition("=")
+    if not separator or not key or not source:
+        raise argparse.ArgumentTypeError("must be FIELD=path")
+    return key, Path(source).expanduser()
+
+
 def _permissions_csv(value):
     from .models import LINK_PERMISSIONS
 
@@ -1886,6 +2380,31 @@ def add_parser(commands):
     for command in (products, queues):
         command.add_argument("--origin", help="select a saved server origin")
         command.add_argument("--grant", help="select an individual saved device grant")
+    next_command = subcommands.add_parser(
+        "next", help="wait once and atomically claim current work on one server"
+    )
+    next_command.add_argument(
+        "--all", action="store_true", help="use all currently approved product grants"
+    )
+    next_command.add_argument("--product", help="select one approved product")
+    next_command.add_argument("--grant", help="select an individual saved device grant")
+    next_command.add_argument("--origin", help="select the server to wait on")
+    next_command.add_argument(
+        "--wait", type=_next_wait, default=25, help="server wait in seconds (0 to 25)"
+    )
+    next_command.add_argument(
+        "--limit", type=_next_limit, default=1, help="maximum current tasks (1 to 10)"
+    )
+    next_command.add_argument(
+        "--new-request",
+        action="store_true",
+        help="explicitly abandon this selection's saved claim response and start another request",
+    )
+    next_command.add_argument(
+        "--watch",
+        action="store_true",
+        help="keep server waits inside this process and print only when work arrives",
+    )
     for name, description in (
         ("jobs", "list compact jobs for one product"),
         ("job", "fetch one task's complete inputs and output schema"),
@@ -1912,6 +2431,25 @@ def add_parser(commands):
         )
         command.add_argument("--origin", help="select a saved server origin")
         command.add_argument("--grant", help="select an individual saved device grant")
+        if name not in ("jobs", "job", "files", "download", "upload"):
+            command.add_argument(
+                "--attempt", type=_attempt, help="current task attempt from next/job"
+            )
+            command.add_argument(
+                "--flow-epoch", type=_flow_epoch, help="current flow execution epoch"
+            )
+            command.add_argument(
+                "--action-id", type=_action_id, help="current flow action token"
+            )
+        if name == "upload":
+            command.add_argument(
+                "--flow-epoch", type=_flow_epoch, help="expected current flow epoch"
+            )
+            command.add_argument(
+                "--action-id",
+                type=_action_id,
+                help="expected current flow action token",
+            )
         if name != "jobs":
             command.add_argument("job_id", nargs="+" if name == "claim" else None)
         if name in ("progress", "complete", "fail"):
@@ -1944,6 +2482,14 @@ def add_parser(commands):
                 "--retry-mode", choices=("revise", "reuse"), default="revise"
             )
         if name == "complete":
+            command.add_argument(
+                "--file",
+                action="append",
+                type=_delivery_file,
+                default=[],
+                dest="delivery_files",
+                help="upload FIELD=path; repeat a field only for an images output",
+            )
             command.add_argument(
                 "--output-file",
                 type=Path,
@@ -2121,6 +2667,25 @@ def dispatch(client, args, command, origin):
             state=args.state,
             limit=args.limit,
         )
+    if command == "next":
+        if args.watch and args.wait == 0:
+            raise ManageError(
+                "--watch requires a positive --wait", code="invalid_input"
+            )
+        new_request = args.new_request
+        while True:
+            result = client.next(
+                all_products=args.all,
+                product=args.product,
+                origin=origin,
+                grant_id=grant_id,
+                wait=args.wait,
+                limit=args.limit,
+                new_request=new_request,
+            )
+            if not args.watch or result["items"]:
+                return result
+            new_request = False
     if command == "logout":
         if not args.all and not any((args.product, origin, grant_id)):
             raise ManageError(
@@ -2135,6 +2700,40 @@ def dispatch(client, args, command, origin):
             and (not grant_id or item.get("id") == grant_id)
         ]
         result = client.logout(grants)
+        retired_devices = {
+            (item["origin"], item.get("device_id"), item.get("product_id"))
+            for item in grants
+        }
+        if "automation_next_requests" in client.data:
+            # A multi-device receipt cannot be split or signed again after one
+            # of its credentials is erased. Other scopes retain their recovery.
+            client.data["automation_next_requests"] = [
+                item
+                for item in client.data["automation_next_requests"]
+                if not (
+                    (args.all and not any((args.product, origin, grant_id)))
+                    or (
+                        not grant_id
+                        and (not origin or item.get("origin") == origin)
+                        and (
+                            not args.product
+                            or any(
+                                descriptor.get("product_id") == args.product
+                                for descriptor in item.get("grants", [])
+                            )
+                        )
+                    )
+                    or any(
+                        (
+                            item.get("origin"),
+                            descriptor.get("device_id"),
+                            descriptor.get("product_id"),
+                        )
+                        in retired_devices
+                        for descriptor in item.get("grants", [])
+                    )
+                )
+            ]
         pending = client.data.get("device_requests", [])
         retired_authorizations = {
             item["authorization_id"] for item in grants if item.get("authorization_id")
@@ -2295,10 +2894,23 @@ def dispatch(client, args, command, origin):
     if command == "upload":
         return {
             "ok": True,
-            "file": client.upload(grant, args.job_id, args.field, args.file),
+            "file": client.upload(
+                grant,
+                args.job_id,
+                args.field,
+                args.file,
+                flow_epoch=args.flow_epoch,
+                action_id=args.action_id,
+            ),
         }
     ids = args.job_id if command == "claim" else [args.job_id]
     values = {}
+    if getattr(args, "attempt", None) is not None:
+        values["attempt"] = args.attempt
+    if getattr(args, "flow_epoch", None) is not None:
+        values["flow_epoch"] = args.flow_epoch
+    if getattr(args, "action_id", None) is not None:
+        values["action_id"] = args.action_id
     if command in ("claim", "progress"):
         values["progress"] = args.progress
         if args.steps_file:
@@ -2359,6 +2971,16 @@ def dispatch(client, args, command, origin):
                     code="invalid_input",
                 )
             values["content"] = content
+        if args.delivery_files:
+            values["output"] = client.delivery_output(
+                grant,
+                args.job_id,
+                args.delivery_files,
+                values.get("output", {}),
+                flow_epoch=args.flow_epoch,
+                action_id=args.action_id,
+                attempt=args.attempt,
+            )
     if command == "fail":
         values["retryable"] = args.retryable
     action = {
@@ -2383,7 +3005,11 @@ def main(args):
             json.dumps(
                 {
                     "ok": False,
-                    "error": "登录已停止；重复相同的设备码登录命令可继续",
+                    "error": (
+                        "等待已停止；不加 --new-request 重复 next 命令可恢复领取结果"
+                        if args.manage_command == "next"
+                        else "登录已停止；重复相同的设备码登录命令可继续"
+                    ),
                     "code": "interrupted",
                 },
                 ensure_ascii=False,
