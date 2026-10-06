@@ -28,4 +28,5 @@ package() {
   install -Dm644 deploy/arch/extore.sysusers "$pkgdir/usr/lib/sysusers.d/extore.conf"
   install -Dm644 deploy/arch/extore.env "$pkgdir/etc/extore/extore.env"
   install -Dm755 deploy/arch/extore-admin "$pkgdir/usr/bin/extore-admin"
+  install -Dm644 processors/official/LICENSE "$pkgdir/usr/share/licenses/$pkgname/official-processors-LICENSE"
 }
