@@ -512,6 +512,7 @@ function syncPreferenceControls() {
     "Language: Auto",
   );
   $("#header-context").textContent = tr("兑换与领取", "Redeem & collect");
+  if ($("#proxy-entry-link")) $("#proxy-entry-link").textContent = tr("代理兑换", "Routed redemption");
 }
 syncPreferenceControls();
 preferences.subscribe(({ resolved }) => {
@@ -567,6 +568,10 @@ async function home() {
     .forEach((b) =>
       b.addEventListener("click", () => publicDetail(list[+b.dataset.product])),
     );
+  try {
+    const incoming = window.ExtoreProxyRouting?.consumeIncoming();
+    if (incoming) await exchangeCode(incoming);
+  } catch (error) { $("#error").textContent = error.message; }
 }
 function receiptRequestContext(options = {}) {
   const token = currentToken;
@@ -617,6 +622,25 @@ function openBatch(data) {
 async function exchangeCode(code, options = {}) {
   const context = receiptRequestContext(options);
   const generation = receiptGeneration;
+  const routingPage = queueLoadId;
+  if (!options.skipProxyRouting) {
+    const routed = String(code).trim().split(/[\s,，;；]+/).some((part) => window.ExtoreProxyRouting ? window.ExtoreProxyRouting.isRoutedCode(part) : /^EXR[0-9]+/i.test(part));
+    if (routed && !window.ExtoreProxyRouting) throw new Error(tr("浏览器路由未能加载，请刷新后重试。", "Routing could not load. Refresh and try again."));
+    if (routed) {
+      const grouped = await window.ExtoreProxyRouting.routeCodes(code);
+      if (!context.active() || routingPage !== queueLoadId) return window.ExtoreProxyRouting.publicResult(grouped);
+      if (grouped.groups.length) {
+        window.ExtoreMotion?.disposeHome?.(app);
+        return window.ExtoreProxyRouting.renderRoutingChoice(app, grouped, {
+          tr, esc,
+          onLocal: (local) => context.active() && routingPage === queueLoadId ? exchangeCode(local, { ...options, skipProxyRouting: true }) : undefined,
+          onBack: () => { history.replaceState({}, "", "/proxy"); start(); },
+        });
+      }
+      code = grouped.localCodes.join("\n");
+    }
+  }
+  if (!context.active()) return;
   const multiple = splitCodes(code).length > 1 || /[\n,，;；]/.test(String(code).trim());
   const data = await api(multiple ? "/batch/exchange" : "/exchange", { code }, "POST", options);
   if (!context.active()) return data;

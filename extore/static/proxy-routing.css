@@ -1,0 +1,28 @@
+.proxy-paper {
+  position: relative;
+  padding: clamp(24px, 5vw, 48px);
+  margin-top: 36px;
+  margin-bottom: 64px;
+  background: var(--white);
+  box-shadow: var(--paper-shadow-lift);
+}
+.proxy-paper::after {
+  content: "";
+  position: absolute;
+  inset: auto 0 -10px;
+  height: 11px;
+  background: var(--white);
+  clip-path: polygon(0 0, 100% 0, 100% 35%, 96% 100%, 92% 35%, 88% 100%, 84% 35%, 80% 100%, 76% 35%, 72% 100%, 68% 35%, 64% 100%, 60% 35%, 56% 100%, 52% 35%, 48% 100%, 44% 35%, 40% 100%, 36% 35%, 32% 100%, 28% 35%, 24% 100%, 20% 35%, 16% 100%, 12% 35%, 8% 100%, 4% 35%, 0 100%);
+}
+.proxy-paper h1 { font-size: clamp(27px, 5vw, 36px); line-height: 1.35; }
+.proxy-route-row { display: flex; align-items: center; justify-content: space-between; gap: 24px; padding: 24px 0; border-bottom: 1px dashed var(--dashed-line); }
+.proxy-route-row h2 { font-size: 19px; margin: 0 0 4px; }
+.proxy-route-row p { margin: 4px 0; }
+.proxy-route-domain { overflow-wrap: anywhere; }
+.proxy-route-row button { flex-shrink: 0; min-height: 44px; }
+.proxy-entry-link { color: var(--ink); text-decoration: none; min-height: 44px; display: inline-flex; align-items: center; }
+.proxy-entry-link:hover { text-decoration: underline; }
+@media (max-width: 520px) {
+  .proxy-route-row { align-items: stretch; flex-direction: column; gap: 12px; }
+  .proxy-route-row button { width: 100%; }
+}

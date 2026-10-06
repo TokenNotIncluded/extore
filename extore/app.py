@@ -1,4 +1,5 @@
 import json
+import re
 import secrets
 import time
 import uuid
@@ -52,6 +53,7 @@ from .private_worker import is_upload_path as private_worker_upload_path
 from .private_worker import router as private_worker_router
 from .processor_profiles import router as processor_profiles_router
 from .processors import processor_catalog
+from .proxy_routes import router as proxy_routes_router
 from .scope_auth import router as scope_auth_router
 from .security import (
     authorize_management,
@@ -113,6 +115,7 @@ app.include_router(automation_router)
 app.include_router(owner_cli_router)
 app.include_router(processor_profiles_router)
 app.include_router(private_worker_router)
+app.include_router(proxy_routes_router)
 app.include_router(maintenance_router)
 app.include_router(text_cards_router)
 
@@ -322,13 +325,29 @@ def exchange(body: CodeInput, request: Request):
     rate_limit(request, "exchange", 20, 60)
     with db() as c:
         from .card_tracking import record_verified
+        from .proxy_routes import is_routed_code, unwrap_local_code
 
         # Preserve the original single-code format, including spaces between
         # its groups, before treating whitespace as a separator between codes.
-        single = c.execute(
-            "SELECT 1 FROM cards WHERE digest=?", (card_digest(body.code),)
-        ).fetchone()
-        codes = [body.code] if single else split_codes(body.code)
+        if any(is_routed_code(part) for part in re.split(r"[\s,，;；]+", body.code)):
+            # Verify every wrapper before deduplication. Case-folding a malformed
+            # signature must not discard it as a duplicate of a valid wrapper.
+            raw_codes = re.split(r"[\s,，;；]+", body.code.strip())
+            codes = []
+            seen = set()
+            for item in raw_codes:
+                if not item:
+                    continue
+                value = unwrap_local_code(c, item)
+                identity = card_digest(value)
+                if identity not in seen:
+                    seen.add(identity)
+                    codes.append(value)
+        else:
+            single = c.execute(
+                "SELECT 1 FROM cards WHERE digest=?", (card_digest(body.code),)
+            ).fetchone()
+            codes = [body.code] if single else split_codes(body.code)
         if not codes:
             fail("请输入卡密")
         if len(codes) > 30:
@@ -747,6 +766,7 @@ def cards(body: IssueCards, request: Request):
             label=body.label,
             expires=body.expires,
             variant_id=body.variant_id,
+            routed=body.routed,
         )
         audit(c, management_actor(s), "cards.issue", f"{body.product_id}:{body.count}")
         return {"codes": codes, "batch_id": card_batch_id(c, codes)}
@@ -755,9 +775,11 @@ def cards(body: IssueCards, request: Request):
 def card_batch_id(c, codes):
     if not codes:
         return None
+    from .proxy_routes import unwrap_local_code
+
     row = c.execute(
         "SELECT card_meta.batch_id FROM card_meta JOIN cards ON cards.id=card_meta.card_id WHERE cards.digest=?",
-        (card_digest(codes[0]),),
+        (card_digest(unwrap_local_code(c, codes[0])),),
     ).fetchone()
     return row["batch_id"] if row else None
 
@@ -1340,6 +1362,7 @@ def issue_managed_cards(body: IssueCards, request: Request):
             label=body.label,
             expires=body.expires,
             variant_id=body.variant_id,
+            routed=body.routed,
         )
         audit(c, management_actor(s), "cards.issue", f"{pid}:{body.count}")
         return {"codes": codes, "batch_id": card_batch_id(c, codes)}
@@ -1560,6 +1583,8 @@ def platform_cards(body: IssueCards, request: Request):
         # Default SKU requests retain the exact pre-SKU fingerprint, including
         # existing label/expiry metadata, so old idempotency keys remain valid.
         excluded = {"variant_id"} if body.variant_id == "default" else set()
+        if body.routed is None:
+            excluded.add("routed")
         if not body.label and body.expires is None:
             excluded.update(("label", "expires"))
         fingerprint = digest(body.model_dump_json(exclude=excluded))
@@ -1588,6 +1613,7 @@ def platform_cards(body: IssueCards, request: Request):
                 label=body.label,
                 expires=body.expires,
                 variant_id=body.variant_id,
+                routed=body.routed,
             )
         }
         c.execute(
@@ -1666,6 +1692,7 @@ app.mount("/static", StaticFiles(directory=STATIC), name="static")
 @app.api_route("/admin", methods=["GET", "HEAD"])
 @app.api_route("/staff", methods=["GET", "HEAD"])
 @app.api_route("/receipt", methods=["GET", "HEAD"])
+@app.api_route("/proxy", methods=["GET", "HEAD"])
 @app.api_route("/cli/owner", methods=["GET", "HEAD"])
 @app.api_route("/cli/device", methods=["GET", "HEAD"])
 @app.api_route("/account", methods=["GET", "HEAD"])

@@ -397,6 +397,7 @@ class IssueCards(BaseModel):
     count: int = Field(default=1, ge=1, le=1000)
     label: str = Field(default="", max_length=100)
     expires: float | None = Field(default=None, allow_inf_nan=False)
+    routed: bool | None = None
 
 
 class JobUpdate(BaseModel):

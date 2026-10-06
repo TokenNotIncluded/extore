@@ -91,10 +91,14 @@ def card_product(c, card):
     return p
 
 
-def issue_cards(c, pid, count, label="", expires=None, variant_id="default"):
+def issue_cards(
+    c, pid, count, label="", expires=None, variant_id="default", routed=None
+):
+    from .proxy_routes import default_issuer_route, wrap_issued_codes
     from .shops import require_enabled_product
 
-    require_enabled_product(c, pid)
+    owner = require_enabled_product(c, pid)
+    route = default_issuer_route(c, owner["shop_id"], routed)
     p = product(c, pid)
     if p["mode"] == "stock":
         fail("一卡一文本商品请粘贴文本或导入文件生成卡密", 409)
@@ -131,7 +135,7 @@ def issue_cards(c, pid, count, label="", expires=None, variant_id="default"):
         variant_id=variant_id,
         variant_snapshot=variant,
     )
-    return codes
+    return wrap_issued_codes(c, codes, route)
 
 
 def validate_params(p, params):
