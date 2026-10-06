@@ -195,7 +195,7 @@ async def guard(request: Request, call_next):
     response.headers.setdefault(
         "Content-Security-Policy",
         (
-            "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' https:; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'"
+            "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' https: blob:; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'"
         ),
     )
     if ORIGIN.startswith("https:"):
