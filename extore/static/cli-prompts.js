@@ -99,7 +99,7 @@
     const upgradeBase = !options.deviceCode ? "" : `extore manage authorize --origin ${quotedOrigin} ${options.existingLink ? "--grant DEVICE_ID" : "--authorization AUTHORIZATION_ID"}${pipelineScope ? " --pipelines-all" : " --permissions DESIRED_PERMISSIONS_CSV"} --reason "${en ? "Why these additions are needed" : "实际需要增加权限或商品的原因"}"`;
     const upgradeCommands = !options.deviceCode ? "" : `\n\n${upgrade}\n\n\`\`\`text\n${upgradeBase} --no-wait\n# ${en ? "After the merchant personally approves, resume on the same device and profile:" : "商家本人批准后，在同一设备和配置恢复："}\n${upgradeBase}\n\`\`\``;
     return `${goal}\n\n${login}${scope ? "\n\n" + scope : ""}\n\n${workflow}\n\n${plans}\n\n${en ? "CLI commands (replace IDs and filenames with the actual values):" : "CLI 命令（把 ID、文件名替换为实际值）："}\n\n\`\`\`text
-uv tool install --upgrade 'extore>=0.7.0'
+uv tool install --upgrade 'extore>=0.8.0'
 ${loginCommands}extore manage queues --all
 extore manage job JOB_ID --product PRODUCT_ID
 extore manage claim JOB_ID --product PRODUCT_ID
@@ -133,7 +133,7 @@ extore manage reject JOB_ID --product PRODUCT_ID --reason "永久拒绝的原因
       ? "Customer commands are available for authorized end-to-end checks, using only test codes or customer credentials explicitly supplied for that purpose. Pass private codes through exchange --codes-stdin and receipt links through import-receipt --link-stdin. Use the saved local receipt ID thereafter. Read each batch card's schema before redeem/retry; --card selects one card, --items-file submits per-card parameters, and repeated --file FIELD=PATH uploads input attachments. reveal/download write a new private file and may consume one-time delivery; destroy --confirm is irreversible. Do not run these against a real pending task merely to test the CLI."
       : "顾客命令可用于已授权的完整流程检查，只使用专用测试卡密或明确提供给此用途的顾客凭证。卡密通过 exchange --codes-stdin 输入，领取链接通过 import-receipt --link-stdin 输入，之后使用本地领取记录 ID。批量卡密逐卡读取定义；--card 选择单卡，--items-file 提交逐卡参数，可重复 --file FIELD=PATH 上传顾客附件。reveal/download 写入新的私有文件，领取可能消耗一次性内容；destroy --confirm 不可恢复。不要为了测试 CLI 操作真实的待处理任务。";
     return `${goal}\n\n${login}\n\n${workflow}\n\n${jobs}\n\n${customer}\n\n${en ? "Commands (replace IDs and filenames; these are examples, not an instruction to run all writes):" : "命令（替换 ID 和文件名；以下是操作示例，不是要求执行全部写操作）："}\n\n\`\`\`text
-uv tool install --upgrade 'extore>=0.7.0'
+uv tool install --upgrade 'extore>=0.8.0'
 extore admin login --origin ${quotedOrigin} --client-name "AI CLI"
 extore admin login-status --origin ${quotedOrigin}
 extore admin status --origin ${quotedOrigin}
@@ -213,7 +213,7 @@ runtime 可设置 timeout_seconds 10–120、memory_mb 64–512（MiB）、cpu_s
 命令示例（替换实际 ID 和文件名，不要求全部执行）：
 
 \`\`\`text
-uv tool install --upgrade 'extore>=0.7.0'
+uv tool install --upgrade 'extore>=0.8.0'
 extore admin status --origin ${quotedOrigin}
 extore admin login --origin ${quotedOrigin} --client-name "Processor configuration AI"
 extore admin login-status --origin ${quotedOrigin}

@@ -7,15 +7,20 @@ from extore.sdk import FlowScope, PrivateWorkerClient, verify_flow_event
 
 # audience 与 path 来自 Worker 自己固定配置和实际请求，不能取自顾客输入。
 event = verify_flow_event(
-    worker_secret, raw_body, request_headers,
-    audience="https://worker.example", path="/process",
+    worker_secret,
+    raw_body,
+    request_headers,
+    audience="https://worker.example",
+    path="/process",
 )
 # 在执行之前，持久检查传输 nonce 与 action_id，防止重复运行。
 scope = FlowScope.from_context(event["scope"])
 client = PrivateWorkerClient("https://extore.example", worker_secret)
 uploaded = client.upload(scope, "delivery_file", "delivery.docx", result_id="file-1")
 client.update(
-    scope, "result-1", state="succeeded",
+    scope,
+    "result-1",
+    state="succeeded",
     output={"delivery_file": uploaded["file"]["id"]},
 )
 ```

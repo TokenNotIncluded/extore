@@ -54,7 +54,7 @@ test("changing queue views clears old selections and batch forms before response
 
 test("refresh and successful batch mutations preserve the selected view and explicit state", async () => {
   const page = queue();
-  const row = { ...job("job-A", "queued"), params: {}, files: [] };
+  const row = { ...job("job-A", "queued"), product_id: "A", params: {}, files: [] };
   await load(page, { state: "queued", view: "all", rows: [row] });
   page.collections.set("[name=job]:checked", [{ value: row.id }]);
   const claiming = page.node("#claim").emit("click");
@@ -79,7 +79,7 @@ test("refresh and successful batch mutations preserve the selected view and expl
 
 test("an earlier batch completion cannot reopen a different product or view", async () => {
   const page = queue();
-  await load(page, { rows: [{ ...job("job-A", "queued"), params: {}, files: [] }] });
+  await load(page, { rows: [{ ...job("job-A", "queued"), product_id: "A", params: {}, files: [] }] });
   page.collections.set("[name=job]:checked", [{ value: "job-A" }]);
   const claiming = page.node("#claim").emit("click");
   await load(page, { productId: "B", view: "processed" });
