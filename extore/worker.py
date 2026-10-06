@@ -15,10 +15,108 @@ from .models import JobUpdate, ProgressStep
 from .processors import normalize_product
 from .security import sign, token
 from .service import apply_update, bootstrap_progress_plan, job, product, progress_view
-from .variants import card_variant, default_variant
+from .variants import card_variant
 
 
-async def deliver_event(row):
+def _has_table(c, name):
+    return (
+        c.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (name,)
+        ).fetchone()
+        is not None
+    )
+
+
+def _flow_exclusion(c):
+    # Compatibility with existing databases/tests before the additive migration.
+    if not _has_table(c, "card_task_flows"):
+        return ""
+    return " AND NOT EXISTS (SELECT 1 FROM card_task_flows WHERE card_task_flows.card_id=jobs.card_id)"
+
+
+def _check_script_execution(c, row, processor_id, *, require_input=False):
+    """Recheck live authority without putting private configuration in a task."""
+    current = job(c, row["id"])
+    if (
+        current["product_id"] != row["product_id"]
+        or current["card_id"] != row["card_id"]
+        or current["attempt"] != row["attempt"]
+        or current["state"] != "processing"
+        or current["lease"] is not None
+        and time.time() >= current["lease"]
+    ):
+        raise ValueError("处理任务已失效")
+    binding = c.execute(
+        "SELECT binding.*,profiles.disabled,profiles.shop_id AS profile_shop_id,"
+        "profiles.processor_id AS profile_processor_id,shops.enabled,products.config,"
+        "products.shop_id AS product_shop_id,cards.state AS card_state "
+        "FROM processor_card_bindings binding "
+        "JOIN processor_profiles profiles ON profiles.id=binding.profile_id "
+        "JOIN cards ON cards.id=binding.card_id "
+        "JOIN products ON products.id=cards.product_id "
+        "JOIN shops ON shops.id=products.shop_id WHERE binding.card_id=?",
+        (current["card_id"],),
+    ).fetchone()
+    context = row["shop_context"]
+    if (
+        binding is None
+        or not binding["enabled"]
+        or binding["disabled"]
+        or binding["card_state"] in ("revoked", "rejected")
+        or binding["product_id"] != current["product_id"]
+        or any(
+            binding[key] != context["shop_id"]
+            for key in ("shop_id", "profile_shop_id", "product_shop_id")
+        )
+        or binding["profile_id"] != context["profile_id"]
+        or binding["revision"] != context["revision"]
+        or binding["processor_id"] != processor_id
+        or binding["profile_processor_id"] != processor_id
+    ):
+        raise ValueError("商品处理器授权已失效")
+    configured = json.loads(binding["config"])
+    if (
+        configured.get("mode") != "script"
+        or configured.get("processor_id") != processor_id
+    ):
+        raise ValueError("商品处理器授权已失效")
+    epoch = row.get("flow_epoch")
+    if epoch is None:
+        return current
+    from . import task_flow
+
+    run = c.execute(
+        "SELECT * FROM task_flow_runs WHERE job_id=?", (current["id"],)
+    ).fetchone()
+    authority = task_flow.frozen_authority(c, current, epoch, row["attempt"])
+    if (
+        run is None
+        or run["flow_epoch"] != epoch
+        or run["phase"] != "processing"
+        or run["attempt"] != row["attempt"]
+        or current["claimed_by"] != "worker"
+        or authority["mode"] != "script"
+        or authority["action_id"] != row["action_id"]
+        or authority["step_state"] != "active"
+        or authority["deadline"] is not None
+        and time.time() >= authority["deadline"]
+    ):
+        raise ValueError("处理步骤已失效")
+    if require_input:
+        execution = task_flow.execution(c, current)
+        if (
+            execution is None
+            or execution["flow_epoch"] != epoch
+            or execution["action_id"] != row["action_id"]
+            or execution["processor_id"] != processor_id
+        ):
+            raise ValueError("处理步骤输入已失效")
+    # After launch, a valid action can complete after its input's retention TTL.
+    # Checking frozen authority does not read or consume the cleared input again.
+    return current
+
+
+def _check_event_authority(row):
     if row.get("id"):
         with db() as c:
             enabled = c.execute(
@@ -27,11 +125,16 @@ async def deliver_event(row):
             ).fetchone()
             if enabled is None or not enabled["enabled"]:
                 raise ValueError("店铺已停用，不能发起处理")
+
+
+async def deliver_event(row):
+    _check_event_authority(row)
     u = urlsplit(row["url"])
     # Pin the validated IP, retaining original Host and TLS SNI; no DNS rebinding.
     answers = await asyncio.to_thread(
         socket.getaddrinfo, u.hostname, u.port or 443, type=socket.SOCK_STREAM
     )
+    _check_event_authority(row)
     addresses = {a[4][0] for a in answers}
     if not addresses or any(not ipaddress.ip_address(a).is_global for a in addresses):
         raise ValueError("Webhook 地址必须解析到公网 IP")
@@ -47,6 +150,7 @@ async def deliver_event(row):
     async with httpx.AsyncClient(
         timeout=15, follow_redirects=False, trust_env=False
     ) as client:
+        _check_event_authority(row)
         async with client.stream(
             "POST",
             url,
@@ -87,12 +191,18 @@ async def outbox_once():
             return True
         if payload["type"] == "redemption.requested":
             r = c.execute(
-                "SELECT state,attempt FROM jobs WHERE id=?", (payload["data"]["id"],)
+                "SELECT state,attempt,card_id FROM jobs WHERE id=?",
+                (payload["data"]["id"],),
             ).fetchone()
             if (
                 not r
                 or r["state"] not in ("queued", "processing")
                 or r["attempt"] != payload["data"]["attempt"]
+                or _has_table(c, "card_task_flows")
+                and c.execute(
+                    "SELECT 1 FROM card_task_flows WHERE card_id=?", (r["card_id"],)
+                ).fetchone()
+                is not None
             ):
                 c.execute(
                     "UPDATE outbox SET state='cancelled',finished_at=? WHERE id=?",
@@ -125,7 +235,7 @@ async def outbox_once():
     return True
 
 
-async def execute_script(row, p):
+async def execute_script(row, p, task_flow_epoch=None):
     # A product selects a catalog ID, never an arbitrary executable or filename.
     import extore_processors
 
@@ -143,28 +253,58 @@ async def execute_script(row, p):
             or trusted_job["state"] != "processing"
         ):
             raise ValueError("处理任务已失效")
+        is_flow = (
+            _has_table(c, "card_task_flows")
+            and c.execute(
+                "SELECT 1 FROM card_task_flows WHERE card_id=?",
+                (trusted_job["card_id"],),
+            ).fetchone()
+            is not None
+        )
+        if is_flow:
+            from . import task_flow
+
+            execution = task_flow.execution(c, trusted_job)
+            if (
+                type(task_flow_epoch) is not int
+                or execution is None
+                or execution["flow_epoch"] != task_flow_epoch
+                or execution["mode"] != "script"
+                or execution["processor_id"] != p["processor_id"]
+                or trusted_job["claimed_by"] != "worker"
+            ):
+                raise ValueError("处理步骤已失效")
+            row["flow_epoch"] = task_flow_epoch
+            row["action_id"] = execution["action_id"]
+            row["params"] = json.dumps(execution["params"], ensure_ascii=False)
+        elif task_flow_epoch is not None:
+            raise ValueError("此任务没有流程步骤")
+        else:
+            row.pop("flow_epoch", None)
+            row.pop("action_id", None)
+            row["params"] = trusted_job["params"]
+        row["card_id"] = trusted_job["card_id"]
         configuration, shop_context, workflow = runtime_execution(
             c, trusted_job, p["processor_id"]
         )
-        row["params"] = trusted_job["params"]
+        row["variant"] = card_variant(c, trusted_job)
+        row["steps"], row["completed_steps"] = progress_view(c, trusted_job)
     p = {**p, "processor_config": configuration}
     row["shop_context"] = shop_context
     row["workflow"] = workflow
-    # Freeze trusted issuance metadata separately from all customer parameters.
-    if "variant" not in row:
-        if row.get("card_id"):
-            with db() as c:
-                row["variant"] = card_variant(c, row)
-        else:
-            row["variant"] = default_variant()
-    if "steps" not in row:
-        if row.get("card_id"):
-            with db() as c:
-                row["steps"], row["completed_steps"] = progress_view(
-                    c, job(c, row["id"])
-                )
-        else:
-            row["steps"], row["completed_steps"] = [], []
+
+    def check_execution(*, require_input=False, connection=None):
+        if connection is not None:
+            return _check_script_execution(
+                connection, row, p["processor_id"], require_input=require_input
+            )
+        with db() as c:
+            return _check_script_execution(
+                c, row, p["processor_id"], require_input=require_input
+            )
+
+    row["_check_execution"] = check_execution
+    check_execution(require_input=True)
     return await _execute_processor(row, p, extore_processors)
 
 
@@ -180,6 +320,7 @@ async def _execute_processor(row, p, processor_package):
     )
 
     workflow = validate_workflow(row["workflow"])
+    check = row.get("_check_execution", lambda **kwargs: None)
     limits = workflow["runtime"]
     payload = {
         "params": json.loads(row["params"]),
@@ -193,9 +334,11 @@ async def _execute_processor(row, p, processor_package):
     encoded_payload = json.dumps(payload, ensure_ascii=False).encode("utf-8")
     if len(encoded_payload) > MAX_INPUT_BYTES:
         raise ValueError("处理器任务输入超过限制")
+    check(require_input=True)
     sandbox = await asyncio.to_thread(
         sandbox_command, p["processor_id"], processor_package
     )
+    check(require_input=True)
     proc = await asyncio.create_subprocess_exec(
         *launch_command(sandbox, workflow),
         stdin=asyncio.subprocess.PIPE,
@@ -212,14 +355,18 @@ async def _execute_processor(row, p, processor_package):
     updates = 0
 
     async def send():
+        check(require_input=True)
         proc.stdin.write(encoded_payload)
         await proc.stdin.drain()
+        check()
         proc.stdin.close()
 
     async def read():
         nonlocal result, total, updates
         while True:
+            check()
             line = await proc.stdout.readline()
+            check()
             if not line:
                 break
             total += len(line)
@@ -235,13 +382,13 @@ async def _execute_processor(row, p, processor_package):
                 if updates > MAX_PROGRESS_EVENTS:
                     raise ValueError("处理器进度更新超过限制")
                 with db() as c:
-                    current = job(c, row["id"])
+                    current = check(connection=c) or job(c, row["id"])
                     if (
                         current["attempt"] != row["attempt"]
                         or current["state"] != "processing"
                     ):
                         raise ValueError("处理任务已失效")
-                    if "progress_steps" in value:
+                    if "progress_steps" in value and row.get("flow_epoch") is None:
                         raw_steps = value["progress_steps"]
                         if (
                             not isinstance(raw_steps, list)
@@ -255,39 +402,78 @@ async def _execute_processor(row, p, processor_package):
                         if len({step["id"] for step in steps}) != len(steps):
                             raise ValueError("处理步骤代码不能重复")
                         bootstrap_progress_plan(c, current, steps)
-                    apply_update(
-                        c,
-                        row["id"],
-                        JobUpdate(
-                            state="processing",
-                            progress=value.get("progress", 0),
-                            completed_steps=value.get("completed_steps"),
-                            message=value.get("message", ""),
-                            attempt=row["attempt"],
-                        ),
+                    update = JobUpdate(
+                        state="processing",
+                        progress=value.get("progress", 0),
+                        completed_steps=value.get("completed_steps")
+                        if row.get("flow_epoch") is None
+                        else None,
+                        message=value.get("message", ""),
+                        attempt=row["attempt"],
+                        flow_epoch=row.get("flow_epoch"),
+                        action_id=row.get("action_id"),
                     )
+                    if row.get("flow_epoch") is not None:
+                        from . import task_flow
+                        from .service import finalize_task_flow
+
+                        finalize_task_flow(
+                            c,
+                            task_flow.process_update(
+                                c, current, update, row["flow_epoch"], actor="worker"
+                            ),
+                        )
+                    else:
+                        apply_update(c, row["id"], update)
             elif value.get("kind") == "result":
                 if value.get("state") not in ("succeeded", "failed"):
                     raise ValueError("处理器必须返回终态")
-                result = JobUpdate.model_validate({**value, "attempt": row["attempt"]})
+                result = JobUpdate.model_validate(
+                    {
+                        **value,
+                        "attempt": row["attempt"],
+                        "flow_epoch": row.get("flow_epoch"),
+                        "action_id": row.get("action_id"),
+                    }
+                )
             else:
                 raise ValueError("处理器输出格式错误")
+        check()
         await proc.wait()
+        check()
         if proc.returncode or result is None:
             raise ValueError("处理器未正常完成")
         return result
 
-    tasks = [asyncio.create_task(send()), asyncio.create_task(read())]
+    async def watch_authority():
+        while True:
+            check()
+            await asyncio.sleep(0.25)
+
+    tasks, work = [], None
     try:
-        _, completed = await asyncio.wait_for(
-            asyncio.gather(*tasks), limits["timeout_seconds"]
+        check(require_input=True)
+        tasks = [asyncio.create_task(send()), asyncio.create_task(read())]
+        work = asyncio.gather(*tasks)
+        watcher = asyncio.create_task(watch_authority())
+        tasks.append(watcher)
+        done, _ = await asyncio.wait(
+            (work, watcher),
+            timeout=limits["timeout_seconds"],
+            return_when=asyncio.FIRST_COMPLETED,
         )
-        return completed
+        if not done:
+            raise TimeoutError("处理器运行超时")
+        if watcher in done:
+            await watcher
+        return work.result()[1]
     finally:
         for task in tasks:
             if not task.done():
                 task.cancel()
         await asyncio.gather(*tasks, return_exceptions=True)
+        if work is not None:
+            await asyncio.gather(work, return_exceptions=True)
         if proc.returncode is None:
             import os
             import signal
@@ -301,9 +487,11 @@ async def _execute_processor(row, p, processor_package):
 
 async def job_once():
     with db() as c:
+        exclusion = _flow_exclusion(c)
         # A crash/timeout may already have performed external effects. Never retry silently.
         expired = c.execute(
-            "SELECT * FROM jobs WHERE state='processing' AND lease<?", (time.time(),)
+            "SELECT * FROM jobs WHERE state='processing' AND lease<?" + exclusion,
+            (time.time(),),
         ).fetchall()
         for r in expired:
             apply_update(
@@ -317,7 +505,9 @@ async def job_once():
                 ),
             )
         rows = c.execute(
-            "SELECT jobs.* FROM jobs JOIN products ON products.id=jobs.product_id JOIN shops ON shops.id=products.shop_id WHERE shops.enabled=1 AND jobs.state='queued' AND json_extract(products.config,'$.mode') IN ('script','webhook') ORDER BY jobs.created,jobs.id LIMIT 100"
+            "SELECT jobs.* FROM jobs JOIN products ON products.id=jobs.product_id JOIN shops ON shops.id=products.shop_id WHERE shops.enabled=1 AND jobs.state='queued' AND json_extract(products.config,'$.mode') IN ('script','webhook')"
+            + exclusion
+            + " ORDER BY jobs.created,jobs.id LIMIT 100"
         ).fetchall()
         selected = None
         for r in rows:
@@ -383,6 +573,15 @@ async def job_once():
     return True
 
 
+def automation_maintenance_once():
+    from .automation import cleanup
+
+    with db() as c:
+        if not _has_table(c, "automation_requests"):
+            return 0
+        return cleanup(c, limit=200)
+
+
 async def loop():
     print("Extore worker running", flush=True)
 
@@ -408,12 +607,23 @@ async def loop():
                 await asyncio.to_thread(record_maintenance_once)
             except Exception as exc:
                 print("Record maintenance error:", type(exc).__name__, flush=True)
+            try:
+                await asyncio.to_thread(automation_maintenance_once)
+            except Exception as exc:
+                print("Automation maintenance error:", type(exc).__name__, flush=True)
             await asyncio.sleep(60)
 
+    from .flow_worker import outbox_once as flow_outbox_once
+    from .flow_worker import task_flow_once
     from .mail import process_outbox_once
 
     await asyncio.gather(
-        pump(job_once), pump(outbox_once), pump(process_outbox_once), maintenance()
+        pump(job_once),
+        pump(outbox_once),
+        pump(task_flow_once),
+        pump(flow_outbox_once),
+        pump(process_outbox_once),
+        maintenance(),
     )
 
 
