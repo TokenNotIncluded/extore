@@ -63,6 +63,7 @@ const md = (s) =>
 const icon =
   '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="m4 7 8-4 8 4v10l-8 4-8-4zM4 7l8 4 8-4M12 11v10"/></svg>';
 const states = {
+  waiting: "等待顾客",
   queued: "排队中",
   processing: "处理中",
   succeeded: "已完成",
@@ -72,6 +73,7 @@ const states = {
   destroyed: "已销毁",
 };
 const stateEn = {
+  waiting: "Waiting for customer",
   queued: "Queued",
   processing: "Processing",
   succeeded: "Completed",
@@ -369,6 +371,7 @@ function stopPoll() {
   timer = null;
 }
 function navigate(path, nextTab) {
+  window.ExtoreTaskFlow?.dispose(app);
   queueLoadId++;
   if (nextTab) tab = nextTab;
   stopPoll();
@@ -425,9 +428,10 @@ window.addEventListener("popstate", start);
 window.addEventListener("hashchange", () => {
   if (location.pathname === "/cli/owner") start();
 });
-window.addEventListener("pagehide", () => { ownerCliApproval?.dispose(); deviceCliApproval?.dispose(); pipelineAuthView?.dispose(); });
+window.addEventListener("pagehide", () => { window.ExtoreTaskFlow?.dispose(app); ownerCliApproval?.dispose(); deviceCliApproval?.dispose(); pipelineAuthView?.dispose(); });
 
 async function home() {
+  window.ExtoreTaskFlow?.dispose(app);
   queueLoadId++;
   const generation = queueLoadId;
   const pathname = location.pathname;
@@ -646,8 +650,54 @@ function publicDetail(p) {
   on("#back", home);
   on("#return", home);
 }
+function renderTaskFlow(job = null) {
+  const flowModule = window.ExtoreTaskFlow;
+  if (!flowModule) return false;
+  const flow = flowModule.flowOf(job, currentProduct);
+  if (!flow || flow.phase === "ended") return false;
+  const context = receiptRequestContext();
+  const handled = flowModule.render({
+    app, product: currentProduct, job, flow, lang,
+    token: context.token, cardId: context.cardId,
+    variant: job?.variant || currentVariant,
+    receiptUrl: location.origin + "/receipt#" + context.token,
+    active: context.active, api, upload: uploadMultipart, uploadLimit: uploadFileLimit,
+    copy: writeClipboard, notify: toast, refresh: readReceipt,
+    back: () => { selectBatchCard(); openBatch(currentBatch); },
+    onResult: async (result) => {
+      if (!context.active()) return;
+      const nextJob = result.job || result;
+      if (!nextJob.id || !nextJob.state) { await readReceipt(); return; }
+      if (currentBatch && context.cardId) {
+        const item = currentBatch.items.find((entry) => entry.card_id === context.cardId);
+        if (item) item.job = nextJob;
+      }
+      renderReceipt(nextJob);
+    },
+  });
+  if (handled) {
+    receiptMotion?.dispose();
+    receiptMotion = null;
+    receiptViewKey = "";
+    if (job) currentJob = job;
+    pollTaskFlow();
+  }
+  return handled;
+}
+function pollTaskFlow() {
+  const context = receiptRequestContext();
+  timer = setTimeout(async () => {
+    if (!context.active()) return;
+    try { await readReceipt(); }
+    catch (error) {
+      if (context.active()) { toast(error.message); pollTaskFlow(); }
+    }
+  }, document.hidden ? 15000 : 2500);
+}
 function redemptionForm() {
   stopPoll();
+  if ((!currentBatch || batchSelection) && renderTaskFlow(currentJob)) return;
+  window.ExtoreTaskFlow?.dispose(app);
   receiptMotion?.dispose();
   receiptMotion = null;
   receiptViewKey = "";
@@ -820,6 +870,8 @@ function renderBatch(data) {
 function renderReceipt(j) {
   currentJob = j;
   stopPoll();
+  if (renderTaskFlow(j)) return;
+  window.ExtoreTaskFlow?.dispose(app);
   window.ExtoreWebMCP?.refresh();
   const p = currentProduct;
   const waiting = ["processing", "queued"].includes(j.state);
@@ -1655,6 +1707,7 @@ async function staff() {
   await renderTab();
 }
 async function start() {
+  window.ExtoreTaskFlow?.dispose(app);
   accountView?.dispose();
   accountView = null;
   ownerCliApproval?.dispose();

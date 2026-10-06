@@ -339,6 +339,7 @@
       ${textarea("p-description", "商品描述（Markdown）", product.description)}
       ${field("p-support-email", "商家催办邮箱（可留空）", product.support_email || "", "email", 'maxlength="254" autocomplete="email"')}
       <div class="form-divider"><div class="section-head"><h3>处理步骤</h3><button type="button" id="add-progress-step" class="secondary">添加步骤</button></div><p class="caption">按处理顺序配置步骤，顾客可跟踪每一步的状态。修改只用于之后的任务，正在处理的任务会保留原来的步骤。</p><div id="product-progress-steps"></div></div>
+      <div class="form-divider" id="product-task-flow"></div>
       <div class="form-divider"><div class="section-head"><h3>规格 / 档位</h3><button type="button" id="add-variant" class="secondary">添加规格</button></div><p class="caption">每个规格有独立的卡密库存，数量在卡密页查看。参考价供外部商城配置参考；Extore 只负责兑换与交付，不收款。</p><div id="product-variants"></div><p class="caption">规格标识固定。已有卡密的规格不能删除，可停用，避免继续发行。</p></div>
       <div class="checks"><label><input id="p-public" type="checkbox" ${product.public ? "checked" : ""}>公开展示商品</label><label><input id="p-retry" type="checkbox" ${product.allow_retry ? "checked" : ""} ${disabled}>允许明确失败后重试</label></div>
       ${field("p-attempts", "最多尝试次数", product.max_attempts, "number", `${disabled} min="1" max="20"`)}
@@ -351,6 +352,27 @@
       <div class="form-divider" id="outputs-section"><div class="section-head"><h3>任务完成时提交的结果</h3><button type="button" id="add-output" class="secondary" ${disabled}>添加输出字段</button></div><p class="caption">结果只在顾客主动领取时显示。人员、AI 或外部平台提交完成结果时，都须符合这些定义。</p><div id="outputs"></div></div>
       <p class="caption">队列商品调整输入输出后，新任务采用新定义，已提交任务保留原定义。自动处理商品发行卡密后，处理方式与输入输出结构不能更换。</p><button type="submit" id="save-product" class="full">保存商品</button><div id="error" class="error" role="alert"></div>
     </form>`;
+
+    const taskFlowEditor = window.ExtoreTaskFlowEditor?.mount($("#product-task-flow"), {
+      value: product.task_flow || null,
+      disabled: !ctx.canConfigure,
+      active,
+      confirm: (message) => globalThis.confirm(message),
+      onPreset: () => {
+        captureCustom();
+        // The built-in graph ends with the conventional content field. A
+        // merchant can change both final outputs and the end mapping afterward.
+        if ($("#p-mode").value !== "script" && previousDelivery === "content" &&
+            !outputs.some((definition) => definition.key === "content")) {
+          outputs.push(defaultOutput());
+          customOutputs = structuredClone(outputs);
+          drawFields("#outputs", "o", outputs, !ctx.canConfigure, false);
+        }
+      },
+    });
+    if (!taskFlowEditor && product.task_flow) {
+      $("#product-task-flow").innerHTML = '<p class="error">任务编排模块未加载。刷新页面后再编辑编排；其他商品资料仍可保存。</p>';
+    }
 
     const parseObject = (id, label) => {
       try {
@@ -721,6 +743,7 @@
           processor_id: mode === "script" ? processorId : "",
           variants,
           progress_steps: progressSteps,
+          task_flow: taskFlowEditor ? taskFlowEditor.getValue() : product.task_flow || null,
           support_email: $("#p-support-email").value.trim(),
         };
         // Configuration is not part of generic product editing. The existing
