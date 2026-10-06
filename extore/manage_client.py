@@ -2899,8 +2899,8 @@ def dispatch(client, args, command, origin):
                 args.job_id,
                 args.field,
                 args.file,
-                flow_epoch=args.flow_epoch,
-                action_id=args.action_id,
+                flow_epoch=getattr(args, "flow_epoch", None),
+                action_id=getattr(args, "action_id", None),
             ),
         }
     ids = args.job_id if command == "claim" else [args.job_id]
@@ -2971,15 +2971,15 @@ def dispatch(client, args, command, origin):
                     code="invalid_input",
                 )
             values["content"] = content
-        if args.delivery_files:
+        if getattr(args, "delivery_files", None):
             values["output"] = client.delivery_output(
                 grant,
                 args.job_id,
                 args.delivery_files,
                 values.get("output", {}),
-                flow_epoch=args.flow_epoch,
-                action_id=args.action_id,
-                attempt=args.attempt,
+                flow_epoch=getattr(args, "flow_epoch", None),
+                action_id=getattr(args, "action_id", None),
+                attempt=getattr(args, "attempt", None),
             )
     if command == "fail":
         values["retryable"] = args.retryable

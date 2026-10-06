@@ -424,6 +424,9 @@ def _script_authority(c, row, selected, epoch):
         return False
     try:
         authority = task_flow.frozen_authority(c, row, epoch, selected["attempt"])
+        from .processor_profiles import runtime_execution
+
+        runtime_execution(c, row, selected["processor_id"])
     except (HTTPException, SecretStoreError, ValueError):
         return False
     return bool(

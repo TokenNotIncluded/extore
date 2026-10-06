@@ -298,10 +298,27 @@ def job_product(c, row):
     from . import task_flow
 
     if task_flow.is_flow(c, row):
-        execution = task_flow.execution(c, row)
-        if execution:
-            result["parameters"] = execution["parameters"]
-            result["outputs"] = execution["outputs"]
+        # Schemas are public metadata. Reading them must never consume or reopen
+        # an OTP, and already-started output remains valid after its input expires.
+        flow = task_flow.view(c, row)
+        if flow["phase"] in ("queued", "processing"):
+            snapshot = task_flow.card_snapshot(c, row["card_id"])
+            nodes = {node["id"]: node for node in snapshot["definition"]["nodes"]}
+            node = nodes[flow["current"]["id"]]
+            result["parameters"] = [
+                {
+                    **next(
+                        field
+                        for field in nodes[ref["node"]].get(
+                            "fields", nodes[ref["node"]].get("outputs", [])
+                        )
+                        if field["key"] == ref["field"]
+                    ),
+                    "key": key,
+                }
+                for key, ref in node["inputs"].items()
+            ]
+            result["outputs"] = node["outputs"]
     return result
 
 
@@ -428,6 +445,14 @@ def job_view(c, row, staff=False):
         flow = task_flow.view(c, row, staff=staff)
         result["task_flow"] = flow
         if staff and flow["phase"] in ("queued", "processing"):
+            authority = task_flow.frozen_authority(
+                c, row, flow["flow_epoch"], row["attempt"]
+            )
+            result["flow_epoch"] = authority["flow_epoch"]
+            result["action_id"] = authority["action_id"]
+            result["protected_fields"] = sorted(
+                f["key"] for f in p["parameters"] if f.get("sensitive")
+            )
             execution = task_flow.execution(c, row)
             if execution:
                 fields = execution.get("parameters", [])

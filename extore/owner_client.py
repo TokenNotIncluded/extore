@@ -707,6 +707,7 @@ def add_parser(commands):
         "complete",
         "fail",
         "retry",
+        "request-retry",
         "request-changes",
         "reject",
         "files",
@@ -715,6 +716,11 @@ def add_parser(commands):
     ):
         parser = sub.add_parser(name, aliases=["succeed"] if name == "complete" else [])
         _scope(parser, product=True)
+        if name not in ("jobs", "job", "files", "download"):
+            parser.add_argument("--flow-epoch", type=remote._flow_epoch)
+            parser.add_argument("--action-id", type=remote._action_id)
+            if name != "upload":
+                parser.add_argument("--attempt", type=remote._attempt)
         if name != "jobs":
             parser.add_argument("job_id", nargs="+" if name == "claim" else None)
         if name in ("progress", "complete", "fail"):
@@ -726,9 +732,25 @@ def add_parser(commands):
             parser.add_argument(
                 "--completed-step", action="append", dest="completed_steps"
             )
-        if name in ("request-changes", "reject"):
+        if name in ("request-retry", "request-changes", "reject"):
             parser.add_argument("--reason", required=True)
+        if name in ("request-retry", "request-changes"):
+            parser.add_argument(
+                "--reason-type",
+                choices=("customer_input", "external", "processor"),
+                default="customer_input",
+            )
+            parser.add_argument(
+                "--retry-mode", choices=("revise", "reuse"), default="revise"
+            )
         if name == "complete":
+            parser.add_argument(
+                "--file",
+                action="append",
+                type=remote._delivery_file,
+                default=[],
+                dest="delivery_files",
+            )
             parser.add_argument("--output-file", type=Path)
             parser.add_argument("--content-file", type=Path)
         if name == "fail":
