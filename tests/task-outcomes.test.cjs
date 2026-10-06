@@ -59,7 +59,7 @@ async function processingQueue(claimedBy = "owner") {
   const rendering = page.context.renderJobs("", "product");
   page.requests[0].respond([product()]);
   await flush();
-  page.requests[1].respond([{ ...job("task", "processing"), claimed_by: claimedBy, params: {}, files: [] }]);
+  page.requests[1].respond([{ ...job("task", "processing"), product_id: "product", claimed_by: claimedBy, params: {}, files: [] }]);
   await rendering;
   page.collections.set("[name=job]:checked", [{ value: "task" }]);
   return page;

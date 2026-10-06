@@ -332,27 +332,59 @@ function uploadFileLimit() {
   });
   return uploadLimitPromise;
 }
+function currentManagementActor() { return role === "staff" ? managementLinkId : authStatus.actor || authStatus.account_id || (authStatus.shop_id ? "shop:" + authStatus.shop_id : "owner"); }
+function managementFlowScope(job) {
+  if (!job.task_flow) return null;
+  if (!Number.isSafeInteger(job.flow_epoch) || job.flow_epoch < 1 || !Number.isSafeInteger(job.attempt) || job.attempt < 1 || typeof job.action_id !== "string" || !job.action_id || job.action_id.length > 100)
+    throw new Error("当前任务没有可处理的流程步骤，请刷新队列。");
+  return { flow_epoch: job.flow_epoch, action_id: job.action_id, attempt: job.attempt };
+}
+function sameManagementStep(first, next) {
+  return JSON.stringify(managementFlowScope(first)) === JSON.stringify(managementFlowScope(next)) && first.attempt === next.attempt;
+}
+function customerFlow() { return currentJob?.task_flow || currentProduct?.task_flow_view || null; }
+function customerStepKey(flow) { return JSON.stringify([flow?.flow_epoch, flow?.revision, flow?.phase, flow?.current?.id]); }
 async function selectedJobForFile(definition, options = {}) {
   if (tab !== "jobs" || queueProductId !== definition.product_id || !permitted("queue.view"))
     throw new Error("请先打开对应的商品队列。");
   const query = new URLSearchParams({ product_id: definition.product_id, job_id: definition.job_id, limit: "1" });
   const jobs = await api("/manage/jobs?" + query, undefined, "GET", options);
-  if (!jobs.some((job) => job.id === definition.job_id && job.product_id === definition.product_id))
-    throw new Error("任务不属于当前商品队列。");
+  const selected = jobs.find((job) => job.id === definition.job_id && job.product_id === definition.product_id);
+  if (!selected) throw new Error("任务不属于当前商品队列。");
+  return selected;
 }
 async function uploadFile(definition, options = {}) {
   options = managementOptions(options);
   const context = receiptRequestContext(options);
   const loadId = queueLoadId;
   const productId = queueProductId;
+  const authority = managementAuthority(), session = authStatus.session_id;
   const jobScope = definition.scope === "job";
-  const active = () => !options.signal?.aborted && (jobScope ? loadId === queueLoadId && queueProductId === productId && tab === "jobs" : context.active());
+  const initialFlow = customerFlow(), initialStep = customerStepKey(initialFlow);
+  const active = () => !options.signal?.aborted && (jobScope ? loadId === queueLoadId && queueProductId === productId && tab === "jobs" && authority === managementAuthority() && session === authStatus.session_id : context.active() && initialStep === customerStepKey(customerFlow()));
   if (!active()) throw new Error("文件操作上下文已失效。");
+  let targetJob, uploadFields = { field_key: definition.field_key };
   if (jobScope) {
     if (!permitted("queue.process")) throw new Error("无权上传交付文件。");
-    await selectedJobForFile(definition, options);
+    targetJob = await selectedJobForFile(definition, options);
+    if (!active()) throw new Error("文件操作上下文已失效。");
+    if (!targetJob.outputs?.some((field) => field.key === definition.field_key && isAttachmentField(field))) throw new Error("当前处理步骤没有这个附件输出字段。");
+    const scope = managementFlowScope(targetJob);
+    if (scope) {
+      if (definition.flow_epoch !== scope.flow_epoch || definition.action_id !== scope.action_id || definition.attempt !== scope.attempt) throw new Error("处理步骤已改变，请刷新后重新上传。");
+      uploadFields = { ...uploadFields, flow_epoch: scope.flow_epoch, action_id: scope.action_id };
+    }
+    uploadFields.job_id = definition.job_id;
   } else if (definition.scope !== "customer" || !currentToken || location.pathname !== "/receipt") {
     throw new Error("请先验证卡密。");
+  } else {
+    const fields = initialFlow ? initialFlow.current?.fields || [] : currentProduct?.parameters || [];
+    if (!fields.some((field) => field.key === definition.field_key && isAttachmentField(field))) throw new Error("当前步骤没有这个附件输入字段。");
+    if (initialFlow) {
+      if (initialFlow.phase !== "input" || definition.flow_epoch !== initialFlow.flow_epoch || definition.expected_revision !== initialFlow.revision || definition.node_id !== initialFlow.current?.id) throw new Error("填写步骤已改变，请刷新后重新上传。");
+      uploadFields = { ...uploadFields, flow_epoch: initialFlow.flow_epoch, expected_revision: initialFlow.revision, node_id: initialFlow.current.id };
+    }
+    uploadFields = receiptCardBody(context, uploadFields);
   }
   const encoded = definition.base64;
   if (typeof encoded !== "string" || encoded.length > Math.ceil(20 * 1024 * 1024 / 3) * 4 || encoded.length % 4 || !/^[A-Za-z0-9+/]*={0,2}$/.test(encoded))
@@ -362,8 +394,12 @@ async function uploadFile(definition, options = {}) {
   const bytes = Uint8Array.from(raw, (character) => character.charCodeAt(0));
   const file = new File([bytes], definition.filename || "attachment", { type: definition.content_type || "application/octet-stream" });
   if (!active()) throw new Error("文件操作上下文已失效。");
-  const result = await uploadMultipart(jobScope ? "/manage/files/upload" : "/files/upload", jobScope ? { job_id: definition.job_id, field_key: definition.field_key } : receiptCardBody(context, { field_key: definition.field_key }), file, { ...options, isCurrent: active });
-  if (!active()) throw new Error("页面已切换，文件已上传但尚未提交任务。");
+  const result = await uploadMultipart(jobScope ? "/manage/files/upload" : "/files/upload", uploadFields, file, { ...options, isCurrent: active });
+  if (!active()) throw new Error("页面或流程步骤已切换，文件已上传但尚未提交任务。");
+  if (targetJob?.task_flow) {
+    const refreshed = await selectedJobForFile(definition, options);
+    if (!active() || !sameManagementStep(targetJob, refreshed)) throw new Error("处理步骤已改变，附件尚未提交。");
+  }
   return result;
 }
 async function readFile(definition, options = {}) {
@@ -619,6 +655,12 @@ function openBatch(data) {
   if (batchPending().length) redemptionForm();
   else renderBatch(data);
 }
+async function exchangePastedCode(options = {}) {
+  if (location.pathname !== "/" || options.signal?.aborted) throw new Error("请先打开卡密兑换页。");
+  const value = document.getElementById("code")?.value;
+  if (typeof value !== "string" || !value.trim()) throw new Error("请先把卡密粘贴到页面输入框。");
+  return exchangeCode(value, options);
+}
 async function exchangeCode(code, options = {}) {
   const context = receiptRequestContext(options);
   const generation = receiptGeneration;
@@ -817,6 +859,26 @@ function publicDetail(p) {
   app.innerHTML = `<div class="narrow"><button class="secondary" id="back">← ${tr("返回", "Back")}</button><div class="panel"><h1>${esc(p.name)}</h1>${p.image ? `<img class="product-cover" src="${esc(p.image)}" alt="${esc(p.name)}">` : ""}<div class="markdown">${md(p.description)}</div><button id="return" class="full">${tr("输入卡密兑换", "Enter a code to redeem")}</button></div></div>`;
   on("#back", home);
   on("#return", home);
+}
+async function flowAction(operation, values = {}, options = {}) {
+  if (!["start", "answer", "continue", "restart", "cancel"].includes(operation)) throw new Error("流程操作无效。");
+  const context = receiptRequestContext(options), flow = customerFlow();
+  if (!flow || !(flow.actions || []).includes(operation)) throw new Error("当前步骤不支持这个操作，请刷新后继续。");
+  if (options.flow_epoch !== undefined && options.flow_epoch !== flow.flow_epoch || options.expected_revision !== undefined && options.expected_revision !== flow.revision || options.card_id !== undefined && options.card_id !== context.cardId) throw new Error("流程步骤已改变，请刷新后继续。");
+  const step = customerStepKey(flow);
+  const active = () => context.active() && step === customerStepKey(customerFlow());
+  if (!active()) throw new Error("流程上下文已失效。");
+  const body = receiptCardBody(context, { flow_epoch: flow.flow_epoch, expected_revision: flow.revision, ...(operation === "answer" ? { values } : {}) });
+  const result = await api("/task-flow/" + operation, body, "POST", options);
+  if (active()) {
+    const next = result.job || result;
+    if (currentBatch && context.cardId) {
+      const member = currentBatch.items.find((item) => item.card_id === context.cardId);
+      if (member) member.job = next;
+    }
+    renderReceipt(next);
+  }
+  return result;
 }
 function renderTaskFlow(job = null) {
   const flowModule = window.ExtoreTaskFlow;
@@ -1362,6 +1424,31 @@ async function renderProducts() {
 async function editProduct(p) {
   return window.ExtoreProducts.edit(productUIContext(), p);
 }
+function queueVisibleParams(job) {
+  const hidden = new Set([...(job.protected_fields || []), ...(job.parameters || []).filter((field) => field.sensitive === true).map((field) => field.key)]);
+  return Object.fromEntries(Object.entries(job.params || {}).filter(([key]) => !hidden.has(key)));
+}
+function queueInputFiles(job) {
+  const files = (job.files || []).filter((file) => file.kind === "input");
+  if (!job.task_flow) return files;
+  const params = queueVisibleParams(job), ids = new Set();
+  for (const field of job.parameters || []) {
+    if (!isAttachmentField(field)) continue;
+    try { for (const id of fieldAttachmentIds(field, params[field.key] || "")) ids.add(id); }
+    catch { /* Invalid references never expand the displayed file scope. */ }
+  }
+  return files.filter((file) => ids.has(file.id));
+}
+function queueStepMarkup(job) {
+  const flow = job.task_flow;
+  if (!flow) return `<p>${job.progress}% · ${esc(job.message)}</p>${job.steps?.length ? `<p class="caption">${job.steps.filter((step) => step.done).length} / ${job.steps.length} 步已完成</p>` : ""}`;
+  const label = localized(flow.current?.label) || tr("当前步骤", "Current step");
+  const phase = ({ await_start: tr("等待顾客开始", "Waiting for customer to start"), input: tr("等待顾客填写", "Waiting for customer input"), display: tr("等待顾客查看结果", "Waiting for customer review"), queued: tr("等待领取", "Awaiting claim"), processing: tr("正在处理", "Processing"), ended: tr("流程已结束", "Flow ended") })[flow.phase] || "";
+  const deadline = Number(flow.deadline), now = Number(flow.server_time) || Date.now() / 1000;
+  const remaining = flow.deadline != null && Number.isFinite(deadline) ? Math.max(0, Math.ceil(deadline - now)) : null;
+  const timing = remaining === null ? "" : `<p class="caption">${remaining ? tr(`本步剩余约 ${remaining} 秒`, `About ${remaining} seconds left for this step`) : tr("本步时间已到，请刷新状态", "Step time is up. Refresh its status.")}</p>`;
+  return `<p>${esc(label)} · ${esc(phase)}</p>${timing}${job.message ? `<p>${esc(job.message)}</p>` : ""}${job.protected_fields?.length ? `<p class="caption">${tr("本步包含临时敏感输入，通过已绑定的 CLI 执行器读取。", "This step has temporary sensitive input. Read it through the bound CLI executor.")}</p>` : ""}`;
+}
 async function renderJobs(filter = "", requestedProductId = queueProductId, requestedView = queueView) {
   const loadId = ++queueLoadId;
   const pathname = location.pathname;
@@ -1411,10 +1498,10 @@ async function renderJobs(filter = "", requestedProductId = queueProductId, requ
         "",
       )}</select><button id="refresh" class="secondary">刷新</button>${canProcess ? '<button id="claim">领取选中任务</button><button id="progress-update" class="secondary">更新进度</button><button id="complete" class="secondary">批量完成</button><button id="fail" class="secondary">标记失败</button><button id="request-changes" class="secondary">需要重试</button><button id="reject" class="danger">永久拒绝</button>' : ""}${role === "admin" ? '<button id="release" class="secondary">核实后允许重试</button>' : ""}</div>
     ${manual ? '<p class="caption">批量操作只作用于当前商品，全部成功才提交。批量完成会给所选任务相同的交付内容。</p>' : ""}
-    ${rows.length ? `<div class="table-wrap"><table><thead><tr><th><input id="all" type="checkbox" aria-label="选择当前商品的全部任务"></th><th>任务</th><th>用户参数</th><th>状态 / 进度</th><th>尝试</th></tr></thead><tbody>${rows.map((j) => `<tr><td><input type="checkbox" name="job" value="${esc(j.id)}" aria-label="选择 ${esc(j.id)}"></td><td class="mono">${esc(j.id)}${j.variant?.name ? `<p class="caption">${esc(j.variant.name)}</p>` : ""}${j.queue_position ? `<p class="caption">队列第 ${j.queue_position} 位</p>` : ""}</td><td><pre>${esc(JSON.stringify(j.params, null, 2))}</pre>${(j.files || []).filter((file) => file.kind === "input").map((file) => `<p><button type="button" class="secondary" data-management-download="${esc(file.id)}">↓ ${esc(file.filename)}</button> <span class="caption">${Math.ceil(file.size / 1024)} KiB</span></p>`).join("")}</td><td>${status(j)}<p>${j.progress}% · ${esc(j.message)}</p>${j.steps?.length ? `<p class="caption">${j.steps.filter((step) => step.done).length} / ${j.steps.length} 步已完成</p>` : ""}</td><td>${j.attempt}</td></tr>`).join("")}</tbody></table></div>` : '<div class="empty">这个商品暂无符合条件的任务。</div>'}
+    ${rows.length ? `<div class="table-wrap"><table><thead><tr><th><input id="all" type="checkbox" aria-label="选择当前商品的全部任务"></th><th>任务</th><th>用户参数</th><th>状态 / 进度</th><th>尝试</th></tr></thead><tbody>${rows.map((j) => `<tr><td><input type="checkbox" name="job" value="${esc(j.id)}" aria-label="选择 ${esc(j.id)}"></td><td class="mono">${esc(j.id)}${j.variant?.name ? `<p class="caption">${esc(j.variant.name)}</p>` : ""}${j.queue_position ? `<p class="caption">队列第 ${j.queue_position} 位</p>` : ""}</td><td><pre>${esc(JSON.stringify(queueVisibleParams(j), null, 2))}</pre>${queueInputFiles(j).map((file) => `<p><button type="button" class="secondary" data-management-download="${esc(file.id)}">↓ ${esc(file.filename)}</button> <span class="caption">${Math.ceil(file.size / 1024)} KiB</span></p>`).join("")}</td><td>${status(j)}${queueStepMarkup(j)}</td><td>${j.attempt}</td></tr>`).join("")}</tbody></table></div>` : '<div class="empty">这个商品暂无符合条件的任务。</div>'}
     <div id="batch-form"></div><div id="error" class="error" role="alert"></div>`;
   window.ExtoreWebMCP?.refresh();
-  bindManagementDownloads(rows.flatMap((row) => (row.files || []).filter((file) => file.kind === "input")), active, requestOptions);
+  bindManagementDownloads(rows.flatMap(queueInputFiles), active, requestOptions);
   on("#copy-queue-ai", async () => {
     if (!active()) return;
     const authorization = { origin: location.origin,
@@ -1443,9 +1530,18 @@ async function renderJobs(filter = "", requestedProductId = queueProductId, requ
     if (!values.length) throw new Error("请先选择当前商品的任务");
     return values;
   };
-  const executeBatch = (body) => {
+  const executeBatch = (body, snapshots = rows) => {
     if (!active()) throw new Error("商品队列已切换，请重新选择任务。");
-    return api("/manage/batch", { product_id: productId, ...body }, "POST", requestOptions);
+    const selected = body.ids.map((id) => snapshots.find((row) => row.id === id && row.product_id === productId));
+    if (selected.some((row) => !row)) throw new Error("任务不属于当前商品队列，请刷新后重新选择。");
+    const flowScopes = Object.fromEntries(selected.filter((row) => row.task_flow).map((row) => {
+      if (body.action === "retry") {
+        if (!Number.isSafeInteger(row.attempt) || row.attempt < 1) throw new Error("任务尝试信息无效，请刷新队列。");
+        return [row.id, { attempt: row.attempt }];
+      }
+      return [row.id, managementFlowScope(row)];
+    }));
+    return api("/manage/batch", { product_id: productId, ...body, ...(Object.keys(flowScopes).length ? { flow_scopes: flowScopes } : {}) }, "POST", requestOptions);
   };
   const refreshQueue = () => active() ? renderJobs(filter, productId, view) : undefined;
   on("#claim", async () => {
@@ -1460,7 +1556,7 @@ async function renderJobs(filter = "", requestedProductId = queueProductId, requ
   });
   function disposition(action) {
     const selected = ids();
-    const actor = role === "admin" ? "owner" : managementLinkId;
+    const actor = currentManagementActor();
     const selectedRows = rows.filter((row) => selected.includes(row.id));
     if (!canProcess || selectedRows.length !== selected.length || selectedRows.some((row) => row.state !== "processing" || row.claimed_by !== actor))
       throw new Error("只能处理你已领取的处理中任务。");
@@ -1499,6 +1595,7 @@ async function renderJobs(filter = "", requestedProductId = queueProductId, requ
         if (!dialogCurrent(generation)) return;
         const current = fresh.find((row) => row.id === selected[0] && row.product_id === productId);
         if (!current) throw new Error("任务不属于当前商品队列。");
+        if (!sameManagementStep(selectedRows[0], current)) throw new Error("任务尝试或处理步骤已改变，请刷新队列后重新选择。");
         selectedRows = [current];
         outputFields = current.outputs || selectedProduct.outputs || [];
       }
@@ -1506,7 +1603,8 @@ async function renderJobs(filter = "", requestedProductId = queueProductId, requ
     if (!dialogCurrent(generation)) return;
     const uploadedOutputs = (field) => (selectedRows[0]?.files || []).filter((file) =>
       file.job_id === selected[0] && file.kind === "output" && file.field_key === field.key &&
-      !file.consumed && file.available !== false && (file.attempt == null || file.attempt === selectedRows[0].attempt));
+      !file.consumed && file.available !== false && (file.attempt == null || file.attempt === selectedRows[0].attempt) &&
+      (!selectedRows[0].task_flow || file.flow_epoch === selectedRows[0].flow_epoch));
     const existingOutputIds = (field, index) => field.type === "images"
       ? [...document.querySelectorAll(`[name="batch-uploaded-${index}"]`)].filter((input) => input.checked).map((input) => input.value)
       : [$("#batch-uploaded-" + index)?.value || ""].filter(Boolean);
@@ -1550,10 +1648,16 @@ async function renderJobs(filter = "", requestedProductId = queueProductId, requ
             if (existing.some((id) => !uploadedOutputs(definition).some((candidate) => candidate.id === id)))
               throw new Error("附件不属于此任务、字段或当前尝试，请刷新后重新选择。");
             const retained = definition.type === "images" ? JSON.stringify(existing) : existing[0] || "";
-            output[definition.key] = await uploadFieldFiles(input, definition, retained, "/manage/files/upload", { job_id: selected[0] }, { ...requestOptions, isCurrent: () => dialogCurrent(generation) });
+            const flowScope = managementFlowScope(selectedRows[0]);
+            output[definition.key] = await uploadFieldFiles(input, definition, retained, "/manage/files/upload", { job_id: selected[0], ...(flowScope ? { flow_epoch: flowScope.flow_epoch, action_id: flowScope.action_id } : {}) }, { ...requestOptions, isCurrent: () => dialogCurrent(generation) });
           } else output[definition.key] = input.value;
           if (!dialogCurrent(generation)) return;
         }
+      }
+      if (action === "succeed" && selectedRows[0]?.task_flow && outputFields.some(isAttachmentField)) {
+        const fresh = await selectedJobForFile({ product_id: productId, job_id: selected[0] }, requestOptions);
+        if (!dialogCurrent(generation)) return;
+        if (!sameManagementStep(selectedRows[0], fresh)) throw new Error("处理步骤已改变，附件尚未提交，请刷新队列。");
       }
       await executeBatch({
         ids: selected,
@@ -1561,7 +1665,7 @@ async function renderJobs(filter = "", requestedProductId = queueProductId, requ
         message,
         output: action === "succeed" ? output : undefined,
         retryable: $("#batch-retry")?.checked || false,
-      });
+      }, selectedRows);
       if (dialogCurrent(generation)) await refreshQueue();
     });
   }
@@ -1996,10 +2100,12 @@ window.ExtoreWebMCP?.configure({
         "/cli/device": "cli_device",
       }[location.pathname] || "home",
     role,
+    actor: currentManagementActor(),
     shopId: authStatus.shop_id ?? null,
     superadmin: authStatus.superadmin === true,
     sessionId: authStatus.session_id ?? null,
     product: currentProduct,
+    flow: customerFlow(),
     currentToken,
     tab,
     cardProductId,
@@ -2016,8 +2122,10 @@ window.ExtoreWebMCP?.configure({
     uploadFile,
     readFile,
     exchange: exchangeCode,
+    exchangePasted: exchangePastedCode,
     redeem: submitRedemption,
     receipt: readReceipt,
+    flow: flowAction,
     retryOriginal: retryOriginalReceipt,
     reveal: revealReceipt,
     destroy: destroyReceipt,
