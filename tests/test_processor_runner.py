@@ -303,6 +303,19 @@ m = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(m)
 """
 
+CHILD_SECCOMP_IMPORT = (
+    CHILD_IMPORT
+    + """
+# These direct children do not use the production sandbox's fixed library
+# mount. Resolve the host library before the irreversible filter: discovery
+# can invoke ldconfig on distributions with a multiarch library directory.
+import ctypes.util
+host_seccomp_library = ctypes.util.find_library('seccomp')
+assert host_seccomp_library, 'libseccomp is required for the real filter probe'
+m.SECCOMP_PATH = host_seccomp_library
+"""
+)
+
 
 def test_real_child_has_all_five_host_hard_limits_before_exec_and_preserves_env_only_secret():
     script = (
@@ -358,7 +371,7 @@ def test_real_linux_guard_blocks_new_process_exec_and_namespace_control():
     # production CLI or its fixed /code path.  The real irreversible filter
     # runs in a fresh child, and every blocked operation is attempted there.
     script = (
-        CHILD_IMPORT
+        CHILD_SECCOMP_IMPORT
         + """
 import ctypes, errno, json, os, resource, subprocess
 def catalog_probe(module, run_name):
@@ -381,7 +394,7 @@ def catalog_probe(module, run_name):
         subprocess.run(['/usr/bin/true'],check=False)
         checked['subprocess'] = False
     except OSError as e: checked['subprocess'] = e.errno == errno.EPERM
-    library = ctypes.CDLL('/usr/lib/libseccomp.so.2')
+    library = ctypes.CDLL(host_seccomp_library)
     library.seccomp_syscall_resolve_name.argtypes = [ctypes.c_char_p]
     library.seccomp_syscall_resolve_name.restype = ctypes.c_int
     for name in ('setns','unshare','mount','umount2','pivot_root','ptrace','bpf','perf_event_open','keyctl','add_key','request_key','io_uring_setup','io_uring_enter','io_uring_register','pipe','pipe2','io_setup','io_destroy','io_submit','io_cancel','io_getevents','io_pgetevents'):
@@ -424,7 +437,7 @@ def test_real_filter_blocks_file_and_memory_creation_but_preserves_file_and_dire
     fixture = tmp_path / "existing.txt"
     fixture.write_text("fixture", encoding="utf-8")
     script = (
-        CHILD_IMPORT
+        CHILD_SECCOMP_IMPORT
         + """
 import ctypes, errno, json, os, socket
 fixture = sys.argv[2]
@@ -433,7 +446,7 @@ def catalog_probe(module, run_name):
     checked = {'read_file': open(fixture,'rb').read() == b'fixture'}
     fd = os.open(directory,os.O_RDONLY | os.O_DIRECTORY)
     checked['read_directory'] = fd >= 0
-    library = ctypes.CDLL('/usr/lib/libseccomp.so.2')
+    library = ctypes.CDLL(host_seccomp_library)
     library.seccomp_syscall_resolve_name.argtypes = [ctypes.c_char_p]
     library.seccomp_syscall_resolve_name.restype = ctypes.c_int
     libc = ctypes.CDLL(None,use_errno=True)
@@ -465,7 +478,7 @@ def catalog_probe(module, run_name):
         except OSError as error: checked[name] = error.errno == errno.EPERM
     # Test both actual syscall layouts, independent of libc's choice to
     # implement open() with openat().  Only temporary fixture paths are used.
-    library = ctypes.CDLL('/usr/lib/libseccomp.so.2')
+    library = ctypes.CDLL(host_seccomp_library)
     library.seccomp_syscall_resolve_name.argtypes = [ctypes.c_char_p]
     library.seccomp_syscall_resolve_name.restype = ctypes.c_int
     libc = ctypes.CDLL(None,use_errno=True)
