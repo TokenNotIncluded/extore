@@ -1,0 +1,19 @@
+name: CI
+on: [push, pull_request]
+permissions:
+  contents: read
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: astral-sh/setup-uv@94527f2e458b27549849d47d273a16bec83a01e9 # v7
+        with:
+          version: "0.12.20"
+      - run: uv sync --frozen --python 3.12
+      - run: uv run ruff check extore scripts tests
+      - run: uv run ruff format --check extore scripts tests
+      - run: uv run pytest -q
+      - run: uv run python -m compileall -q extore scripts
+      - run: node --check extore/static/app.js
+      - run: uv build

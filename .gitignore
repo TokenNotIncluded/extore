@@ -1,0 +1,13 @@
+.venv/
+data/
+__pycache__/
+.pytest_cache/
+.env
+*.sqlite3*
+output/
+.playwright-cli/
+.impeccable/config.local.json
+
+dist/
+
+.ruff_cache/

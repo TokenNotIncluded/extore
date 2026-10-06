@@ -1,0 +1,24 @@
+[Unit]
+Description=Extore redemption API
+After=network.target
+
+[Service]
+User=extore
+Group=extore
+EnvironmentFile=/etc/extore/extore.env
+WorkingDirectory=/var/lib/extore
+ExecStart=/usr/lib/extore/.venv/bin/python -m uvicorn extore.app:app --host 127.0.0.1 --port 8095 --forwarded-allow-ips=127.0.0.1
+Restart=on-failure
+RestartSec=5
+StateDirectory=extore
+StateDirectoryMode=0700
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/extore
+TimeoutStopSec=30
+
+[Install]
+WantedBy=multi-user.target

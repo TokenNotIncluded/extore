@@ -1,0 +1,38 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="color-scheme" content="light" />
+    <title>Extore · 兑所</title>
+    <link rel="icon" href="/static/logo.svg" type="image/svg+xml" />
+    <link rel="stylesheet" href="/static/style.css" />
+    <script defer src="/static/vendor/marked.js"></script>
+    <script defer src="/static/vendor/purify.js"></script>
+    <script defer src="/static/app.js"></script>
+  </head>
+  <body>
+    <header>
+      <button
+        id="brand"
+        class="brand"
+        aria-label="兑所，连续点击五次进入管理后台"
+      >
+        <img src="/static/logo.svg" alt="" width="38" height="38" /><span
+          >Extore<span class="brand-cn">兑所</span></span
+        >
+      </button>
+      <div class="header-right">
+        <select id="language" aria-label="Language">
+          <option value="zh-CN">简体中文</option>
+          <option value="en">English</option></select
+        ><span id="header-context">兑换与领取</span>
+      </div>
+    </header>
+    <main id="app" aria-live="polite"></main>
+    <div id="toast" role="status" hidden></div>
+    <footer>
+      <span>Extore · 兑所</span><span>每一次兑换，都有着落。</span>
+    </footer>
+  </body>
+</html>

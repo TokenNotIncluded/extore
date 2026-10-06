@@ -1,0 +1,32 @@
+services:
+  api:
+    build: .
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:8000:8000"
+    environment: &env
+      EXTORE_ORIGIN: ${EXTORE_ORIGIN:-http://localhost:8000}
+      EXTORE_DATA: /data
+      EXTORE_SCRIPTS: /app/scripts
+    volumes: &volumes
+      - ./data:/data
+      - ./scripts:/app/scripts:ro
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "python",
+          "-c",
+          "import urllib.request; urllib.request.urlopen('http://localhost:8000/health', timeout=5)",
+        ]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+    stop_grace_period: 30s
+  worker:
+    build: .
+    restart: unless-stopped
+    command: ["python", "-m", "extore.worker"]
+    environment: *env
+    volumes: *volumes
+    stop_grace_period: 150s

@@ -1,0 +1,6 @@
+#!/bin/sh
+set -eu
+set -a
+. /etc/extore/extore.env
+set +a
+exec /usr/lib/extore/.venv/bin/python -m extore.cli "$@"

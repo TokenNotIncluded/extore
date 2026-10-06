@@ -1,0 +1,25 @@
+[Unit]
+Description=Extore durable fulfillment worker
+After=network-online.target extore-api.service
+Wants=network-online.target
+
+[Service]
+User=extore
+Group=extore
+EnvironmentFile=/etc/extore/extore.env
+WorkingDirectory=/var/lib/extore
+ExecStart=/usr/lib/extore/.venv/bin/python -m extore.worker
+Restart=on-failure
+RestartSec=5
+StateDirectory=extore
+StateDirectoryMode=0700
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/extore
+TimeoutStopSec=150
+
+[Install]
+WantedBy=multi-user.target

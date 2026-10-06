@@ -1,0 +1,8 @@
+.git
+.venv
+data
+.env
+output
+.playwright-cli
+.pytest_cache
+__pycache__
