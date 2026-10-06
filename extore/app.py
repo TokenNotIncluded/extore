@@ -12,6 +12,7 @@ from fastapi.staticfiles import StaticFiles
 
 from . import auth, shops
 from .account_auth import router as account_auth_router
+from .batch_redemption import router as batch_redemption_router
 from .card_tracking import router as card_tracking_router
 from .cli_auth import router as cli_auth_router
 from .config import ORIGIN, check_config
@@ -98,6 +99,7 @@ async def lifespan(app):
 app = FastAPI(title="Extore API", version="0.7.0", lifespan=lifespan)
 app.include_router(auth.router)
 app.include_router(account_auth_router)
+app.include_router(batch_redemption_router)
 app.include_router(card_tracking_router)
 app.include_router(files_router)
 app.include_router(flow_router)
