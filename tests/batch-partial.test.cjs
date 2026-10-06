@@ -270,3 +270,34 @@ test("receipt reload falls back for a legacy single token only on HTTP 404", asy
     }
   }
 });
+
+
+test("mixed variant image sets stay per card and keep their ordered references", async () => {
+  const definition = product("Image service", [parameter("requirements"), { ...parameter("gallery", "images"), max_items: 2 }]);
+  const page = setup([ready("A", definition, "Basic"), ready("B", definition, "Plus")]);
+  page.context.openBatch(page.data);
+  const markup = page.node("#app").innerHTML;
+  assert.doesNotMatch(markup, /batch-param-0-gallery/);
+  assert.match(markup, /batch-file-A-gallery/);
+  assert.match(markup, /batch-file-B-gallery/);
+  page.node("#batch-param-0-requirements").value = "Same brief";
+  const images = [new File(["a"], "a.png", { type: "image/png" }), new File(["b"], "b.png", { type: "image/png" })];
+  for (const id of ["A", "B"]) {
+    page.node(`#batch-select-${id}`).checked = true;
+    page.node(`#batch-file-${id}-gallery`).files = images;
+  }
+  const saving = page.node("#form").emit("submit");
+  for (const [index, id] of ["A", "A", "B", "B"].entries()) {
+    await flush();
+    assert.equal(page.requests[index].body.card_id, id);
+    assert.equal(page.requests[index].body.field_key, "gallery");
+    page.requests[index].respond({ id: `image-${id}-${index % 2}` });
+  }
+  await flush();
+  assert.deepEqual(page.requests[4].body.items, [
+    { card_id: "A", params: { requirements: "Same brief", gallery: '["image-A-0","image-A-1"]' } },
+    { card_id: "B", params: { requirements: "Same brief", gallery: '["image-B-0","image-B-1"]' } },
+  ]);
+  page.requests[4].respond(submitted(page.data));
+  await saving;
+});
