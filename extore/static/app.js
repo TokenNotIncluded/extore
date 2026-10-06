@@ -12,6 +12,7 @@ let lang = preferences.resolved.language,
   currentVariant = null,
   receiptViewKey = "",
   receiptMotion = null,
+  ownerCliApproval = null,
   waitingAnimationPaused = false,
   receiptGeneration = 0,
   timer = null,
@@ -30,7 +31,8 @@ let lang = preferences.resolved.language,
   queueProductId = "",
   queueView = "active",
   queueProduct = null,
-  queueLoadId = 0;
+  queueLoadId = 0,
+  routeLoadId = 0;
 let uploadLimitPromise = null;
 let maxUploadFileBytes = 20 * 1024 * 1024;
 const esc = (s) =>
@@ -372,9 +374,16 @@ $("#theme").addEventListener("change", () =>
   preferences.setTheme($("#theme").value),
 );
 window.addEventListener("popstate", start);
+window.addEventListener("hashchange", () => {
+  if (location.pathname === "/cli/owner") start();
+});
+window.addEventListener("pagehide", () => ownerCliApproval?.dispose());
 
 async function home() {
   queueLoadId++;
+  const generation = queueLoadId;
+  const pathname = location.pathname;
+  const hash = location.hash;
   receiptMotion?.dispose();
   receiptMotion = null;
   receiptViewKey = "";
@@ -386,6 +395,7 @@ async function home() {
   currentJob = null;
   currentVariant = null;
   const list = await api("/products");
+  if (generation !== queueLoadId || location.pathname !== pathname || location.hash !== hash) return;
   app.innerHTML = `<section class="intro home-paper-stack"><section class="intro-copy public-card" data-home-paper="products" tabindex="0" aria-label="${tr("公开商品", "Public products")}"><h1>${list.length ? tr("公开商品", "Public products") : tr("暂无公开商品", "No public products")}</h1><div class="paper-divider" aria-hidden="true"></div>${list.length ? `<p class="caption">${tr("选择商品了解详情，兑换需有效卡密。", "Browse the details. A valid code is required to redeem.")}</p><div class="home-product-list" tabindex="0" role="region" aria-label="${tr("公开商品列表，可上下滚动", "Public product list, scroll vertically")}">${list.map((p, i) => `<article class="product-row">${p.logo ? `<img src="${esc(p.logo)}" alt="">` : `<div class="product-icon">${icon}</div>`}<div class="product-info"><h3>${esc(p.name)}</h3><p>${tr(p.delivery === "service" ? "服务兑换" : "商品领取", p.delivery === "service" ? "Service" : "Digital delivery")} · ${tr(p.mode === "manual" ? "队列处理" : "自动处理", p.mode === "manual" ? "Queue processing" : "Automatic")}</p></div><button class="secondary" data-product="${i}">${tr("查看详情", "Details")}</button></article>`).join("")}</div>` : ""}</section><section class="exchange" data-home-paper="redeem" tabindex="0" aria-label="${tr("卡密兑换", "Redeem a code")}"><h2>${tr("开始兑换", "Redeem your code")}</h2><p>${tr("请使用购买商品时获得的卡密。", "Use the code you received with your purchase.")}</p><form id="form"><div class="field"><label for="code">${tr("兑换卡密", "Redemption code")}</label><div class="code-entry"><textarea class="code" id="code" rows="2" placeholder="XXXXXXXX-XXXXXXXX-XXXXXXXX-XXXXXXXX" required autocomplete="off" spellcheck="false" maxlength="8000"></textarea><button id="paste-code" class="secondary paste-code" type="button">${tr("粘贴", "Paste")}</button></div><p id="code-count" class="caption"></p><p class="caption">${tr("多张卡密请换行，或用空格、逗号分开。验证后仍得到一个领取链接。", "Separate extra codes with new lines, spaces, or commas. You still get one receipt link.")}</p></div><button type="submit" class="full">${tr("验证并继续", "Verify and continue")} →</button><div id="error" class="error" role="alert"></div></form><div class="footnote">${tr("已有领取链接？直接打开即可查看处理进度。", "Already have a receipt link? Open it to check progress.")}</div></section></section>`;
   form(() => {
     const codes = splitCodes($("#code").value);
@@ -845,7 +855,10 @@ async function passkey(register = false) {
 }
 async function admin() {
   stopPoll();
+  const generation = queueLoadId;
+  const active = () => generation === queueLoadId && location.pathname === "/admin";
   const auth = await api("/auth/status");
+  if (!active()) return;
   acceptAuth(auth);
   window.ExtoreWebMCP?.refresh();
   if (!auth.configured) {
@@ -873,7 +886,9 @@ async function admin() {
     });
     return;
   }
-  products = await api("/admin/products");
+  const available = await api("/admin/products");
+  if (!active()) return;
+  products = available;
   shell();
   await renderTab();
 }
@@ -981,9 +996,9 @@ async function copyManagementLink(url, input, isCurrent = () => true) {
   return false;
 }
 async function copyCLIPrompt(options, host, isCurrent = () => true) {
-  const prompt = window.ExtoreCliPrompts.build({ language: lang, ...options });
+  const prompt = (options.owner ? window.ExtoreCliPrompts.buildOwner : window.ExtoreCliPrompts.build)({ language: lang, ...options });
   if (!isCurrent()) return;
-  host.innerHTML = `<div class="field"><label for="cli-ai-prompt">${tr("给 AI 的 CLI 提示词", "CLI prompt for AI")}</label><textarea id="cli-ai-prompt" readonly spellcheck="false" rows="12">${esc(prompt)}</textarea></div><p class="caption">${tr("包含授权链接时请私下交付，不要公开发布。", "Share authorization prompts privately; do not publish them.")}</p>`;
+  host.innerHTML = `<div class="field"><label for="cli-ai-prompt">${tr("给 AI 的 CLI 提示词", "CLI prompt for AI")}</label><textarea id="cli-ai-prompt" readonly spellcheck="false" rows="12">${esc(prompt)}</textarea></div><p class="caption">${options.owner ? tr("不含授权凭证。首次登录须由商家核对设备，再用 Passkey 明确批准全店管理权限。", "No credentials are included. The merchant must review the device and explicitly approve full shop access with a Passkey at first login.") : tr("包含授权链接时请私下交付，不要公开发布。", "Share authorization prompts privately; do not publish them.")}</p>`;
   const input = $("#cli-ai-prompt");
   const copied = await writeClipboard(prompt);
   if (!isCurrent()) return;
@@ -1423,12 +1438,27 @@ async function renderSessions() {
   const pathname = location.pathname;
   const active = () => generation === queueLoadId && role === viewRole && tab === "sessions" && location.pathname === pathname;
   const prefix = role === "admin" ? "/admin" : "/manage";
-  const [sessions, entries, devices] = await Promise.all([api(prefix + "/sessions"), api(prefix + "/audit?limit=200"), api(prefix + "/cli-devices")]);
+  const [sessions, entries, devices, ownerDevices] = await Promise.all([
+    api(prefix + "/sessions"), api(prefix + "/audit?limit=200"), api(prefix + "/cli-devices"),
+    viewRole === "admin" ? api("/admin/cli-owner-devices") : Promise.resolve([]),
+  ]);
   if (!active()) return;
   const date = (value) => value ? new Date(value * 1000).toLocaleString() : "—";
-  const deviceMarkup = `<h2 class="form-divider">CLI 设备</h2><p class="caption">撤销设备会结束它的 CLI 会话，并阻止它再次申请会话；浏览器会话不受影响。已用绑定次数不会退还。</p>${devices.length ? `<div class="table-wrap"><table><thead><tr><th>设备 / 指纹</th><th>商品 / 管理链接</th><th>绑定 / 最近使用</th><th>状态</th><th></th></tr></thead><tbody>${devices.map((device) => `<tr><td>${esc(device.client_name || "未命名 CLI 设备")}<p class="caption mono">${esc(device.fingerprint || "—")}</p><p class="caption mono">${esc(device.id)}</p></td><td>${esc(device.product_name || device.product_id)}<p class="caption">${esc(device.link_name || "商品管理链接")}</p></td><td>${date(device.created)}<p class="caption">${date(device.last_seen)}</p></td><td>${device.revoked ? "已撤销" : device.active ? "有效" : "授权已失效"}</td><td>${!device.revoked ? `<button class="danger" data-revoke-device="${esc(device.id)}">撤销设备</button>` : ""}</td></tr>`).join("")}</tbody></table></div>` : '<p class="caption">暂无 CLI 设备。</p>'}`;
-  $("#workspace").innerHTML = `<div class="section-head"><div><h2>会话管理</h2><p class="caption">${role === "admin" ? "查看全店会话，按需注销单个设备。" : permitted("links.delegate") ? "查看自己的会话和下级链接的会话，只限授权商品。" : "查看与注销自己的会话。"} 链接次数耗尽不会结束已有会话。</p></div><button id="sessions-refresh" class="secondary">刷新</button></div><div class="table-wrap"><table><thead><tr><th>登录来源</th><th>设备 / 地址</th><th>登录 / 最近活动</th><th>到期</th><th>状态</th><th></th></tr></thead><tbody>${sessions.map((session) => `<tr><td>${esc(session.link_name || (session.role === "admin" ? "商家 Passkey" : session.role === "bootstrap" ? "首次登录" : "商品管理链接"))}${session.product_name ? `<p class="caption">${esc(session.product_name)}</p>` : ""}<p class="caption">${session.channel === "cli" ? "CLI" : "浏览器"}${session.client_name ? " · " + esc(session.client_name) : ""}</p>${session.current ? '<p class="caption">当前会话</p>' : ""}</td><td class="session-client">${esc(session.ua || "未记录设备")}<p class="caption mono">${esc(session.ip || "—")}</p>${session.device_id ? `<p class="caption mono">设备 ${esc(session.device_id)}</p>` : ""}${session.fingerprint ? `<p class="caption mono">${esc(session.fingerprint)}</p>` : ""}</td><td>${date(session.created)}<p class="caption">${date(session.last_seen)}</p></td><td>${date(session.expires)}</td><td>${session.revoked ? "已注销" : session.active ? "有效" : "已到期"}</td><td>${session.active ? `<button class="danger" data-end-session="${esc(session.id)}">${session.current ? "退出此会话" : "注销"}</button>` : ""}</td></tr>`).join("")}</tbody></table></div>${deviceMarkup}<h2 class="form-divider">访问审计</h2><p class="caption">最近 200 条登录、链接使用、委派和注销记录。记录中不包含卡密或授权凭证。</p><div class="table-wrap"><table><thead><tr><th>时间</th><th>操作</th><th>操作者</th><th>目标</th></tr></thead><tbody>${entries.map((entry) => `<tr><td>${date(entry.created)}</td><td>${esc(entry.action)}${entry.channel ? `<p class="caption">${entry.channel === "cli" ? "CLI" : "浏览器"}${entry.client_name ? " · " + esc(entry.client_name) : ""}</p>` : ""}${entry.fingerprint ? `<p class="caption mono">${esc(entry.fingerprint)}</p>` : ""}</td><td class="mono">${esc(entry.actor)}</td><td class="mono">${esc(entry.target)}</td></tr>`).join("")}</tbody></table></div><div id="error" class="error" role="alert"></div>`;
+  const ownerDeviceMarkup = viewRole === "admin" ? `<h2 class="form-divider">${tr("商家 CLI 设备 · 全店管理", "Merchant CLI devices · full shop access")}</h2><p class="caption">${tr("首次授权须核对设备码与指纹，再用 Passkey 批准。此类设备拥有完整商家权限，与商品管理链接相互独立。撤销会结束该设备的全部 CLI 会话，阻止续期；浏览器会话不受影响。", "First authorization requires a device-code and fingerprint review followed by Passkey approval. These devices have full merchant access, independent of product links. Revoking one ends its CLI sessions and prevents renewal; browser sessions are unaffected.")}</p>${ownerDevices.length ? `<div class="table-wrap"><table><thead><tr><th>${tr("设备 / 指纹", "Device / fingerprint")}</th><th>${tr("权限 / 到期", "Scope / expiry")}</th><th>${tr("授权 / 最近使用", "Authorized / last used")}</th><th>${tr("状态", "Status")}</th><th></th></tr></thead><tbody>${ownerDevices.map((device) => `<tr><td>${esc(device.client_name || tr("未命名商家 CLI 设备", "Unnamed merchant CLI device"))}<p class="caption mono">${esc(device.fingerprint || "—")}</p><p class="caption mono">${esc(device.id)}</p></td><td>${tr("完整商家管理权限", "Full merchant management")}<p class="caption">${date(device.expires)}</p></td><td>${date(device.created)}<p class="caption">${date(device.last_seen)}</p></td><td>${device.revoked ? tr("已撤销", "Revoked") : device.active ? tr("有效", "Active") : tr("已到期", "Expired")}</td><td>${!device.revoked ? `<button class="danger" data-revoke-owner-device="${esc(device.id)}">${tr("撤销商家设备", "Revoke merchant device")}</button>` : ""}</td></tr>`).join("")}</tbody></table></div>` : `<p class="caption">${tr("暂无商家 CLI 设备。", "No merchant CLI devices yet.")}</p>`}` : "";
+  const deviceMarkup = `<h2 class="form-divider">商品 CLI 设备 · 按商品授权</h2><p class="caption">撤销设备会结束它的 CLI 会话，并阻止它再次申请会话；浏览器会话不受影响。已用绑定次数不会退还。</p>${devices.length ? `<div class="table-wrap"><table><thead><tr><th>设备 / 指纹</th><th>商品 / 管理链接</th><th>绑定 / 最近使用</th><th>状态</th><th></th></tr></thead><tbody>${devices.map((device) => `<tr><td>${esc(device.client_name || "未命名 CLI 设备")}<p class="caption mono">${esc(device.fingerprint || "—")}</p><p class="caption mono">${esc(device.id)}</p></td><td>${esc(device.product_name || device.product_id)}<p class="caption">${esc(device.link_name || "商品管理链接")}</p></td><td>${date(device.created)}<p class="caption">${date(device.last_seen)}</p></td><td>${device.revoked ? "已撤销" : device.active ? "有效" : "授权已失效"}</td><td>${!device.revoked ? `<button class="danger" data-revoke-device="${esc(device.id)}">撤销设备</button>` : ""}</td></tr>`).join("")}</tbody></table></div>` : '<p class="caption">暂无 CLI 设备。</p>'}`;
+  $("#workspace").innerHTML = `<div class="section-head"><div><h2>会话管理</h2><p class="caption">${role === "admin" ? "查看全店会话，按需注销单个设备。" : permitted("links.delegate") ? "查看自己的会话和下级链接的会话，只限授权商品。" : "查看与注销自己的会话。"} 链接次数耗尽不会结束已有会话。</p></div><div class="actions">${viewRole === "admin" ? `<button id="copy-owner-ai" class="secondary">${tr("复制给 AI 的完整管理提示词", "Copy full management prompt for AI")}</button>` : ""}<button id="sessions-refresh" class="secondary">刷新</button></div></div>${viewRole === "admin" ? '<div id="owner-ai-prompt"></div>' : ""}<div class="table-wrap"><table><thead><tr><th>登录来源</th><th>设备 / 地址</th><th>登录 / 最近活动</th><th>到期</th><th>状态</th><th></th></tr></thead><tbody>${sessions.map((session) => `<tr><td>${esc(session.link_name || (session.role === "admin" ? (session.channel === "cli" ? "商家 CLI · 全店管理" : "商家 Passkey") : session.role === "bootstrap" ? "首次登录" : "商品管理链接"))}${session.product_name ? `<p class="caption">${esc(session.product_name)}</p>` : ""}<p class="caption">${session.channel === "cli" ? "CLI" : "浏览器"}${session.client_name ? " · " + esc(session.client_name) : ""}</p>${session.current ? '<p class="caption">当前会话</p>' : ""}</td><td class="session-client">${esc(session.ua || "未记录设备")}<p class="caption mono">${esc(session.ip || "—")}</p>${session.device_id ? `<p class="caption mono">设备 ${esc(session.device_id)}</p>` : ""}${session.fingerprint ? `<p class="caption mono">${esc(session.fingerprint)}</p>` : ""}</td><td>${date(session.created)}<p class="caption">${date(session.last_seen)}</p></td><td>${date(session.expires)}</td><td>${session.revoked ? "已注销" : session.active ? "有效" : "已到期"}</td><td>${session.active ? `<button class="danger" data-end-session="${esc(session.id)}">${session.current ? "退出此会话" : "注销"}</button>` : ""}</td></tr>`).join("")}</tbody></table></div>${ownerDeviceMarkup}${deviceMarkup}<h2 class="form-divider">访问审计</h2><p class="caption">最近 200 条登录、链接使用、委派和注销记录。记录中不包含卡密或授权凭证。</p><div class="table-wrap"><table><thead><tr><th>时间</th><th>操作</th><th>操作者</th><th>目标</th></tr></thead><tbody>${entries.map((entry) => `<tr><td>${date(entry.created)}</td><td>${esc(entry.action)}${entry.channel ? `<p class="caption">${entry.channel === "cli" ? "CLI" : "浏览器"}${entry.client_name ? " · " + esc(entry.client_name) : ""}</p>` : ""}${entry.fingerprint ? `<p class="caption mono">${esc(entry.fingerprint)}</p>` : ""}</td><td class="mono">${esc(entry.actor)}</td><td class="mono">${esc(entry.target)}</td></tr>`).join("")}</tbody></table></div><div id="error" class="error" role="alert"></div>`;
   on("#sessions-refresh", renderSessions);
+  if (viewRole === "admin") on("#copy-owner-ai", async () => {
+    if (active()) await copyCLIPrompt({ owner: true, origin: location.origin }, $("#owner-ai-prompt"), active);
+  });
+  document.querySelectorAll("[data-revoke-owner-device]").forEach((button) => button.addEventListener("click", () => perform(async () => {
+    if (!active() || viewRole !== "admin") return;
+    const device = ownerDevices.find((item) => item.id === button.dataset.revokeOwnerDevice);
+    if (!device || device.revoked) return;
+    if (!confirm(tr("撤销这个拥有全店管理权限的商家 CLI 设备，并结束它的全部 CLI 会话？再次使用须重新通过 Passkey 授权。", "Revoke this full-access merchant CLI device and end all its CLI sessions? Passkey approval will be required to use it again."))) return;
+    await api("/admin/cli-owner-devices/" + encodeURIComponent(device.id), undefined, "DELETE");
+    if (active()) await renderSessions();
+  }, button)));
   document.querySelectorAll("[data-revoke-device]").forEach((button) => button.addEventListener("click", () => perform(async () => {
     if (!active()) return;
     const device = devices.find((item) => item.id === button.dataset.revokeDevice);
@@ -1471,12 +1501,16 @@ async function renderSecurity() {
 }
 async function staff() {
   stopPoll();
+  const generation = queueLoadId;
+  const active = () => generation === queueLoadId && location.pathname === "/staff";
   if (location.hash) {
     const value = location.hash.slice(1);
     history.replaceState({}, "", "/staff");
     await api("/staff/login", { token: value });
+    if (!active()) return;
   }
   const a = await api("/auth/status");
+  if (!active()) return;
   if (a.role !== "staff") {
     app.innerHTML =
       '<div class="narrow"><h1>商品管理链接已失效</h1><p>请通过有效的商品管理链接进入。</p></div>';
@@ -1488,19 +1522,42 @@ async function staff() {
   await renderTab();
 }
 async function start() {
+  ownerCliApproval?.dispose();
+  ownerCliApproval = null;
   receiptGeneration++;
   receiptMotion?.dispose();
   window.ExtoreMotion?.disposeHome?.(app);
   receiptMotion = null;
   receiptViewKey = "";
   queueLoadId++;
+  const generation = ++routeLoadId;
+  const pathname = location.pathname;
+  const hash = location.hash;
+  const active = () => generation === routeLoadId && location.pathname === pathname && location.hash === hash;
   window.ExtoreMotion?.cancel(app);
   window.ExtoreMotion?.mountHome?.(app)?.dispose();
   stopPoll();
+  syncPreferenceControls();
   app.innerHTML =
     '<div class="loading">' + tr("正在加载…", "Loading…") + "</div>";
   try {
-    acceptAuth(await api("/auth/status"));
+    if (pathname === "/cli/owner") {
+      acceptAuth({ role: null });
+      currentToken = "";
+      currentBatch = null;
+      batchSelection = "";
+      batchRetryOnly = false;
+      currentProduct = null;
+      currentJob = null;
+      currentVariant = null;
+      queueProduct = null;
+      $("#header-context").textContent = tr("商家 CLI 授权", "Merchant CLI approval");
+      ownerCliApproval = window.ExtoreOwnerCli.mount({ root: app, requestId: hash.slice(1), api, language: () => lang });
+      return;
+    }
+    const auth = await api("/auth/status");
+    if (!active()) return;
+    acceptAuth(auth);
     if (location.pathname === "/admin") await admin();
     else if (location.pathname === "/staff") await staff();
     else if (location.pathname === "/receipt") {
@@ -1516,10 +1573,11 @@ async function start() {
       await readReceipt();
     } else await home();
   } catch (e) {
+    if (!active()) return;
     app.innerHTML = `<div class="narrow"><h1>${tr("暂时无法打开", "Unable to open")}</h1><p>${esc(e.message)}</p><button id="back" class="full">${tr("返回兑换页", "Back to redemption")}</button></div>`;
     on("#back", () => navigate("/"));
   } finally {
-    window.ExtoreWebMCP?.refresh();
+    if (active()) window.ExtoreWebMCP?.refresh();
   }
 }
 window.ExtoreWebMCP?.configure({
@@ -1531,6 +1589,7 @@ window.ExtoreWebMCP?.configure({
         "/receipt": "receipt",
         "/admin": "admin",
         "/staff": "staff",
+        "/cli/owner": "owner_cli",
       }[location.pathname] || "home",
     role,
     product: currentProduct,

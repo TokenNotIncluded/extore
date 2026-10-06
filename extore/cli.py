@@ -75,10 +75,22 @@ def main(argv=None):
         if command == "serve":
             subparser.add_argument("--host", type=host_name, default="127.0.0.1")
             subparser.add_argument("--port", type=port_number, default=8000)
+    from .customer_cli import add_parser as add_customer_parser
     from .manage_client import add_parser as add_manage_parser
+    from .owner_client import add_parser as add_owner_parser
 
     add_version(add_manage_parser(commands))
+    add_version(add_customer_parser(commands))
+    add_version(add_owner_parser(commands))
     args = parser.parse_args(argv)
+    if args.command == "customer":
+        from .customer_cli import run as customer_main
+
+        return customer_main(args)
+    if args.command == "admin":
+        from .owner_client import run as owner_main
+
+        return owner_main(args)
     if args.command == "manage":
         from .manage_client import main as manage_main
 

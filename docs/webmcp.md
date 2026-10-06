@@ -2,6 +2,8 @@
 
 Extore 把顾客兑换、领取和商家日常处理操作注册成浏览器原生工具。工具调用沿用页面的 API、Cookie 会话和服务端权限；没有独立管理员凭证，也不增加远程 MCP 服务端。
 
+命令行接入使用独立的[商品管理、顾客和店主 CLI](cli.md)，浏览器原生工具仍为下文的 49 个。店主 CLI 首次设备批准必须通过正常页面和真实 Passkey，原生工具不代办 WebAuthn；后续设备续签与操作签名由 CLI 完成。商品管理的短期 CLI 票据也只能由已登录浏览器生成，CLI Bearer 不能生成新的绑定票据。
+
 实现位于 [`extore/static/webmcp.js`](../extore/static/webmcp.js)，通过 `window.ExtoreWebMCP` 与页面连接。没有 WebMCP 的浏览器继续使用普通界面，不安装 polyfill，不伪造 `document.modelContext` 或 `navigator.modelContext`。
 
 ## 浏览器兼容性

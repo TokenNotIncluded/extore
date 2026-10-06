@@ -40,7 +40,7 @@ Extore 接手支付之后的兑换与交付：验证卡密，将顾客带到对�
 | 灵活交付 | 链接、文本、账户信息或文件，也可只返回服务状态。支持一次领取、重复查看、失败重试、退回补充、附原因的拒绝，以及顾客主动销毁内容。 |
 | 权限与认证 | 商家后台支持多个 Passkey。商品管理链接默认支持 1 次浏览器登录和 1 个 CLI 设备绑定，按权限授权、向下委派，并记录设备、会话与操作审计。 |
 | 自动化与二次开发 | 官方开源预设处理器、Python SDK、签名事件与回调；原生定义 **49 个 WebMCP 工具**，按页面、身份与权限动态提供。 |
-| 命令行管理 | `extore manage` 绑定设备，处理任务与附件；可在客户端聚合多个商品队列，每个授权范围保持独立。支持复制机器人接入提示词。 |
+| 命令行操作 | `manage` 管理商品授权，`customer` 兑换与领取，`admin` 用 Passkey 批准的设备管理全店；默认精简输出，凭证保存到私密文件，提供可复制 AI 提示词。 |
 | 界面与存储 | SQLite 持久化任务、事件和投递重试；撕纸与分段虚线界面，灰黑暗色主题、中英文语言，默认跟随系统与浏览器。 |
 
 顾客上传的是兑换材料，管理者上传的是交付文件。官方处理器来自审核后固定版本的[开源子模块](https://github.com/TokenNotIncluded/extore-processors)，商家在预设中选择并填写配置。浏览器 AI 需要原生 WebMCP 支持及实际授权，具体兼容性见[工具文档](https://github.com/TokenNotIncluded/extore/blob/main/docs/webmcp.md#浏览器兼容性)。
@@ -101,17 +101,25 @@ uv run extore worker
 
 </details>
 
-## 命令行处理商品队列
+## 命令行与 AI 接入
 
-安装后执行 `extore manage login`，在隐藏输入中粘贴完整商品管理链接；也可用 `--link-stdin` 从标准输入接收。客户端保存设备密钥，8 小时会话到期后通过设备签名续签，直到授权过期或撤销。商家可复制一段机器人接入提示词，其中的 CLI 专用票据有效 5 分钟，用于首次绑定。
+完整 CLI 要求 **0.6.0 及以上**；也可在该版本源码目录用 `uv run extore …` 执行。安装与完整操作见 [CLI 指南](https://github.com/TokenNotIncluded/extore/blob/main/docs/cli.md)。
 
 ```sh
-extore manage products
+# 单商品授权：登录时隐藏输入完整管理链接
+extore manage login
 extore manage queues --all
-extore manage jobs --product PRODUCT_ID
+
+# 顾客：卡密从私密文件标准输入读取
+extore customer exchange --origin https://extore.example.com --codes-stdin < /path/to/private-codes.txt
+
+# 店主：首次在浏览器用真实 Passkey 批准此设备
+extore admin login --origin https://extore.example.com
 ```
 
-多个商品来自各自独立授权，聚合发生在客户端，任何写操作仍明确选择单个商品。完整命令与权限说明见[CLI 文档](https://github.com/TokenNotIncluded/extore/blob/main/docs/cli.md)。CLI 提供管理操作，运行持续处理机器人由接入方安排。
+商品授权可以在客户端聚合查看，每次写入仍使用一个独立授权。店主设备授权最多 30 天，8 小时会话由本机私钥续签；后续 JSON 写操作另用一次性设备签名。列表默认摘要，任务详情和教程按需读取，制卡与新授权链接保存为 0600 文件。
+
+网页可复制带 5 分钟 CLI 绑定票据的商品机器人接入提示词；[文档里的提示词](https://github.com/TokenNotIncluded/extore/blob/main/docs/ai-prompts.md)也可直接复制，配合已授权的 CLI 使用。上传只保存材料，提交或交付需明确执行下一步；持续运行机器人由接入方安排。
 
 ## 文档
 
@@ -119,7 +127,9 @@ extore manage jobs --product PRODUCT_ID
 | --- | --- |
 | [快速入门与运行指南](https://github.com/TokenNotIncluded/extore/blob/main/docs/getting-started.md) | 本地运行、管理权限、认证恢复、生产配置、Docker 与 Arch Linux 部署 |
 | [接口与事件协议](https://github.com/TokenNotIncluded/extore/blob/main/docs/protocol.md) | 商品、SKU、卡密、队列、附件、完整事件定义与签名回调 |
-| [远程管理 CLI](https://github.com/TokenNotIncluded/extore/blob/main/docs/cli.md) | 私密登录、设备续签、多商品队列、任务审核与文件操作 |
+| [CLI 指南](https://github.com/TokenNotIncluded/extore/blob/main/docs/cli.md) | 商品完整管理、卡密、授权、队列与私密输出 |
+| [顾客 CLI](https://github.com/TokenNotIncluded/extore/blob/main/docs/cli-customer.md) · [店主 CLI](https://github.com/TokenNotIncluded/extore/blob/main/docs/cli-owner.md) | 批量兑换、材料与交付；Passkey 设备批准和全店操作 |
+| [可复制 AI 提示词](https://github.com/TokenNotIncluded/extore/blob/main/docs/ai-prompts.md) | 商品处理、店主运营与顾客领取的操作模板 |
 | [原生 WebMCP](https://github.com/TokenNotIncluded/extore/blob/main/docs/webmcp.md) | 49 个工具、浏览器支持、权限范围与确认要求 |
 | [Python SDK](https://github.com/TokenNotIncluded/extore/blob/main/docs/python-sdk.md) | 官方处理器协议、任务结果、外部验签与回调示例 |
 | [验收记录](https://github.com/TokenNotIncluded/extore/blob/main/docs/acceptance.md) | 已记录的验证结果、对接边界与限制 |

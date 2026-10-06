@@ -299,15 +299,15 @@ Content-Type: application/json
 
 未绑定草稿默认 24 小时到期，由 worker 分轮清理；当前处理中尝试的输出草稿与已经绑定的附件不会因年龄被删。每 60 秒维护一轮，最多清理 100 条、20 MiB，并在清理事务后以 100 毫秒等待尝试截断 WAL；活跃读者或锁冲突时下轮重试。删除释放逻辑额度，SQLite BLOB 所在页可复用，数据库文件本身不自动缩小。
 
-`reveal` 只释放本次结果实际引用的输出附件，返回文件描述（含 `id,field_key,filename,content_type,size` 等）。顾客下载还必须提交有效兑换凭证；文件 ID 本身没有下载权限。凭证只放在 POST JSON 或 multipart 请求体，不能拼成 GET 下载链接或 URL 查询参数。管理者 GET 下载依赖其 HttpOnly 会话，不使用顾客凭证。
+`reveal` 只释放本次结果实际引用的输出附件，返回文件描述（含 `id,field_key,filename,content_type,size` 等）。顾客下载还必须提交有效兑换凭证；文件 ID 本身没有下载权限。凭证只放在 POST JSON 或 multipart 请求体，不能拼成 GET 下载链接或 URL 查询参数。管理者 GET 下载依赖其浏览器会话或 CLI Bearer，不使用顾客凭证。
 
 `repeat` 允许重复下载；`once` 的每个文件第一次下载在事务内清除文件内容，第二次返回 410，多文件各有独立的一次额度。应先保存 `reveal` 返回的文件 ID，再逐个下载；再次 `reveal` 不能恢复已消费的结果或附件。销毁删除该卡密全部附件，包括顾客上传的输入。下载按附件返回，不以内联网页方式渲染上传内容。
 
 ## 商家接口
 
-商家完整接口可在 `/docs` 查看。认证 Cookie HttpOnly、SameSite=Strict、生产 Secure；写操作校验 Origin。
+商家完整接口可在 `/docs` 查看。浏览器认证 Cookie HttpOnly、SameSite=Strict、生产 Secure，写操作校验 Origin；店主 CLI 使用下文的设备授权与写操作签名。
 
-商家可创建与维护商品、批量制卡、撤销未兑换卡密、维护商品管理链接、查看与重投事件，以及管理多个 Passkey。第一次注册 Passkey 后密码登录禁用；添加或移除 Passkey 需要最近 10 分钟内登录，最后一个 Passkey 不能从网页删除。全部遗失时通过 SSH 的 `reset-auth` 命令恢复。
+商家可创建与维护商品、批量制卡、撤销未兑换卡密、维护商品管理链接、查看与重投事件，以及管理多个 Passkey。第一次注册 Passkey 后密码登录禁用；浏览器添加或移除 Passkey 需要最近 10 分钟内登录，店主 CLI 使用新的设备签名。任何入口都不能删除最后一个 Passkey；全部遗失时通过 SSH 的 `reset-auth` 命令恢复。
 
 `GET /api/admin/product-templates` 返回队列内容交付与队列服务模板。`POST /api/admin/products/quick` 接受 `{template_id,name?,from_product_id?}`：`template_id` 为 `manual_content`、`manual_service` 或 `existing_product`，复制已有商品时必须提供 `from_product_id`。响应 `{product,management_link}` 创建非公开商品及有效 7 天的配置链接，权限仅为 `product.edit` 与 `fulfillment.configure`，可交给 AI 或其他配置管理者。复制商品会更换签名密钥并移除原处理器秘密配置，不复制源商品的发货凭证。
 
@@ -390,9 +390,11 @@ Content-Type: application/json
 
 商家 `POST /api/admin/cards` 同样返回 `{codes,batch_id}`，用于定位本次发行的批次；支付平台制卡接口保持 `{codes}` 响应。
 
+`GET /api/manage/products?compact=true` 与 `GET /api/admin/products?compact=true` 只返回商品摘要、精简规格及字段数量，不返回长描述、教程或表单结构。CLI 默认使用摘要，单商品详情通过 `/api/manage/product?product_id=…` 读取。HTTP 的 `PUT /api/manage/product` 接收完整配置；CLI 的 `product update` 先读取原配置，再按顶层字段合并修改，保留未提供配置。
+
 ## CLI 设备授权
 
-CLI 使用 Ed25519 设备密钥，与浏览器 Cookie 会话分开。一个设备授权仍只有一个商品管理链接的权限；多个商品的聚合只在客户端完成。安装和命令用法见 [CLI 文档](cli.md)。
+商品管理 CLI 使用 Ed25519 设备密钥，与浏览器 Cookie 会话分开。一个设备授权仍只有一个商品管理链接的权限；多个商品的聚合只在客户端完成。安装和命令用法见 [CLI 文档](cli.md)。全店授权使用后文独立的店主流程。
 
 | 接口 | 认证与请求 | 结果 |
 | --- | --- | --- |
@@ -401,8 +403,8 @@ CLI 使用 Ed25519 设备密钥，与浏览器 Cookie 会话分开。一个设�
 | `POST /api/cli/session` | 无 Cookie / Bearer；`{device_id,challenge_id,signature}` | `access_token,token_type,expires,expires_in,device_id,session_id,product_id,permissions` |
 | `GET /api/cli/status` | CLI Bearer | 当前商品、链接、设备、会话与独立额度元数据，不返回凭据 |
 | `DELETE /api/cli/session` | CLI Bearer | 退出当前会话，保留设备授权 |
-| `POST /api/manage/cli-ticket` | 商家或商品管理会话；`{staff_id?}` | `token,origin,expires,expires_in,staff_id,product_id`，用于短期 CLI 绑定 |
-| `GET /api/admin/cli-devices` | 商家会话 | 全店设备安全元数据 |
+| `POST /api/manage/cli-ticket` | 商家或商品管理的浏览器会话；`{staff_id?}`，CLI Bearer 不允许 | `token,origin,expires,expires_in,staff_id,product_id`，用于短期 CLI 绑定 |
+| `GET /api/admin/cli-devices` | 商家会话 | 全店商品管理 CLI 设备安全元数据 |
 | `GET /api/manage/cli-devices` | 商品管理会话 | 自己及有权管理的下级设备 |
 | `DELETE /api/admin/cli-devices/{id}` | 商家会话 | 撤销设备及其 CLI 会话 |
 | `DELETE /api/manage/cli-devices/{id}` | 商品管理会话，服务端限定链接范围 | 撤销有权管理的设备及其会话 |
@@ -428,17 +430,112 @@ challenge_id
 challenge
 ```
 
-挑战只可成功消费一次。Bearer 有效期为 8 小时与链接及祖先剩余有效期的较短者；每次请求重新检查设备、链接、祖先和权限。可用设备通过新挑战续签，不再次消耗管理链接额度。CLI Bearer 用于 `/api/cli/status`、退出及获授权的 `/api/manage/*` 操作，不授予全店 `/api/admin/*` 权限，也不混用浏览器 Cookie。
+挑战只可成功消费一次。Bearer 有效期为 8 小时与链接及祖先剩余有效期的较短者；每次请求重新检查设备、链接、祖先和权限。可用设备通过新挑战续签，不再次消耗管理链接额度。商品管理 CLI Bearer 用于 `/api/cli/status`、退出及获授权的 `/api/manage/*` 操作，不授予全店 `/api/admin/*` 权限，也不混用浏览器 Cookie。
 
-CLI 专用票据最多有效 5 分钟，不能超过授权剩余期限。商家生成时指定目标 `staff_id`；商品管理会话只能为自己的链接生成，不能借此给其他链接授权。票据首次绑定消耗 CLI 额度，不消费浏览器额度；只能绑定一个公钥，已绑定公钥的重复请求可在有效期内恢复响应。票据不能用于 `POST /api/staff/login`。网页把该票据与操作范围组成机器人接入提示词，只在明确生成时显示，不提供历史明文查询。
+CLI 专用票据最多有效 5 分钟，不能超过授权剩余期限。只有已登录浏览器可生成，CLI Bearer 返回 403。商家生成时指定目标 `staff_id`；商品管理会话只能为自己的链接生成，不能借此给其他链接授权。票据首次绑定消耗 CLI 额度，不消费浏览器额度；只能绑定一个公钥，已绑定公钥的重复请求可在有效期内恢复响应。票据不能用于 `POST /api/staff/login`。网页把该票据与操作范围组成机器人接入提示词，只在明确生成时显示，不提供历史明文查询。
 
 设备列表包含不透明 ID、链接/商品名称及 ID、设备名称、公钥指纹、创建/最近活动、撤销与有效标记；不返回私钥、票据或 Bearer。设备撤销同时结束该设备会话；链接及祖先撤销或过期会阻止设备访问和续签。单纯退出或撤销一条会话不等于撤销设备授权。
 
-### 登录会话与审计
+## 店主 CLI 设备授权
+
+店主 CLI 具有 `role="admin"`、`scope="shop.owner"` 的全店权限。首次设备绑定必须在浏览器通过已经注册的 Passkey 完成本次用户验证，不能用首次密码、现有登录 Cookie、商品管理链接或 Bearer 替代。设备公钥、名称、指纹、全店范围及期限绑定到不可变的批准记录。命令见[店主 CLI](cli-owner.md)。
+
+| 接口 | 认证与请求 | 结果 |
+| --- | --- | --- |
+| `POST /api/cli/owner/request` | 无 Cookie / Bearer；`{public_key,client_name,nonce,signature}` | `request_id,device_code,approval_url,challenge,expires,expires_in,interval,fingerprint`；请求有效 10 分钟，建议每 5 秒查询 |
+| `POST /api/cli/owner/status` | 无 Cookie / Bearer；`{request_id,public_key,signature}` | `status,expires`；status 为 pending / approved / denied / expired |
+| `POST /api/auth/cli-owner/options` | 浏览器；`{request_id,device_code}`，不能携带 Authorization | WebAuthn `options`、设备与范围元数据，并设置短期批准 Cookie |
+| `POST /api/auth/cli-owner/verify` | 浏览器批准 Cookie；`{request_id,credential}`，不能携带 Authorization | 真实已注册 Passkey 的 UV 验证成功后返回 `{ok:true,status:"approved"}` |
+| `POST /api/cli/owner/claim` | 无 Cookie / Bearer；`{request_id,public_key,signature}` | `device_id,role,scope,client_name,fingerprint,expires,already_authorized` |
+| `POST /api/cli/owner/challenge` | 无 Cookie / Bearer；`{device_id}` | `challenge_id,challenge,expires,expires_in`，最多 5 分钟 |
+| `POST /api/cli/owner/session` | 无 Cookie / Bearer；`{device_id,challenge_id,signature}` | `access_token,token_type,role,scope,expires,expires_in,device_id,session_id` |
+| `GET /api/cli/owner/status` | 店主 CLI Bearer | `role,channel,scope,origin,device_id,client_name,fingerprint,session_id,expires,grant_expires` |
+| `DELETE /api/cli/owner/session` | 店主 CLI Bearer + 新操作签名 | 只结束当前会话，保留设备 |
+| `POST /api/cli/owner/action-challenge` | 店主 CLI Bearer；`{method,path,body_sha256}` | 单次写操作的 `challenge_id,challenge,expires,expires_in` |
+| `GET /api/admin/cli-owner-devices` | 商家浏览器或店主 CLI | 店主设备安全元数据；与商品管理设备分开 |
+| `DELETE /api/admin/cli-owner-devices/{id}` | 商家浏览器或带新操作签名的店主 CLI | 撤销设备及全部会话，返回 `ok,id,revoked_sessions` |
+
+公钥与签名编码沿用前节。`nonce` 是 32 字节随机数的无填充 base64url；`client_name` 为 1–100 字符，不含控制字符或首尾空白。`approval_url` 为 `/cli/owner#<request_id>`，片段不是授权凭证，打开页面后仍须输入设备码并用 Passkey 批准。批准挑战最多有效 5 分钟，且受 10 分钟请求期限约束。
+
+下面的签名文本使用 UTF-8，以单个换行连接字段，末尾无换行；`EXTORE_ORIGIN` 必须与服务器配置完全一致。
+
+<details>
+<summary>设备申请、查询、领取与续签的签名文本</summary>
+
+申请：
+
+```text
+extore-cli-owner-request-v1
+EXTORE_ORIGIN
+public_key
+client_name
+nonce
+```
+
+查询申请状态：
+
+```text
+extore-cli-owner-status-v1
+EXTORE_ORIGIN
+request_id
+public_key
+```
+
+领取已批准设备，challenge 使用最初 request 响应：
+
+```text
+extore-cli-owner-claim-v1
+EXTORE_ORIGIN
+request_id
+challenge
+public_key
+```
+
+续签会话：
+
+```text
+extore-cli-owner-session-v1
+EXTORE_ORIGIN
+device_id
+challenge_id
+challenge
+```
+
+</details>
+
+设备授权最多 30 天，从申请时计算；会话最长 8 小时，不超过设备期限。有效设备通过新的单次挑战续签，无需再次触碰 Passkey。新的设备批准、到期后的重新授权仍需要真实 Passkey。每次请求重新校验设备与会话；撤销设备、SSH 认证重置或全部 Passkey 不再存在时不能继续访问或续签。
+
+### 店主写操作签名
+
+店主 CLI 的 JSON 写请求还需证明持有设备私钥。先向 `action-challenge` 提交 HTTP 方法、原始请求路径及查询、请求体 SHA-256：`method` 为 POST / PUT / PATCH / DELETE，`path` 以 `/api/` 开头，`body_sha256` 是实际发送字节的 64 字符小写十六进制摘要。查询参数顺序、编码和 JSON 空白都属于签名内容；空请求体也计算摘要。
+
+使用 Ed25519 签名下列 UTF-8 文本（末尾无换行），随业务请求发送 `X-Extore-CLI-Challenge: <challenge_id>` 与 `X-Extore-CLI-Signature: <signature>`：
+
+```text
+extore-cli-owner-action-v1
+EXTORE_ORIGIN
+device_id
+session_id
+challenge_id
+challenge
+METHOD
+原始路径?原始查询
+body_sha256
+```
+
+挑战绑定当前设备、会话和完整操作，最多有效 5 分钟，不超过会话或设备期限。服务器在进入业务处理前原子消费；即使业务返回错误，重复请求也必须取得新的挑战并重新签名。`action-challenge` 自身无需额外操作签名。multipart 文件上传沿用 Bearer 与任务权限，只保存草稿；提交交付、标记成功仍是独立的签名写操作。官方 CLI 自动完成这些步骤。
+
+店主 CLI 调用 `POST /api/auth/register/options` 取得真实 WebAuthn 创建选项（顶层附 `challenge_id`）；`POST /api/auth/register/verify` 接受 `{credential,name?,challenge_id}`。两次请求都需要新设备操作签名，注册验证仍要求正确 RP ID / Origin 下的真实 UV 结果，CLI 不能制造认证器。`GET /api/auth/passkeys` 和 `DELETE /api/auth/passkeys/{id}` 支持店主设备，删除需要新操作签名且不能删除最后一个 Passkey。
+
+官方 `admin logout` 使用设备撤销接口，结束该设备全部会话并删除本地密钥；上表的低层 `/cli/owner/session` DELETE 仅退出当前会话。`reset-auth` 会撤销浏览器与两类 CLI 会话、两类设备，清除票据、待批准请求和挑战；商品、卡密和任务保留。
+
+## 登录会话与审计
 
 `GET /api/admin/sessions` 返回全店登录会话；`DELETE /api/admin/sessions/{id}` 撤销指定会话。商品管理链接使用 `/api/manage/sessions` 与 `/api/manage/sessions/{id}`，默认只查看与撤销本链接的会话；有 `links.delegate` 时包含同商品内自己的后代，不包含其他分支或商家会话。
 
-会话字段包括不透明 `id`、角色、`channel`（browser / cli）、`device_id`、`client_name`、商品与链接名称、创建/最后访问/到期时间、`active`、`revoked`、`current`、IP 和 User-Agent，不返回 Cookie、凭证或摘要。撤销最后一个有效链接会话时，其未完成队列任务放回原商品队列并保留已有步骤、文件和参数。`GET /api/admin/audit` 与 `GET /api/manage/audit` 查看对应范围的链接和会话审计，`limit` 为 1–200；记录会话创建、替换、退出、撤销、分渠道链接消费、CLI 票据生成及设备创建/撤销等动作，不记录原始秘密凭证。
+会话字段包括不透明 `id`、角色、`channel`（browser / cli）、`device_id`、`owner_device_id`、`client_name`、公钥 `fingerprint`、商品与链接名称、创建/最后访问/到期时间、`active`、`revoked`、`current`、IP 和 User-Agent。`device_id` 标识对应的商品或店主设备，`owner_device_id` 只在店主 CLI 会话存在。不返回 Cookie、私钥、Bearer 或凭据摘要。撤销最后一个有效链接会话时，其未完成队列任务放回原商品队列并保留已有步骤、文件和参数。
+
+`GET /api/admin/audit` 与 `GET /api/manage/audit` 查看对应范围的链接、设备和会话审计，`limit` 为 1–200。记录会话创建、替换、退出、撤销、分渠道链接消费、CLI 票据生成、设备申请/批准/创建/撤销及店主签名操作等动作。返回 `id,actor,action,target,created`，以及可关联的 `channel,client_name,fingerprint`；找不到关联设备时元数据可为空，不记录原始秘密凭证或完整业务请求。
 
 ## 商品队列
 

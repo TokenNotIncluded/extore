@@ -385,7 +385,8 @@ test("真实首页模板移除切换按钮，纸卡与纵向商品列表可键�
   const context = {
     queueLoadId: 0, receiptMotion: null, receiptViewKey: "old", currentToken: "old",
     currentBatch: {}, batchSelection: "old-card", batchRetryOnly: true,
-    currentProduct: {}, currentVariant: {}, app,
+    currentProduct: {}, currentJob: {}, currentVariant: {}, app,
+    location: { pathname: "/", hash: "" },
     api: async (route) => { assert.equal(route, "/products"); return list; },
     tr: (zh) => zh,
     esc: (value) => String(value).replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;").replaceAll('"', "&quot;"),
@@ -406,6 +407,7 @@ test("真实首页模板移除切换按钮，纸卡与纵向商品列表可键�
   assert.match(app.innerHTML, /<form id="form">/);
   assert.equal(context.currentToken, "");
   assert.equal(context.currentBatch, null);
+  assert.equal(context.currentJob, null);
   assert.equal(context.batchSelection, "");
   assert.equal(context.batchRetryOnly, false);
   assert.equal(controls[0], "#paste-code");

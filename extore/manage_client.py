@@ -584,18 +584,57 @@ class ManageClient:
             self._renew(grant)
             return self._json(grant["origin"], method, path, grant=grant, **kwargs)
 
-    def products(self, *, origin=None, grant_id=None):
+    def products(self, *, origin=None, grant_id=None, detail=False):
         grants, errors = self.grants(origin=origin, grant_id=grant_id)
         products = {}
         for grant in grants:
             try:
-                result = self.request(grant, "GET", "/api/manage/products")
+                result = self.request(
+                    grant,
+                    "GET",
+                    "/api/manage/products",
+                    params={"compact": "false" if detail else "true"},
+                )
                 for product in _objects(result):
                     if product.get("id") != grant["product_id"]:
                         raise ManageError(
                             "The server returned a different product scope",
                             code="invalid_response",
                         )
+                    if not detail:
+                        product = {
+                            **{
+                                key: product[key]
+                                for key in (
+                                    "id",
+                                    "name",
+                                    "mode",
+                                    "delivery",
+                                    "view_policy",
+                                )
+                                if key in product
+                            },
+                            "parameters_count": len(product.get("parameters", []))
+                            if "parameters" in product
+                            else product.get("parameters_count", 0),
+                            "outputs_count": len(product.get("outputs", []))
+                            if "outputs" in product
+                            else product.get("outputs_count", 0),
+                            "variants": [
+                                {
+                                    key: variant[key]
+                                    for key in (
+                                        "id",
+                                        "name",
+                                        "price",
+                                        "currency",
+                                        "enabled",
+                                    )
+                                    if key in variant
+                                }
+                                for variant in product.get("variants", [])
+                            ],
+                        }
                     products[(grant["origin"], product["id"])] = {
                         **product,
                         "origin": grant["origin"],
@@ -842,6 +881,14 @@ def compact_job(job):
         )
         if key in job
     }
+    if isinstance(result.get("variant"), dict):
+        result["variant"] = {
+            key: result["variant"][key]
+            for key in ("id", "name")
+            if key in result["variant"]
+        }
+    result["steps_total"] = len(result.pop("steps", []))
+    result["steps_done"] = len(result.pop("completed_steps", []))
     if "files" not in job:
         return result
     result["files"] = [
@@ -902,6 +949,11 @@ def add_parser(commands):
     )
     products = subcommands.add_parser(
         "products", help="list products authorized by all saved grants"
+    )
+    products.add_argument(
+        "--detail",
+        action="store_true",
+        help="include current input/output schemas and tutorials",
     )
     queues = subcommands.add_parser(
         "queues", help="compact pending queues across all authorized products"
@@ -991,6 +1043,9 @@ def add_parser(commands):
     logout.add_argument(
         "--all", action="store_true", help="remove all saved CLI devices"
     )
+    from .manage_commands import add_commands
+
+    add_commands(subcommands)
     return manage
 
 
@@ -1035,6 +1090,11 @@ def execute(args, *, transport=None):
 
 
 def dispatch(client, args, command, origin):
+    from .manage_commands import COMMANDS
+    from .manage_commands import dispatch as dispatch_management
+
+    if command in COMMANDS:
+        return dispatch_management(client, args, origin)
     grant_id = getattr(args, "grant", None)
     if command == "login":
         if args.link_stdin:
@@ -1047,7 +1107,7 @@ def dispatch(client, args, command, origin):
             )
         return client.login(invitation, args.client_name)
     if command == "products":
-        return client.products(origin=origin, grant_id=grant_id)
+        return client.products(origin=origin, grant_id=grant_id, detail=args.detail)
     if command == "queues":
         return client.queues(
             product=args.product,

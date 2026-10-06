@@ -128,12 +128,6 @@ def session_credential_digest(request):
         parts = authorization.split(" ")
         if len(parts) != 2 or parts[0].lower() != "bearer" or not parts[1]:
             fail("CLI 登录凭证无效", 401)
-        permitted = request.url.path.startswith("/api/manage/") or (
-            (request.method, request.url.path)
-            in (("GET", "/api/cli/status"), ("DELETE", "/api/cli/session"))
-        )
-        if not permitted:
-            fail("此接口不接受 CLI 登录凭证", 401)
         return digest(parts[1]), "cli"
     return digest(cookie), "browser"
 
@@ -141,7 +135,7 @@ def session_credential_digest(request):
 def require_cli_bearer(request):
     if request.headers.get("authorization") is None:
         fail("请使用 CLI 登录凭证", 401)
-    result = session(request, ("staff",))
+    result = session(request, ("staff", "admin"))
     if result["channel"] != "cli":
         fail("CLI 登录凭证无效", 401)
     return result
@@ -157,6 +151,8 @@ def session(request: Request, roles=("admin",)):
         if not row or row["role"] not in roles:
             fail("请先登录", 401)
         result = dict(row)
+        if channel == "cli" and not _cli_route_allowed(request, result["role"]):
+            fail("此接口不接受该 CLI 登录凭证", 401)
         now = time.time()
         if now - result["last_seen"] >= 30:
             c.execute(
@@ -164,11 +160,34 @@ def session(request: Request, roles=("admin",)):
                 (now, row["digest"]),
             )
             result["last_seen"] = now
-        if row["role"] == "staff":
+        if row["role"] == "staff" or channel == "cli":
             authorize_management(c, result)
-        elif channel != "browser":
-            fail("CLI 登录凭证无效", 401)
         return result
+
+
+def _cli_route_allowed(request, role):
+    path, method = request.url.path, request.method
+    if role == "staff":
+        return path.startswith("/api/manage/") or (method, path) in (
+            ("GET", "/api/cli/status"),
+            ("DELETE", "/api/cli/session"),
+        )
+    if role != "admin":
+        return False
+    return (
+        path.startswith(("/api/admin/", "/api/manage/"))
+        or (method, path)
+        in (
+            ("GET", "/api/cli/owner/status"),
+            ("DELETE", "/api/cli/owner/session"),
+            ("POST", "/api/cli/owner/action-challenge"),
+            ("GET", "/api/auth/status"),
+            ("GET", "/api/auth/passkeys"),
+            ("POST", "/api/auth/register/options"),
+            ("POST", "/api/auth/register/verify"),
+        )
+        or (method == "DELETE" and path.startswith("/api/auth/passkeys/"))
+    )
 
 
 def _staff_permissions(value):
@@ -240,7 +259,7 @@ def authorize_management(c, s, permission=None):
     from .models import LINK_PERMISSIONS
 
     current = c.execute(
-        "SELECT role,staff_id,channel,device_id FROM sessions WHERE digest=? AND revoked=0 AND expires>?",
+        "SELECT role,staff_id,channel,device_id,owner_device_id FROM sessions WHERE digest=? AND revoked=0 AND expires>?",
         (s.get("digest", ""), time.time()),
     ).fetchone()
     if (
@@ -249,19 +268,40 @@ def authorize_management(c, s, permission=None):
         or current["staff_id"] != s.get("staff_id")
         or current["channel"] != s.get("channel", "browser")
         or current["device_id"] != s.get("device_id")
+        or current["owner_device_id"] != s.get("owner_device_id")
     ):
         fail("请先登录", 401)
     if current["channel"] == "cli":
-        device = c.execute(
-            "SELECT * FROM cli_devices WHERE id=? AND staff_id=? AND revoked=0",
-            (current["device_id"], current["staff_id"]),
-        ).fetchone()
-        if device is None or s["role"] != "staff":
-            fail("CLI 设备授权已失效", 401)
+        if s["role"] == "admin":
+            from .owner_cli_auth import owner_device
+
+            if (
+                current["staff_id"] is not None
+                or current["device_id"] is not None
+                or not current["owner_device_id"]
+            ):
+                fail("商家 CLI 登录凭证无效", 401)
+            device = owner_device(c, current["owner_device_id"])
+            s.update(
+                scope="shop.owner",
+                fingerprint=device["fingerprint"],
+                grant_expires=device["expires"],
+            )
+            device_table = "owner_cli_devices"
+        elif s["role"] == "staff" and current["owner_device_id"] is None:
+            device = c.execute(
+                "SELECT * FROM cli_devices WHERE id=? AND staff_id=? AND revoked=0",
+                (current["device_id"], current["staff_id"]),
+            ).fetchone()
+            device_table = "cli_devices"
+            if device is None:
+                fail("CLI 设备授权已失效", 401)
+        else:
+            fail("CLI 登录凭证无效", 401)
         s["client_name"] = device["client_name"]
         if time.time() - device["last_seen"] >= 30:
             c.execute(
-                "UPDATE cli_devices SET last_seen=? WHERE id=?",
+                f"UPDATE {device_table} SET last_seen=? WHERE id=?",
                 (time.time(), device["id"]),
             )
     if s["role"] == "admin":

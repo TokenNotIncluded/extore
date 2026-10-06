@@ -20,6 +20,9 @@ COMMANDS = (
     "demo",
     "serve",
     "worker",
+    "manage",
+    "customer",
+    "admin",
 )
 
 
@@ -79,7 +82,15 @@ def test_invalid_arguments_exit_before_initialization(arguments, monkeypatch):
 
 
 @pytest.mark.parametrize(
-    "arguments", [["--help"], ["--version"], ["serve", "--port", "0"]]
+    "arguments",
+    [
+        ["--help"],
+        ["--version"],
+        ["serve", "--port", "0"],
+        ["admin", "--help"],
+        ["customer", "--help"],
+        ["manage", "--help"],
+    ],
 )
 def test_module_argument_only_invocations_do_not_create_data_directory(
     tmp_path, arguments

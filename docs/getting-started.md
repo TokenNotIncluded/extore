@@ -1,6 +1,6 @@
 # 快速入门与运行指南
 
-[返回项目首页](../README.md) · [接口与事件](protocol.md) · [远程 CLI](cli.md) · [原生 WebMCP](webmcp.md) · [Python SDK](python-sdk.md)
+[返回项目首页](../README.md) · [接口与事件](protocol.md) · [CLI 指南](cli.md) · [原生 WebMCP](webmcp.md) · [Python SDK](python-sdk.md)
 
 Extore 面向一个商家，负责卡密验证、信息收集、任务处理与交付。支付和支付订单管理由另一平台承担，通过制卡接口、Webhook 和签名回调对接。
 
@@ -9,7 +9,9 @@ Extore 面向一个商家，负责卡密验证、信息收集、任务处理与�
 - [显示偏好](#显示偏好)
 - [基本流程](#基本流程)
 - [商品管理链接](#商品管理链接)
+- [远程命令行](#远程命令行)
 - [自动处理与领取](#自动处理与领取)
+- [文件上传与存储](#文件上传与存储)
 - [认证恢复](#认证恢复)
 - [生产运行](#生产运行)
 - [Arch Linux 原生部署](#arch-linux-原生部署)
@@ -29,7 +31,7 @@ extore serve
 
 另一个终端设置相同的 `EXTORE_DATA` 后执行 `extore worker`。默认网站地址为 `http://localhost:8000`；`extore serve --host 127.0.0.1 --port 8000` 可显式指定监听地址，更换端口或域名时需同步设置 `EXTORE_ORIGIN`。API 与 worker 在前台独立运行，生产环境应交给进程管理器。
 
-`extore --help` 列出全部命令，`extore --version` 输出安装版本。命令包括 `init`、`bootstrap`、`reset-auth`、`integration-key`、`demo`、`serve`、`worker` 与远程商品管理 `manage`；原有 `python -m extore.cli` 管理命令和 `python -m extore.worker` 保持兼容。查看帮助、版本或输入无效参数不会初始化数据库。
+`extore --help` 列出全部命令，`extore --version` 输出安装版本。命令包括 `init`、`bootstrap`、`reset-auth`、`integration-key`、`demo`、`serve`、`worker` 与远程 `manage`、`customer`、`admin`；原有 `python -m extore.cli` 管理命令和 `python -m extore.worker` 保持兼容。查看帮助、版本或输入无效参数不会初始化数据库。
 
 从源码构建发行包：
 
@@ -61,7 +63,7 @@ uv run uvicorn extore.app:app --host 127.0.0.1 --port 8000
 uv run python -m extore.worker
 ```
 
-打开 `http://localhost:8000`。连续点击左上角 Logo 5 次（2.5 秒内）进入后台，也可访问 `/admin`。输入服务器初始化时设置的密码，注册 Passkey 后获得后台权限，**密码立即失效**。密码会话只能注册 Passkey，不能管理商品。支持多个 Passkey；添加或移除前需要最近 10 分钟内登录。
+打开 `http://localhost:8000`。连续点击左上角 Logo 5 次（2.5 秒内）进入后台，也可访问 `/admin`。输入服务器初始化时设置的密码，注册 Passkey 后获得后台权限，**密码立即失效**。密码会话只能注册 Passkey，不能管理商品。支持多个 Passkey；从浏览器添加或移除前需要最近 10 分钟内登录。[店主 CLI](cli-owner.md#passkey-注册)使用设备签名，注册仍需真实 WebAuthn 结果。
 
 Passkey 需要 HTTPS 或 localhost。更换域名 / RP ID 后，旧 Passkey 无法用于新域名；须先规划固定域名。
 
@@ -105,6 +107,16 @@ Passkey 需要 HTTPS 或 localhost。更换域名 / RP ID 后，旧 Passkey 无�
 
 管理链接界面还可生成 CLI 专用的机器人接入提示词；其中票据有效 5 分钟，只用于设备绑定，不占用浏览器登录额度。`extore manage` 支持在客户端聚合多个独立商品授权，并通过同一套按商品管理接口操作任务和附件。使用命令见[远程 CLI](cli.md)，协议见[设备授权](protocol.md#cli-设备授权)。
 
+## 远程命令行
+
+0.6.0 及以上提供三种独立入口，首次密码和服务器恢复仍使用本机管理命令：
+
+- [`extore manage`](cli.md)：商品配置、卡密、队列、链接、事件和会话，授权仍限单个商品；多个授权可在客户端聚合。
+- [`extore customer`](cli-customer.md)：从私密标准输入验码，按卡密快照填参、上传材料、重提、领取和下载；与管理凭证分开。
+- [`extore admin`](cli-owner.md)：首次用真实 Passkey 批准店主设备，全店操作使用设备私钥签名。设备最多 30 天，会话最多 8 小时，后续可签名续签。
+
+默认列表返回摘要，任务输入、教程和完整配置按需获取。制卡、创建授权等结果保存到 0600 文件；上传不代表已提交或已交付。[AI 提示词](ai-prompts.md)提供可复制的操作说明。完整 CLI 安装要求为 `extore>=0.6.0`，也可在该版本源码目录用 `uv run extore …`。
+
 ## 自动处理与领取
 
 自动处理有两种：
@@ -124,7 +136,7 @@ Passkey 需要 HTTPS 或 localhost。更换域名 / RP ID 后，旧 Passkey 无�
 uv run python -m extore.cli reset-auth
 ```
 
-输入 `RESET` 确认，然后在终端私密输入新密码。所有 Passkey、浏览器与 CLI 登录会话、CLI 设备授权、票据和认证挑战被撤销。重新进入后台，完成新 Passkey 注册。商品、卡密与任务保留。商品管理链接仍存在；需要撤销时在后台处理。设备授权的管理与撤销见[CLI 文档](cli.md#配置输出与撤销)。
+输入 `RESET` 确认，然后在终端私密输入新密码。所有 Passkey、浏览器与 CLI 登录会话、CLI 设备授权、票据和认证挑战被撤销。重新进入后台，完成新 Passkey 注册。商品、卡密与任务保留。商品管理链接仍存在；需要撤销时在后台处理。商品和店主 CLI 设备均被撤销，不能保留旧私钥继续续签；新店主设备需要重新用 Passkey 批准。设备管理见[商品 CLI](cli.md#配置输出与撤销)及[店主 CLI](cli-owner.md#配置与退出)。
 
 ## 生产运行
 

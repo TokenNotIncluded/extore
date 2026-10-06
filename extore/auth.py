@@ -35,6 +35,7 @@ class PasswordInput(BaseModel):
 class CredentialInput(BaseModel):
     credential: dict
     name: str = Field(default="我的 Passkey", min_length=1, max_length=100)
+    challenge_id: str | None = Field(default=None, min_length=1, max_length=100)
 
 
 @router.get("/status")
@@ -72,6 +73,17 @@ def status(request: Request):
             cli_uses=s["cli_uses"],
             remaining_cli_uses=s["remaining_cli_uses"],
         )
+    elif role == "admin" and s["channel"] == "cli":
+        result.update(
+            channel="cli",
+            scope="shop.owner",
+            device_id=s["owner_device_id"],
+            session_id=s["id"],
+            expires=s["expires"],
+            grant_expires=s["grant_expires"],
+            client_name=s["client_name"],
+            fingerprint=s["fingerprint"],
+        )
     return result
 
 
@@ -106,7 +118,7 @@ def logout(request: Request, response: Response):
 def challenge(c, request, response, kind, s=None):
     key = token()
     if s:
-        if time.time() - s["created"] > 600:
+        if s["channel"] == "browser" and time.time() - s["created"] > 600:
             fail("添加 Passkey 前请重新登录", 401)
         rows = c.execute("SELECT id FROM credentials").fetchall()
         import base64
@@ -142,6 +154,8 @@ def challenge(c, request, response, kind, s=None):
             time.time() + 300,
         ),
     )
+    if s and s["channel"] == "cli":
+        return {**json.loads(options_to_json(opts)), "challenge_id": key}
     response.set_cookie(
         "extore_challenge",
         key,
@@ -154,10 +168,16 @@ def challenge(c, request, response, kind, s=None):
     return json.loads(options_to_json(opts))
 
 
-def consume_challenge(c, request, kind, s=None):
+def consume_challenge(c, request, kind, s=None, challenge_id=None):
+    if s and s["channel"] == "cli":
+        if not challenge_id:
+            fail("请提供 CLI Passkey 注册挑战", 400)
+        value = challenge_id
+    else:
+        value = request.cookies.get("extore_challenge", "")
     row = c.execute(
         "SELECT * FROM challenges WHERE digest=?",
-        (digest(request.cookies.get("extore_challenge", "")),),
+        (digest(value),),
     ).fetchone()
     if (
         not row
@@ -181,7 +201,7 @@ def register_options(request: Request, response: Response):
 def register_verify(body: CredentialInput, request: Request, response: Response):
     s = session(request, ("admin", "bootstrap"))
     with db() as c:
-        ch = consume_challenge(c, request, "register", s)
+        ch = consume_challenge(c, request, "register", s, body.challenge_id)
         try:
             v = verify_registration_response(
                 credential=body.credential,
@@ -256,7 +276,7 @@ def keys(request: Request):
 @router.delete("/passkeys/{cid}")
 def delete_key(cid: str, request: Request):
     s = session(request)
-    if time.time() - s["created"] > 600:
+    if s["channel"] == "browser" and time.time() - s["created"] > 600:
         fail("删除 Passkey 前请重新登录", 401)
     with db() as c:
         if c.execute("SELECT count(*) FROM credentials").fetchone()[0] <= 1:

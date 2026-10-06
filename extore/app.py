@@ -39,6 +39,8 @@ from .models import (
     StaffInput,
     TokenInput,
 )
+from .owner_cli_auth import router as owner_cli_router
+from .owner_cli_auth import verify_owner_cli_action
 from .processors import processor_catalog, public_configuration
 from .security import (
     authorize_management,
@@ -82,13 +84,14 @@ async def lifespan(app):
     yield
 
 
-app = FastAPI(title="Extore API", version="0.5.0", lifespan=lifespan)
+app = FastAPI(title="Extore API", version="0.6.0", lifespan=lifespan)
 app.include_router(auth.router)
 app.include_router(card_tracking_router)
 app.include_router(files_router)
 app.include_router(source_router)
 app.include_router(link_access_router)
 app.include_router(cli_auth_router)
+app.include_router(owner_cli_router)
 
 
 @app.middleware("http")
@@ -97,6 +100,11 @@ async def guard(request: Request, call_next):
         "/api/cli/authorize",
         "/api/cli/challenge",
         "/api/cli/session",
+        "/api/cli/owner/request",
+        "/api/cli/owner/status",
+        "/api/cli/owner/claim",
+        "/api/cli/owner/challenge",
+        "/api/cli/owner/session",
     }
     cli_authenticated = False
     if (
@@ -136,6 +144,15 @@ async def guard(request: Request, call_next):
             if len(body) > 256000:
                 return JSONResponse({"detail": "请求过大"}, status_code=413)
         request._body = bytes(body)
+        if (
+            cli_authenticated
+            and request.method not in ("GET", "HEAD", "OPTIONS")
+            and request.url.path != "/api/cli/owner/action-challenge"
+        ):
+            try:
+                verify_owner_cli_action(request, request._body)
+            except HTTPException as exc:
+                return JSONResponse({"detail": exc.detail}, status_code=exc.status_code)
     response = await call_next(request)
     response.headers["Cache-Control"] = "no-store"
     response.headers["Referrer-Policy"] = "no-referrer"
@@ -412,13 +429,25 @@ def destroy(body: TokenInput):
 
 
 @app.get("/api/admin/products")
-def admin_products(request: Request):
+def admin_products(request: Request, compact: bool = False):
     session(request)
     with db() as c:
         return [
-            product(c, r["id"])
+            product_summary(product(c, r["id"])) if compact else product(c, r["id"])
             for r in c.execute("SELECT * FROM products ORDER BY created")
         ]
+
+
+def product_summary(p):
+    return {
+        **{key: p[key] for key in ("id", "name", "mode", "delivery", "view_policy")},
+        "parameters_count": len(p["parameters"]),
+        "outputs_count": len(p["outputs"]),
+        "variants": [
+            {key: v[key] for key in ("id", "name", "price", "currency", "enabled")}
+            for v in p["variants"]
+        ],
+    }
 
 
 @app.post("/api/admin/products")
@@ -744,7 +773,7 @@ def staff_login(body: TokenInput, request: Request, response: Response):
 
 
 @app.get("/api/manage/products")
-def managed_products(request: Request):
+def managed_products(request: Request, compact: bool = False):
     s = session(request, ("admin", "staff"))
     with db() as c:
         queue_staff_authorization(c, s)
@@ -756,6 +785,9 @@ def managed_products(request: Request):
         result = []
         for r in rows:
             p = product(c, r["id"])
+            if compact:
+                result.append(product_summary(p))
+                continue
             result.append(
                 {
                     key: p[key]
@@ -1258,5 +1290,6 @@ app.mount("/static", StaticFiles(directory=STATIC), name="static")
 @app.api_route("/admin", methods=["GET", "HEAD"])
 @app.api_route("/staff", methods=["GET", "HEAD"])
 @app.api_route("/receipt", methods=["GET", "HEAD"])
+@app.api_route("/cli/owner", methods=["GET", "HEAD"])
 def index():
     return FileResponse(STATIC / "index.html")

@@ -33,6 +33,11 @@ AUDIT_ACTIONS = (
     "cli.device.create",
     "cli.device.revoke",
     "cli.ticket.create",
+    "cli.owner.request",
+    "cli.owner.approve",
+    "cli.owner.device.create",
+    "cli.owner.device.revoke",
+    "cli.owner.action",
     "staff.create",
     "staff.revoke",
 )
@@ -80,6 +85,9 @@ def init_schema(c):
     from .cli_auth import init_schema as init_cli_schema
 
     init_cli_schema(c)
+    from .owner_cli_auth import init_schema as init_owner_cli_schema
+
+    init_owner_cli_schema(c)
 
 
 def augment_link_view(row):
@@ -196,8 +204,10 @@ def revoke_staff_sessions(c, staff_id, actor="owner"):
 
 def revoke_all_sessions(c, actor="owner", action="session.auth_reset"):
     from .cli_auth import revoke_devices
+    from .owner_cli_auth import revoke_owner_devices
 
     revoke_devices(c, actor=actor)
+    revoke_owner_devices(c, actor=actor)
     rows = c.execute("SELECT digest FROM sessions WHERE revoked=0").fetchall()
     for row in rows:
         revoke_session(c, row["digest"], actor, action)
@@ -245,11 +255,12 @@ def _link_scope(c, s):
 def _session_rows(c, scope):
     sql = (
         "SELECT sessions.*,staff.name AS link_name,staff.product_id AS product_id,"
-        "products.config AS product_config,cli_devices.fingerprint AS device_fingerprint,"
-        "cli_devices.revoked AS device_revoked FROM sessions "
+        "products.config AS product_config,COALESCE(cli_devices.fingerprint,owner_cli_devices.fingerprint) AS device_fingerprint,"
+        "COALESCE(cli_devices.revoked,owner_cli_devices.revoked) AS device_revoked,owner_cli_devices.expires AS owner_grant_expires FROM sessions "
         "LEFT JOIN staff ON staff.id=sessions.staff_id "
         "LEFT JOIN products ON products.id=staff.product_id"
         " LEFT JOIN cli_devices ON cli_devices.id=sessions.device_id"
+        " LEFT JOIN owner_cli_devices ON owner_cli_devices.id=sessions.owner_device_id"
     )
     values = ()
     if scope is not None:
@@ -267,6 +278,10 @@ def _session_view(c, row, current_digest):
     active = not row["revoked"] and row["expires"] > time.time()
     if row["channel"] == "cli" and (
         row["device_revoked"] is None or row["device_revoked"]
+    ):
+        active = False
+    if row["owner_device_id"] and (
+        row["owner_grant_expires"] is None or row["owner_grant_expires"] <= time.time()
     ):
         active = False
     if active and row["role"] == "staff":
@@ -299,7 +314,8 @@ def _session_view(c, row, current_digest):
         "ua": row["ua"][:300],
         "channel": row["channel"],
         "client_name": row["client_name"],
-        "device_id": row["device_id"],
+        "device_id": row["device_id"] or row["owner_device_id"],
+        "owner_device_id": row["owner_device_id"],
         "fingerprint": row["device_fingerprint"],
     }
 
@@ -361,6 +377,10 @@ def _list_audit(request, roles, limit):
         safe_targets = {r["id"] for r in c.execute("SELECT id FROM sessions")}
         safe_targets |= {r["id"] for r in c.execute("SELECT id FROM staff")}
         safe_targets |= {r["id"] for r in c.execute("SELECT id FROM cli_devices")}
+        safe_targets |= {r["id"] for r in c.execute("SELECT id FROM owner_cli_devices")}
+        safe_targets |= {
+            r["id"] for r in c.execute("SELECT id FROM owner_cli_requests")
+        }
         return [
             {
                 **{k: row[k] for k in ("id", "actor", "action", "target", "created")},
@@ -369,7 +389,7 @@ def _list_audit(request, roles, limit):
             for row in rows
             if row["target"] in safe_targets
             and (
-                row["actor"] in ("owner", "bootstrap", "ssh")
+                row["actor"] in ("owner", "bootstrap", "ssh", "pending")
                 or c.execute(
                     "SELECT 1 FROM staff WHERE id=?", (row["actor"],)
                 ).fetchone()
@@ -381,8 +401,9 @@ def _audit_metadata(c, row):
     # Reconstruct safe metadata through opaque targets; never serialize the
     # credential or free-form contents of the common audit table.
     target = c.execute(
-        "SELECT sessions.channel,sessions.client_name,cli_devices.fingerprint "
+        "SELECT sessions.channel,sessions.client_name,COALESCE(cli_devices.fingerprint,owner_cli_devices.fingerprint) AS fingerprint "
         "FROM sessions LEFT JOIN cli_devices ON cli_devices.id=sessions.device_id "
+        "LEFT JOIN owner_cli_devices ON owner_cli_devices.id=sessions.owner_device_id "
         "WHERE sessions.id=?",
         (row["target"],),
     ).fetchone()
@@ -393,6 +414,12 @@ def _audit_metadata(c, row):
     ).fetchone()
     if target is not None:
         return {"channel": "cli", **dict(target)}
+    for table in ("owner_cli_devices", "owner_cli_requests"):
+        target = c.execute(
+            f"SELECT client_name,fingerprint FROM {table} WHERE id=?", (row["target"],)
+        ).fetchone()
+        if target is not None:
+            return {"channel": "cli", **dict(target)}
     return {
         "channel": "cli"
         if row["action"] in ("link.cli_consume", "cli.ticket.create")
