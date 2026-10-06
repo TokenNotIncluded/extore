@@ -109,6 +109,28 @@ def test_next_fifo_multiple_products_and_exact_receipt(owner):
         )
 
 
+def test_next_same_signed_request_changed_primary_session_reuses_receipt(owner):
+    a, b = product(owner), product(owner)
+    first, second = queue(a), queue(b)
+    devices = device(owner, a), device(owner, b)
+    body = request(*devices)
+    initial = next_(devices[0], body)
+    assert initial.status_code == 200, initial.text
+    replay = next_(devices[1], body)
+    assert replay.status_code == 200, replay.text
+    assert replay.json()["replayed"]
+    assert replay.json()["items"] == initial.json()["items"]
+    assert replay.json()["items"][0]["job"]["id"] == first["id"]
+    with db() as c:
+        assert c.execute("SELECT count(*) FROM automation_requests").fetchone()[0] == 1
+        assert (
+            c.execute("SELECT state FROM jobs WHERE id=?", (second["id"],)).fetchone()[
+                0
+            ]
+            == "queued"
+        )
+
+
 def test_next_limit_and_no_history_or_unapproved_product(owner):
     a, b = product(owner), product(owner)
     approved, hidden = queue(a), queue(b, "other merchant input")

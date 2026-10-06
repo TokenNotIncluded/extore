@@ -155,8 +155,14 @@ def _is_flow(c, row):
 
 
 def _work_item(c, row, binding):
+    flow = _is_flow(c, row)
+    if flow:
+        from . import task_flow
+
+        if task_flow.view(c, row, staff=True).get("phase") != "processing":
+            return None
     execution = _flow_execution(c, row)
-    if execution is None and _is_flow(c, row):
+    if execution is None and flow:
         return None
     details = job_view(c, row, execution is None)
     if execution is None:
@@ -300,8 +306,11 @@ def _tick(s, body, *, force_idle=False):
     with db() as c:
         bindings = _authorization(c, s, body)
         now = time.time()
+        # One fully signed request keeps one receipt even when the client
+        # refreshes a different listed device's Bearer session for recovery.
+        device_scope = ",".join(sorted(item.device_id for item in body.grants))
         key = hashlib.sha256(
-            (s["device_id"] + ":" + body.request_id).encode()
+            (device_scope + ":" + body.request_id).encode()
         ).hexdigest()
         body_hash = hashlib.sha256(next_canonical(body).encode()).hexdigest()
         record = c.execute(
