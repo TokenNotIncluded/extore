@@ -2119,6 +2119,15 @@ window.ExtoreWebMCP?.configure({
     linkExpires: managementExpires,
   }),
   actions: {
+    selectReceiptCard: async (cardId, options = {}) => {
+      const context = receiptRequestContext(options);
+      const data = await readReceipt(options);
+      if (!context.active()) throw new Error("领取页面已改变，请重试。");
+      const item = data.items?.find((row) => row.card_id === cardId && row.accepted !== false);
+      if (!data.batch || !item) throw new Error("这张卡密不属于当前领取链接。");
+      openBatchCard(item);
+      return item;
+    },
     uploadFile,
     readFile,
     exchange: exchangeCode,

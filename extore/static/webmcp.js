@@ -1084,9 +1084,10 @@
         throw new ToolError("unavailable", "This batch receipt has invalid item metadata.");
       return {
         batch: true,
+        ...project(value, ["partial", "summary"]),
         product: safeReceiptStatus({ product: value.product }).product,
         items: value.items.map((item) => ({
-          ...project(item, ["card_id", "suffix"]),
+          ...project(item, ["card_id", "suffix", "accepted", "status", "error", "http_status", "index", "duplicate_of"]),
           ...safeReceiptStatus({ product: item.product, variant: item.variant, job: item.job }),
         })),
       };
@@ -1326,7 +1327,7 @@
       add(
         "code_verify",
         "验证卡密",
-        "Verify only legacy plain codes, up to 30 for the same product, separated by newlines, spaces or commas, and show the receipt in the UI. Never pass an EXR wrapped redemption credential as a tool argument. For wrapped credentials, paste privately into the visible code input and use redeem_pasted_code. The server verifies count and product scope. Does not submit a redemption or return a receipt credential.",
+        "Verify only legacy plain codes, up to 30 from multiple products or variants, separated by newlines, spaces or commas, and show the receipt in the UI. Never pass an EXR wrapped redemption credential as a tool argument. For wrapped credentials, paste privately into the visible code input and use redeem_pasted_code. The server verifies each card and returns per-card status. Does not submit a redemption or return a receipt credential.",
         object({ code: string(8000, 1) }, ["code"]),
         async (input, signal) => {
           if (!input.code.trim())
@@ -1355,8 +1356,20 @@
           return safeReceiptStatus(data);
         }, write);
     }
-    if (c.page === "receipt" && c.currentToken && c.product) {
+    if (c.page === "receipt" && c.currentToken && (c.product || c.batch)) {
       const currentFlow = contextFlow(c), capturedFlow = flowIdentity(currentFlow);
+      if (c.batch) add("receipt_select_card", "选择一张卡密",
+        "Select an accepted card in the active batch receipt for its current input, flow actions or delivery. Does not start, submit or reveal a task.",
+        object({ card_id: { ...id, maxLength: 80 } }, ["card_id"]), async (input, signal) => {
+          const receipt = await action("receipt", [], signal);
+          checkInvocation(signal);
+          const item = receipt.items?.find((row) => row.card_id === input.card_id && row.accepted !== false);
+          if (!receipt.batch || !item) throw new ToolError("forbidden", "This card is not part of the active receipt.");
+          await action("selectReceiptCard", [input.card_id], signal);
+          await refresh();
+          return safeReceiptStatus(item);
+        }, readonly);
+
       const freshFlow = async (signal) => {
         const data = await action("receipt", [], signal);
         checkInvocation(signal);
@@ -1407,7 +1420,7 @@
             }, { ...write, disclose: ["task_flow.current.content"] });
         }
       }
-      const customerFileFields = currentFlow ? currentFlow.phase === "input" ? currentFlow.current?.fields || [] : [] : c.product.parameters || [];
+      const customerFileFields = currentFlow ? currentFlow.phase === "input" ? currentFlow.current?.fields || [] : [] : c.product?.parameters || [];
       if (customerFileFields.some(attachmentField)) {
         add(
           "redemption_file_upload", "上传兑换文件",
@@ -1490,22 +1503,27 @@
           throw new ToolError("invalid_arguments", "Batch card IDs must be unique.");
         const receipt = await action("receipt", [], signal);
         checkInvocation(signal);
-        if (receiptFlow(receipt) || receipt.items?.some(receiptFlow))
+        if (!receipt.partial && (receiptFlow(receipt) || receipt.items?.some(receiptFlow)))
           throw new ToolError("stale_context", "This receipt requires task-flow tools rather than ordinary redemption.");
         if (receipt.batch) {
           if (!input.items)
             throw new ToolError("invalid_arguments", "Batch receipts require item-specific card IDs and parameters.");
           if (!Array.isArray(receipt.items) || !receipt.items.length || receipt.items.length > 30 ||
-              !receipt.product?.id || receipt.product.id !== c.product.id ||
-              receipt.items.some((item) => item.product?.id !== receipt.product.id))
+              (!receipt.partial && (!receipt.product?.id || receipt.product.id !== c.product.id ||
+              receipt.items.some((item) => item.product?.id !== receipt.product.id))))
             throw new ToolError("unavailable", "This batch receipt has inconsistent product scope.");
           for (const item of input.items) {
             const member = receipt.items.find((entry) => entry.card_id === item.card_id);
-            if (!member) throw new ToolError("forbidden", "This card is not part of the active receipt.");
+            if (!member || member.accepted === false) throw new ToolError("forbidden", "This card is not part of the active receipt.");
             if (retry ? !member.job?.can_retry : !!member.job)
               throw new ToolError("invalid_state", retry
                 ? "A selected batch card is not eligible for resubmission."
                 : "A selected batch card already has a job; use retry when permitted.");
+            if (receipt.partial && receiptFlow(member)) {
+              if (retry || member.job || Object.keys(item.params).length)
+                throw new ToolError("invalid_state", "Prepare an unstarted flow with empty params, then select that card and use its flow tools.");
+              continue;
+            }
             try {
               validate({ type: "array", items: parameterSchema, maxItems: 30 }, member.product.parameters, "item.product.parameters");
               member.product.parameters.forEach(validateFieldDefinition);
@@ -1537,7 +1555,7 @@
       add(
         "redemption_submit",
         "提交兑换",
-        "Submit string-valued params for one verified code, or items:[{card_id,params}] for up to 30 cards in the active batch receipt. Use declared select option values and boolean strings true/false. File/image fields take opaque uploaded IDs; images takes a JSON string array of unique uploaded IDs, never URLs or base64. Use receipt_status or product_parameters for each card's parameter snapshot; execution rechecks membership, same-product scope and every selected card before submitting any. This consumes the selected codes. Set confirm:true only after explicit authorization.",
+        "Submit string-valued params for one verified code, or items:[{card_id,params}] for up to 30 cards in the active batch receipt. Use declared select option values and boolean strings true/false. File/image fields take opaque uploaded IDs; images takes a JSON string array of unique uploaded IDs, never URLs or base64. Use receipt_status or product_parameters for each card's parameter snapshot; execution rechecks membership and each card's frozen requirements. Partial batches report failures per card and prepare flows with empty params without starting their timers. This consumes the selected codes. Set confirm:true only after explicit authorization.",
         redeemSchema,
         submit(false),
         write,

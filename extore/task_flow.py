@@ -177,7 +177,7 @@ def freeze_card(c, card_id, product):
     }
     frozen_product["shop_id"] = actual["shop_id"]
     snapshot = {"definition": definition, "product": frozen_product}
-    definition_hash = _digest(snapshot)
+    definition_hash = fingerprint(snapshot, actual["shop_id"], "card:" + card_id)
     ciphertext = _seal(snapshot, actual["shop_id"], "task-flow-card", card_id)
     _quota(c, ciphertext, product["id"])
     c.execute(
@@ -203,7 +203,10 @@ def card_snapshot(c, card_id):
     snapshot = _open(
         binding["snapshot_ciphertext"], binding["shop_id"], "task-flow-card", card_id
     )
-    if _digest(snapshot) != binding["definition_hash"]:
+    if (
+        fingerprint(snapshot, binding["shop_id"], "card:" + card_id)
+        != binding["definition_hash"]
+    ):
         fail("任务流程快照无效", 409)
     return {**snapshot, "definition_hash": binding["definition_hash"]}
 

@@ -431,6 +431,10 @@ async def result(product_id: str, job_id: str, request: Request):
         fail("私有处理器更新字段无效", 422)
     if update.attempt != scope.attempt:
         fail("处理尝试与签名不一致", 409)
+    if (update.flow_epoch is not None and update.flow_epoch != scope.flow_epoch) or (
+        update.action_id is not None and update.action_id != scope.action_id
+    ):
+        fail("处理步骤与签名不一致", 409)
     body_digest = hashlib.sha256(raw).hexdigest()
     with _transaction() as c:
         row, _ = _verify(c, request, scope, body_digest)

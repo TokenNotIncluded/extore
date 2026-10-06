@@ -892,3 +892,21 @@ def test_sensitive_expiry_scrubs_blocked_scopes_without_restoring_execution(
         )
         with pytest.raises(HTTPException):
             flow.execution(c, entered["row"])
+
+
+def test_public_definition_fingerprint_is_keyed_and_card_specific(owner):
+    _, cid, _ = setup(owner, mode="webhook")
+    with db() as c:
+        first = flow.card_snapshot(c, cid)
+        assert first["definition_hash"] != flow._digest(
+            {key: value for key, value in first.items() if key != "definition_hash"}
+        )
+        source = product(c, first["product"]["id"])
+        other_code = issue_cards(c, source["id"], 1)[0]
+        other = c.execute(
+            "SELECT id FROM cards WHERE digest=?", (card_digest(other_code),)
+        ).fetchone()[0]
+        flow.freeze_card(c, other, {**source, "task_flow": graph()})
+        second = flow.card_snapshot(c, other)
+        assert first["definition_hash"] != second["definition_hash"]
+        assert first["definition"] == second["definition"]

@@ -93,6 +93,12 @@ def finalizer(monkeypatch):
         worker.sync_dispatch(c, effect["row"])
         return effect
 
+    from extore import processor_profiles
+
+    # This fixture replaces the sandbox boundary; native tests use real profiles.
+    monkeypatch.setattr(
+        processor_profiles, "runtime_execution", lambda *args: ({}, {}, {})
+    )
     monkeypatch.setattr(worker, "_finalize", finalize)
     return seen
 

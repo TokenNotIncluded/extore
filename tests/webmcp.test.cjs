@@ -3379,3 +3379,38 @@ test("product tools retain stock mode alongside rich field type schemas", async 
   const field = schema.properties.parameters.items;
   for (const kind of ["select", "boolean", "image", "images"]) assert.equal(field.properties.type.enum.includes(kind), true);
 });
+
+
+test("partial mixed batches expose per-card validation and submit without a common product", async (t) => {
+  const first = product({ id: "p1", parameters: [outputField("request")] });
+  const second = product({ id: "p2", parameters: [outputField("request")] });
+  const receipt = { batch: true, partial: true, summary: { accepted: 2, invalid: 1 }, items: [
+    { card_id: "c1", accepted: true, status: "valid", product: first },
+    { card_id: "c2", accepted: true, status: "valid", product: second },
+    { index: 2, accepted: false, status: "invalid", error: "Invalid code", suffix: "BAD" },
+  ] };
+  const h = await harness(t, { context: { page: "receipt", product: null, currentToken: "PRIVATE", batch: true }, receipt });
+  const status = await h.call("receipt_status", {});
+  assert.equal(status.ok, true);
+  assert.equal(status.data.partial, true);
+  assert.equal(status.data.items[2].accepted, false);
+  assert.equal(status.data.items[2].status, "invalid");
+  const items = [{ card_id: "c1", params: { request: "A" } }, { card_id: "c2", params: { request: "B" } }];
+  await h.call("redemption_submit", { items, confirm: true });
+  assert.deepEqual(h.calls.find((call) => call.type === "action" && call.name === "redeem").args[0], items);
+});
+
+test("partial batch flow preparation keeps empty params and selecting a card does not start it", async (t) => {
+  const flow = flowProjection({ phase: "await_start", flow_epoch: 0, revision: 0, current: { id: "q1", kind: "input", prompt: { en: "Start when ready" } }, actions: ["start"] });
+  const p = product({ parameters: [], task_flow_view: flow });
+  const receipt = { batch: true, partial: true, items: [{ card_id: "c1", accepted: true, product: p }] };
+  let selected = null;
+  const h = await harness(t, { context: { page: "receipt", product: null, currentToken: "PRIVATE", batch: true }, receipt,
+    actions: { selectReceiptCard: async (id) => { selected = id; } } });
+  rejected(await h.call("redemption_submit", { items: [{ card_id: "c1", params: { answer: "too early" } }], confirm: true }), "invalid_state");
+  await h.call("redemption_submit", { items: [{ card_id: "c1", params: {} }], confirm: true });
+  await h.call("receipt_select_card", { card_id: "c1" });
+  assert.equal(selected, "c1");
+  assert.equal(h.calls.filter((call) => call.name === "flow").length, 0);
+  rejected(await h.call("receipt_select_card", { card_id: "foreign" }), "forbidden");
+});

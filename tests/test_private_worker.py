@@ -669,3 +669,13 @@ def test_signed_download_has_a_server_read_deadline(private_files, monkeypatch):
         assert (
             c.execute("SELECT count(*) FROM private_worker_nonces").fetchone()[0] == 0
         )
+
+
+@pytest.mark.parametrize("changes", [{"flow_epoch": 2}, {"action_id": "other-action"}])
+def test_result_redundant_scope_must_match_signed_scope(client, private_job, changes):
+    scope, _, counts = private_job
+    assert submit(client, scope, result_payload(**changes)).status_code == 409
+    assert counts == {"updates": 0, "finalizers": 0}
+    matching = result_payload(flow_epoch=scope.flow_epoch, action_id=scope.action_id)
+    assert submit(client, scope, matching).status_code == 200
+    assert counts == {"updates": 1, "finalizers": 1}
