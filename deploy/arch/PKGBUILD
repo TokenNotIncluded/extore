@@ -1,6 +1,6 @@
 pkgname=extore
 pkgver=0.1.0
-pkgrel=1
+pkgrel=2
 pkgdesc='Single-merchant redemption and fulfillment service'
 arch=('x86_64')
 url='https://github.com/TokenNotIncluded/extore'
@@ -20,6 +20,9 @@ package() {
   cd "$srcdir/extore-source"
   install -d "$pkgdir/usr/lib/extore"
   cp -a .venv "$pkgdir/usr/lib/extore/"
+  # Services and scripts launch via python -m; omit source-bound entrypoints.
+  find "$pkgdir/usr/lib/extore/.venv/bin" -type f -delete
+  rm -f "$pkgdir"/usr/lib/extore/.venv/lib/python*/site-packages/extore-*.dist-info/direct_url.json
   install -Dm644 deploy/arch/extore-api.service "$pkgdir/usr/lib/systemd/system/extore-api.service"
   install -Dm644 deploy/arch/extore-worker.service "$pkgdir/usr/lib/systemd/system/extore-worker.service"
   install -Dm644 deploy/arch/extore.sysusers "$pkgdir/usr/lib/sysusers.d/extore.conf"

@@ -86,7 +86,7 @@ async def guard(request: Request, call_next):
     return response
 
 
-@app.get("/health")
+@app.api_route("/health", methods=["GET", "HEAD"])
 def health():
     with db() as c:
         c.execute("SELECT 1")
@@ -533,9 +533,9 @@ STATIC = Path(__file__).parent / "static"
 app.mount("/static", StaticFiles(directory=STATIC), name="static")
 
 
-@app.get("/")
-@app.get("/admin")
-@app.get("/staff")
-@app.get("/receipt")
+@app.api_route("/", methods=["GET", "HEAD"])
+@app.api_route("/admin", methods=["GET", "HEAD"])
+@app.api_route("/staff", methods=["GET", "HEAD"])
+@app.api_route("/receipt", methods=["GET", "HEAD"])
 def index():
     return FileResponse(STATIC / "index.html")

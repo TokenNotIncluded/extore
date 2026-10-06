@@ -152,3 +152,9 @@ def test_cli_bootstrap_is_private_and_idempotent(monkeypatch, capsys):
     with pytest.raises(SystemExit, match="Already initialized"):
         main()
     path.unlink()
+
+
+def test_head_probes(client):
+    assert client.head("/").status_code == 200
+    assert client.head("/health").status_code == 200
+    assert client.head("/health").content == b""
