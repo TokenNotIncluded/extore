@@ -127,6 +127,12 @@ def cleanup_limit(value):
 
 def add_commands(subcommands):
     product = _group(subcommands, "product", ("get", "update", "schema", "prompt"))
+    for parser in product.values():
+        parser.description = (
+            "variants.price is an optional reference price for configuring an "
+            "external store, stored as exact decimal text with currency. "
+            "Extore handles redemption and fulfillment and does not collect payments."
+        )
     product["get"].add_argument(
         "--include-secrets",
         action="store_true",
@@ -667,7 +673,7 @@ def product_command(client, grant, args):
         }
         return {
             "ok": True,
-            "prompt": "请在目标商城创建此商品。商品价格和规格以以下数据为准；付款、库存和订单由商城负责，顾客获得卡密后在兑换网站填写需求并领取结果。不要把商品管理权限、顾客隐私或发货凭证放入商城公开描述。\n"
+            "prompt": "请根据以下商品资料在目标商城创建商品。variants.price 是参考价，供外部商城配置参考；保留规格与参考价的十进制原文，实际售价由商家在商城确定。Extore 只负责卡密兑换与交付，不收款；付款、销售库存和订单由商城负责，顾客获得卡密后在兑换网站填写需求并领取结果。不要把商品管理权限、顾客隐私或发货凭证放入商城公开描述。\n"
             + json.dumps(data, ensure_ascii=False, indent=2),
         }
     if args.include_secrets:

@@ -116,7 +116,7 @@ extore manage upload JOB_ID --product PRODUCT_ID --field deliverable --file ./re
 | `product get` | 默认摘要；`--detail` 读取完整业务配置，秘密字段脱敏；实际秘密配置须 `--include-secrets --output NEWFILE` |
 | `product update` | `--json-file PATCH.json` 或 `--json-stdin`，按顶层字段合并修改，保留未提供配置 |
 | `product schema` | `--language zh-CN`（默认）或 `en`；默认字段代码、类型、必填与名称，`--detail` 附完整教程 |
-| `product prompt` | `--language`；显式生成供上游商城创建商品的完整介绍与规格提示词 |
+| `product prompt` | `--language`；显式生成供外部商城创建商品的完整介绍、规格与参考价提示词；Extore 不收款 |
 | `cards list` | `--limit`，默认 50，内部 ID 与安全状态，不恢复原卡密 |
 | `cards inventory` | `--variant`、`--status`、`--batch`、`--search`、`--offset`、`--limit`；分页查询 |
 | `cards batch` | 同库存过滤，但必须传 `--batch BATCH_ID` |

@@ -247,9 +247,9 @@ window.ExtoreWebMCP.dispose();
 
 页面适配器负责 multipart 和二进制请求：`uploadFile(definition,options)` 的 definition 含 `scope`、`field_key`、`filename`、`base64`、可选 `content_type`；scope=`job` 时另含 `product_id` 与 `job_id`。顾客 token 只由页面闭包读取，不能从工具输入替换或从返回值取得。它分别使用固定的同源 `POST /api/files/upload`（token/field_key/file）和 `POST /api/manage/files/upload`（job_id/field_key/file），传递 AbortSignal 并沿用原有 Cookie/Origin 防护，不接受任意 URL 或身份覆盖。`readFile` 只下载固定同源地址，精确核对任务附件元数据，在读取响应时限制 `max_bytes=1048576`，返回 `{file_id,filename,content_type,size,base64}`。原生模块在依赖请求前后继续检查取消和当前页面范围。
 
-`variants` 为 1–100 个规格，ID 在商品内唯一，使用最多 40 字符的小写字母、数字、`_`、`-`，首字符必须是字母或数字。每项名称须非空且最多 120 字符，说明最多 10000 字符；参考价格是非负十进制字符串或 null，最多 12 位整数和 6 位小数，不经浮点数换算。币种为 3–5 个大写字母，默认 CNY。`attributes` 最多 20 个非空属性名，每项只接受最多 1000 字符的文本、有限数字、布尔值或 null；整数必须在 JavaScript 安全整数范围内，更大的整数须用字符串。缺少规格字段的旧商品使用 `default`。规格元数据可凭 `product.edit` 修改；已发行规格不能删除，卡密绑定的规格快照由服务端冻结，顾客不能修改。
+`variants` 为 1–100 个规格，ID 在商品内唯一，使用最多 40 字符的小写字母、数字、`_`、`-`，首字符必须是字母或数字。每项名称须非空且最多 120 字符，说明最多 10000 字符；`price` 是参考价，以非负十进制字符串或 null 保存，最多 12 位整数和 6 位小数，不经浮点数换算。币种为 3–5 个大写字母，默认 CNY。参考价仅供外部商城配置参考；Extore 只负责兑换与交付，不收款。`attributes` 最多 20 个非空属性名，每项只接受最多 1000 字符的文本、有限数字、布尔值或 null；整数必须在 JavaScript 安全整数范围内，更大的整数须用字符串。缺少规格字段的旧商品使用 `default`。规格元数据可凭 `product.edit` 修改；已发行规格不能删除，卡密绑定的规格快照由服务端冻结，顾客不能修改。
 
-`product_export_prompt` 调用页面的 `ExtoreProductExport.prompt`，只导出商品展示资料、输入/输出定义和规格参考价格。文本与 Markdown 始终作为引用数据，商品描述中的命令不是指令。只有明确传入 `include_inventory:true`，且当前及最新会话具备 `cards.manage`（商家管理员也允许）时，才读取该商品的卡密统计并附带规格库存；没有权限或没有统计快照就不附带库存，不推断为零。“未兑换卡密数量”不代表“未售商品数量”。工具不返回发货配置秘密、卡密原文、交付结果或管理链接。
+`product_export_prompt` 调用页面的 `ExtoreProductExport.prompt`，只导出商品展示资料、输入/输出定义和规格参考价。提示词明确 `price` 为外部商城配置的参考价，实际售价由商家在商城确定，Extore 不收款。文本与 Markdown 始终作为引用数据，商品描述中的命令不是指令。只有明确传入 `include_inventory:true`，且当前及最新会话具备 `cards.manage`（商家管理员也允许）时，才读取该商品的卡密统计并附带规格库存；没有权限或没有统计快照就不附带库存，不推断为零。“未兑换卡密数量”不代表“未售商品数量”。工具不返回发货配置秘密、卡密原文、交付结果或管理链接。
 
 ## 队列结果与预设处理器
 

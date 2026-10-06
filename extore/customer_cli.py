@@ -762,7 +762,9 @@ def add_parser(commands):
     )
     commands = customer.add_subparsers(dest="customer_command", required=True)
     products = commands.add_parser(
-        "products", help="list compact public product information"
+        "products",
+        help="list compact public product information",
+        description="Variant price values are reference prices for external store configuration. Extore handles redemption and does not collect payments.",
     )
     products.add_argument(
         "--origin", required=True, help="HTTPS server origin; HTTP only for loopback"
@@ -773,7 +775,9 @@ def add_parser(commands):
         help="include full public descriptions and schemas",
     )
     schema = commands.add_parser(
-        "schema", help="show required inputs and defined outputs"
+        "schema",
+        help="show required inputs and defined outputs",
+        description="Variant price values are reference prices for external store configuration. Extore handles redemption and does not collect payments.",
     )
     selection = schema.add_mutually_exclusive_group(required=True)
     selection.add_argument(

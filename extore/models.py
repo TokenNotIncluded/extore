@@ -134,7 +134,10 @@ class ProductVariant(BaseModel):
     id: str = Field(pattern=r"^[a-z0-9][a-z0-9_-]{0,39}$")
     name: str = Field(min_length=1, max_length=120)
     description: str = Field(default="", max_length=10000)
-    price: str | None = None
+    price: str | None = Field(
+        default=None,
+        description="Optional reference price for configuring an external store, as exact decimal text. Extore handles redemption and does not collect payments.",
+    )
     currency: str = Field(default="CNY", pattern=r"^[A-Z]{3,5}$")
     attributes: dict[str, Any] = Field(default_factory=dict)
     enabled: bool = Field(default=True, strict=True)

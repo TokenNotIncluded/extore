@@ -38,8 +38,11 @@
       id: variant.id || variant.variant_id,
       enabled: variant.enabled !== false,
     }));
+  const variantPrice = (variant) => variant.price == null
+    ? tr("未设置参考价", "No reference price set")
+    : `${tr("参考价", "Reference price")} ${variant.currency || "CNY"} ${variant.price}`;
   const variantLabel = (variant) =>
-    `${variant.name}${variant.price != null ? ` · ${variant.currency || "CNY"} ${variant.price}` : ""}${variant.enabled === false ? tr(" · 已停用", " · Disabled") : ""}`;
+    `${variant.name}${variant.price != null ? ` · ${variantPrice(variant)}` : ""}${variant.enabled === false ? tr(" · 已停用", " · Disabled") : ""}`;
   const status = (value) => {
     const style = value.startsWith("failed") || value === "rejected"
       ? "failed"
@@ -256,7 +259,7 @@
           0,
         );
         node("#cards-stats").innerHTML +=
-          `<details class="card-variant-summary" open><summary>${tr("各规格卡密统计", "Codes by variant")}</summary><div class="card-variant-grid">${stats.variants.map((variant) => `<article class="panel card-variant-metric"><h3>${escape(variant.name)}</h3><p class="caption">${escape(variant.price == null ? tr("未设置价格", "No price set") : `${variant.currency || "CNY"} ${variant.price}`)}${variant.enabled === false ? tr(" · 已停用", " · Disabled") : ""}</p><dl class="card-variant-counts"><div><dt>${tr("总发行", "Issued")}</dt><dd>${count(variant.summary?.total)}</dd></div><div><dt>${tr("未兑换卡密", "Unredeemed")}</dt><dd>${count(variant.summary?.remaining)}</dd></div></dl></article>`).join("")}</div><p class="caption">${tr(`规格合计：总发行 ${count(total)} 张，未兑换 ${count(remaining)} 张；均计入上方商品总量。`, `Variant totals: ${count(total)} issued, ${count(remaining)} unredeemed; included in the product totals above.`)}</p></details>`;
+          `<details class="card-variant-summary" open><summary>${tr("各规格卡密统计", "Codes by variant")}</summary><div class="card-variant-grid">${stats.variants.map((variant) => `<article class="panel card-variant-metric"><h3>${escape(variant.name)}</h3><p class="caption">${escape(variantPrice(variant))}${variant.enabled === false ? tr(" · 已停用", " · Disabled") : ""}</p><dl class="card-variant-counts"><div><dt>${tr("总发行", "Issued")}</dt><dd>${count(variant.summary?.total)}</dd></div><div><dt>${tr("未兑换卡密", "Unredeemed")}</dt><dd>${count(variant.summary?.remaining)}</dd></div></dl></article>`).join("")}</div><p class="caption">${tr(`规格合计：总发行 ${count(total)} 张，未兑换 ${count(remaining)} 张；均计入上方商品总量。`, `Variant totals: ${count(total)} issued, ${count(remaining)} unredeemed; included in the product totals above.`)}</p></details>`;
       }
     };
     const showInventory = (inventory) => {

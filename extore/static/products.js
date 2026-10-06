@@ -68,8 +68,8 @@
   };
   const priceLabel = (variant) =>
     variant.price === null || variant.price === undefined
-      ? "未设置售价"
-      : `${variant.price} ${variant.currency || "CNY"}`;
+      ? "未设置参考价"
+      : `参考价 ${variant.price} ${variant.currency || "CNY"}`;
   const inputTypes = [
     ["text", "文本"],
     ["email", "邮箱"],
@@ -339,7 +339,7 @@
       ${textarea("p-description", "商品描述（Markdown）", product.description)}
       ${field("p-support-email", "商家催办邮箱（可留空）", product.support_email || "", "email", 'maxlength="254" autocomplete="email"')}
       <div class="form-divider"><div class="section-head"><h3>处理步骤</h3><button type="button" id="add-progress-step" class="secondary">添加步骤</button></div><p class="caption">按处理顺序配置步骤，顾客可跟踪每一步的状态。修改只用于之后的任务，正在处理的任务会保留原来的步骤。</p><div id="product-progress-steps"></div></div>
-      <div class="form-divider"><div class="section-head"><h3>规格 / 档位</h3><button type="button" id="add-variant" class="secondary">添加规格</button></div><p class="caption">每个规格有独立的卡密库存，数量在卡密页查看。售价用于其他销售平台；这里不处理支付。</p><div id="product-variants"></div><p class="caption">规格标识固定。已有卡密的规格不能删除，可停用，避免继续发行。</p></div>
+      <div class="form-divider"><div class="section-head"><h3>规格 / 档位</h3><button type="button" id="add-variant" class="secondary">添加规格</button></div><p class="caption">每个规格有独立的卡密库存，数量在卡密页查看。参考价供外部商城配置参考；Extore 只负责兑换与交付，不收款。</p><div id="product-variants"></div><p class="caption">规格标识固定。已有卡密的规格不能删除，可停用，避免继续发行。</p></div>
       <div class="checks"><label><input id="p-public" type="checkbox" ${product.public ? "checked" : ""}>公开展示商品</label><label><input id="p-retry" type="checkbox" ${product.allow_retry ? "checked" : ""} ${disabled}>允许明确失败后重试</label></div>
       ${field("p-attempts", "最多尝试次数", product.max_attempts, "number", `${disabled} min="1" max="20"`)}
       <div class="form-divider" id="delivery-connection"><h3>发货对接</h3>
@@ -372,7 +372,7 @@
           throw new Error(`规格 ${index + 1} 的币种须为 3 至 5 位字母，例如 CNY 或 USDT`);
         if (price && (price.length > 100 || !/^[0-9]+(?:\.\d{1,6})?$/.test(price) ||
           (price.split(".")[0].replace(/^0+/, "") || "0").length > 12))
-          throw new Error(`规格 ${index + 1} 的价格必须是非负金额，最多 12 位整数、6 位小数`);
+          throw new Error(`规格 ${index + 1} 的参考价必须是非负金额，最多 12 位整数、6 位小数`);
         let attributes;
         try {
           attributes = JSON.parse($("#v-attributes-" + index).value);
@@ -401,7 +401,7 @@
     };
     const drawVariants = () => {
       $("#product-variants").innerHTML = variants.map((variant, index) =>
-        `<section class="variant-editor"><div class="section-head"><h4>规格 ${index + 1}</h4>${variant.id === "default" || variants.length === 1 ? "" : `<button type="button" class="danger" data-remove-variant="${index}">删除规格</button>`}</div><div class="variant-fields">${field("v-name-" + index, "规格名称", variant.name, "text", 'maxlength="120"')}${field("v-id-" + index, "固定规格标识", variant.id, "text", "readonly")}${field("v-price-" + index, "售价（可留空）", variant.price ?? "", "text", 'inputmode="decimal" placeholder="例如 19.90"')}${field("v-currency-" + index, "币种", variant.currency || "CNY", "text", 'maxlength="5" autocapitalize="characters"')}</div>${textarea("v-description-" + index, "规格说明", variant.description || "")}${textarea("v-attributes-" + index, "规格属性（JSON）", JSON.stringify(variant.attributes || {}, null, 2))}<p class="caption">例如：{"duration_months": 1, "tier": "basic"}，处理任务时会带上这些属性。</p><label class="variant-enabled"><input id="v-enabled-${index}" type="checkbox" ${variant.enabled !== false ? "checked" : ""}>启用此规格</label></section>`,
+        `<section class="variant-editor"><div class="section-head"><h4>规格 ${index + 1}</h4>${variant.id === "default" || variants.length === 1 ? "" : `<button type="button" class="danger" data-remove-variant="${index}">删除规格</button>`}</div><div class="variant-fields">${field("v-name-" + index, "规格名称", variant.name, "text", 'maxlength="120"')}${field("v-id-" + index, "固定规格标识", variant.id, "text", "readonly")}${field("v-price-" + index, "参考价（可留空）", variant.price ?? "", "text", 'inputmode="decimal" placeholder="例如 19.90"')}${field("v-currency-" + index, "币种", variant.currency || "CNY", "text", 'maxlength="5" autocapitalize="characters"')}</div>${textarea("v-description-" + index, "规格说明", variant.description || "")}${textarea("v-attributes-" + index, "规格属性（JSON）", JSON.stringify(variant.attributes || {}, null, 2))}<p class="caption">例如：{"duration_months": 1, "tier": "basic"}，处理任务时会带上这些属性。</p><label class="variant-enabled"><input id="v-enabled-${index}" type="checkbox" ${variant.enabled !== false ? "checked" : ""}>启用此规格</label></section>`,
       ).join("");
       all("[data-remove-variant]").forEach((node) =>
         node.addEventListener("click", () => perform(() => {

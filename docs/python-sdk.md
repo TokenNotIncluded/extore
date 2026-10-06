@@ -62,9 +62,9 @@ worker 只允许尚无计划、无已完成步骤的任务初始化一次 `progr
 
 ## SDK 任务与结果
 
-`Task` 字段为 `id`、`product_id`、`attempt`、`params`、`configuration`、`variant`、`steps`、`completed_steps` 与 `shop_context`。`configuration` 默认 `{}`；步骤计划和完成集合转为只读快照，默认空集合。`ShopContext` 是不可变的 `shop_id/profile_id/revision` 元数据，不含配置秘密，旧请求可省略。旧任务省略 `variant` 时使用固定默认规格（空属性、空参考价格、币种 `CNY`）。`idempotency_key` 等于稳定任务 ID，跨重试不变；真实交付必须按这个值去重。
+`Task` 字段为 `id`、`product_id`、`attempt`、`params`、`configuration`、`variant`、`steps`、`completed_steps` 与 `shop_context`。`configuration` 默认 `{}`；步骤计划和完成集合转为只读快照，默认空集合。`ShopContext` 是不可变的 `shop_id/profile_id/revision` 元数据，不含配置秘密，旧请求可省略。旧任务省略 `variant` 时使用固定默认规格（空属性、空参考价、币种 `CNY`）。`idempotency_key` 等于稳定任务 ID，跨重试不变；真实交付必须按这个值去重。
 
-`variant` 是发行卡密时冻结的完整规格快照，包含 `id,name,description,price,currency,attributes,enabled`；以后停用规格或改价格、属性都不改旧卡。价格是字符串或 `None`，只作为商家跨平台建商品的参考。SDK 的 `steps` 每项含只读 `id,label`；页面和事件视图另外带 `done`。`completed_steps` 是本次尝试已经完成的步骤 ID。输入输出定义也在任务首次提交时冻结，队列商品后来调整表单只影响新任务；处理旧任务时用队列接口返回的任务 `parameters` / `outputs`，不能套用商品当前表单。
+`variant` 是发行卡密时冻结的完整规格快照，包含 `id,name,description,price,currency,attributes,enabled`；以后停用规格或改参考价、属性都不改旧卡。`price` 是参考价，以十进制字符串或 `None` 保存，仅供商家在外部商城配置商品时参考；Extore 只负责兑换与交付，不收款。SDK 的 `steps` 每项含只读 `id,label`；页面和事件视图另外带 `done`。`completed_steps` 是本次尝试已经完成的步骤 ID。输入输出定义也在任务首次提交时冻结，队列商品后来调整表单只影响新任务；处理旧任务时用队列接口返回的任务 `parameters` / `outputs`，不能套用商品当前表单。
 
 ```python
 from extore.sdk import Result, Task, run

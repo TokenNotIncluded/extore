@@ -115,6 +115,7 @@
       name: string(120, 1),
       description: string(10000),
       price: {
+        description: "Optional reference price for configuring an external store, not a checkout amount. Extore does not collect payments. Preserve exact decimal text.",
         type: ["string", "null"],
         maxLength: 100,
         pattern: "^\\d+(?:\\.\\d{1,6})?$",
@@ -751,7 +752,7 @@
       )
         throw new ToolError(
           "invalid_arguments",
-          "Variant prices allow at most twelve integer digits.",
+          "Variant reference prices allow at most twelve integer digits.",
         );
       if (Object.values(variant.attributes || {}).some((value) =>
         typeof value === "number" && Number.isInteger(value) && !Number.isSafeInteger(value)))
@@ -1502,7 +1503,7 @@
       add(
         "product_export_prompt",
         "导出商品 AI 提示词",
-        "Export safe product listing information as a plain prompt for creating a listing on a sales platform. Includes variant metadata and exact prices, never fulfillment secrets, raw card codes, or private links. Optional inventory is unredeemed card counts, not unsold stock, and is queried only with current cards.manage authority. This read-only tool does not write to the clipboard or create an external listing.",
+        "Export safe product listing information as a plain prompt for creating a listing on an external sales platform. Includes variant metadata and exact reference prices for store configuration; Extore handles redemption and does not collect payments. Never includes fulfillment secrets, raw card codes, or private links. Optional inventory is unredeemed card counts, not unsold stock, and is queried only with current cards.manage authority. This read-only tool does not write to the clipboard or create an external listing.",
         object(
           {
             product_id: id,
