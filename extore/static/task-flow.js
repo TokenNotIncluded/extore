@@ -87,6 +87,8 @@
       if (error) error.textContent = "";
       try {
         const currentFlow = view.flow;
+        const submissionScope = JSON.stringify([currentFlow.flow_epoch, currentFlow.revision, currentFlow.current?.id]);
+        const submitActive = () => active() && submissionScope === JSON.stringify([view.flow.flow_epoch, view.flow.revision, view.flow.current?.id]);
         if (requestedAction !== "cancel" && !(currentFlow.actions || []).includes(requestedAction)) throw new Error(tr("当前步骤已经变化，请刷新后继续。", "The step has changed. Refresh to continue."));
         const body = { token: ctx.token, flow_epoch: currentFlow.flow_epoch, expected_revision: currentFlow.revision };
         if (ctx.cardId) body.card_id = ctx.cardId;
@@ -100,24 +102,26 @@
               if (definition.type !== "images" && chosen.length > 1) throw new Error(tr("这个填写项只能上传一个文件。", "This field accepts one file."));
               if (definition.type === "images" && chosen.length > (definition.max_items || 10)) throw new Error(tr("选择的图片数量超过这个填写项的限制。", "Too many images for this field."));
               let cached = view.uploads.get(definition.key);
-              if (!cached || cached.sources.length !== chosen.length || cached.sources.some((file, index) => file !== chosen[index])) {
-                cached = { sources: chosen, ids: [] };
+              if (!cached || cached.scope !== submissionScope || cached.sources.length !== chosen.length || cached.sources.some((file, index) => file !== chosen[index])) {
+                cached = { scope: submissionScope, sources: chosen, ids: [] };
                 view.uploads.set(definition.key, cached);
               }
               for (const [index, file] of chosen.entries()) {
                 if (cached.ids[index]) continue;
                 const upload = { token: ctx.token, field_key: definition.key, flow_epoch: currentFlow.flow_epoch, expected_revision: currentFlow.revision, node_id: currentFlow.current.id };
                 if (ctx.cardId) upload.card_id = ctx.cardId;
-                cached.ids[index] = (await ctx.upload("/files/upload", upload, file)).id;
-                if (!active()) return;
+                if (!submitActive()) return;
+                cached.ids[index] = (await ctx.upload("/files/upload", upload, file, { isCurrent: submitActive })).id;
+                if (!submitActive()) return;
               }
               const ids = cached.ids;
               body.values[definition.key] = definition.type === "images" ? JSON.stringify(ids) : ids[0] || "";
             } else body.values[definition.key] = window.ExtoreFields?.read ? window.ExtoreFields.read(node, definition) : node.value;
           }
         }
+        if (!submitActive()) return;
         const result = await ctx.api("/task-flow/" + requestedAction, body);
-        if (active()) await view.ctx.onResult(result);
+        if (submitActive()) await view.ctx.onResult(result);
       } catch (failure) {
         if (active() && error) error.textContent = failure.message || String(failure);
       } finally {

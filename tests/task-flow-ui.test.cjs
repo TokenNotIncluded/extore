@@ -208,3 +208,44 @@ test("cancellation requires confirmation and uses the current step revision", as
   assert.equal(page.requests[0].body.expected_revision, 7);
   assert.equal(page.requests[0].body.values, undefined);
 });
+
+
+test("waiting for upload limits never sends old-step attachments after navigation or revision change", async () => {
+  for (const changedRevision of [false, true]) {
+    const page = fixture(), module = page.context.window.ExtoreTaskFlow;
+    const stage = flow("input", { current: { id: "upload", kind: "input", fields: [{ key: "brief", type: "file" }] } });
+    page.ctx.flow = stage;
+    let release, invoked = false;
+    const waiting = new Promise((resolve) => { release = resolve; });
+    page.ctx.upload = async (route, fields, file, options) => {
+      invoked = true;
+      await waiting;
+      if (!options?.isCurrent?.()) throw new Error("The submission changed while waiting for upload limits");
+      page.uploads.push({ route, fields, file });
+      return { id: "old-step-file" };
+    };
+    module.render(page.ctx);
+    page.node("task-flow-field-brief").files = [{ name: "brief.docx" }];
+    page.node("task-flow-form").emit("submit"); await flush();
+    assert.equal(invoked, true);
+    if (changedRevision) module.render({ ...page.ctx, flow: { ...stage, revision: 8 } });
+    else page.setActive(false);
+    release(); await flush();
+    assert.equal(page.uploads.length, 0);
+    assert.equal(page.requests.length, 0);
+    assert.equal(page.results.length, 0);
+  }
+});
+
+test("a delayed answer response cannot replace a newer revision of the same displayed input", async () => {
+  const page = fixture(), module = page.context.window.ExtoreTaskFlow;
+  page.ctx.flow = flow();
+  module.render(page.ctx);
+  page.node("task-flow-field-question").value = "Question";
+  page.node("task-flow-form").emit("submit"); await flush();
+  module.render({ ...page.ctx, flow: flow("input", { revision: 8 }) });
+  page.requests[0].resolve({ id: "job", task_flow: flow("processing", { revision: 7 }) });
+  await flush();
+  assert.equal(page.results.length, 0);
+  assert.equal(page.node("task-flow-field-question").value, "Question");
+});
