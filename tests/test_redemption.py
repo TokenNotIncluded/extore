@@ -16,11 +16,19 @@ def redeem(client, code):
 
 
 def finish(owner, j, content="secret"):
-    r = owner.post("/api/manage/batch", json={"ids": [j["id"]], "action": "claim"})
+    r = owner.post(
+        "/api/manage/batch",
+        json={"product_id": j["product_id"], "ids": [j["id"]], "action": "claim"},
+    )
     assert r.status_code == 200, r.text
     r = owner.post(
         "/api/manage/batch",
-        json={"ids": [j["id"]], "action": "succeed", "content": content},
+        json={
+            "product_id": j["product_id"],
+            "ids": [j["id"]],
+            "action": "succeed",
+            "content": content,
+        },
     )
     assert r.status_code == 200, r.text
 
@@ -107,11 +115,19 @@ def test_retry_attempt_limit(owner, setup_product):
     t, j = redeem(owner, code)
     for attempt in (1, 2):
         assert j["attempt"] == attempt
-        owner.post("/api/manage/batch", json={"ids": [j["id"]], "action": "claim"})
+        owner.post(
+            "/api/manage/batch",
+            json={"product_id": j["product_id"], "ids": [j["id"]], "action": "claim"},
+        )
         assert (
             owner.post(
                 "/api/manage/batch",
-                json={"ids": [j["id"]], "action": "fail", "retryable": True},
+                json={
+                    "product_id": j["product_id"],
+                    "ids": [j["id"]],
+                    "action": "fail",
+                    "retryable": True,
+                },
             ).status_code
             == 200
         )
@@ -128,10 +144,18 @@ def test_retry_attempt_limit(owner, setup_product):
 def test_failed_uncertain_requires_owner_confirmation(owner, setup_product):
     _, code = setup_product()
     t, j = redeem(owner, code)
-    owner.post("/api/manage/batch", json={"ids": [j["id"]], "action": "claim"})
     owner.post(
         "/api/manage/batch",
-        json={"ids": [j["id"]], "action": "fail", "retryable": False},
+        json={"product_id": j["product_id"], "ids": [j["id"]], "action": "claim"},
+    )
+    owner.post(
+        "/api/manage/batch",
+        json={
+            "product_id": j["product_id"],
+            "ids": [j["id"]],
+            "action": "fail",
+            "retryable": False,
+        },
     )
     assert (
         owner.post(
@@ -141,7 +165,8 @@ def test_failed_uncertain_requires_owner_confirmation(owner, setup_product):
     )
     assert (
         owner.post(
-            "/api/manage/batch", json={"ids": [j["id"]], "action": "retry"}
+            "/api/manage/batch",
+            json={"product_id": j["product_id"], "ids": [j["id"]], "action": "retry"},
         ).status_code
         == 200
     )
@@ -186,7 +211,11 @@ def test_batch_rollback(owner, setup_product):
     assert (
         owner.post(
             "/api/manage/batch",
-            json={"ids": [j["id"], "nonexistent"], "action": "claim"},
+            json={
+                "product_id": j["product_id"],
+                "ids": [j["id"], "nonexistent"],
+                "action": "claim",
+            },
         ).status_code
         == 404
     )

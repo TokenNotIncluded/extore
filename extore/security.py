@@ -1,5 +1,7 @@
 import hashlib
 import hmac
+import json
+import math
 import secrets
 import time
 
@@ -84,14 +86,107 @@ def session(request: Request, roles=("admin",)):
             fail("请先登录", 401)
         result = dict(row)
         if row["role"] == "staff":
-            staff = c.execute(
-                "SELECT * FROM staff WHERE id=? AND revoked=0 AND expires>?",
-                (row["staff_id"], time.time()),
-            ).fetchone()
-            if not staff:
-                fail("员工授权已过期或撤销", 401)
-            result["product_id"] = staff["product_id"]
+            authorize_management(c, result)
         return result
+
+
+def _staff_permissions(value):
+    from .models import LINK_PERMISSIONS
+
+    try:
+        permissions = json.loads(value)
+    except (TypeError, ValueError):
+        fail("商品管理链接无效，请重新登录", 401)
+    if (
+        not isinstance(permissions, list)
+        or not permissions
+        or any(not isinstance(p, str) or p not in LINK_PERMISSIONS for p in permissions)
+    ):
+        fail("商品管理链接无效，请重新登录", 401)
+    if (
+        {"queue.process", "queue.retry"} & set(permissions)
+        and "queue.view" not in permissions
+    ) or ("fulfillment.configure" in permissions and "product.edit" not in permissions):
+        fail("商品管理链接无效，请重新登录", 401)
+    return [p for p in LINK_PERMISSIONS if p in permissions]
+
+
+def staff_authorization(c, staff_id):
+    """Resolve a link and its ancestors under the caller's transaction."""
+    now = time.time()
+    seen = set()
+    current_id = staff_id
+    result = None
+    effective_permissions = None
+    effective_expires = None
+    while current_id is not None:
+        if current_id in seen:
+            fail("商品管理链接已过期或撤销", 401)
+        seen.add(current_id)
+        row = c.execute("SELECT * FROM staff WHERE id=?", (current_id,)).fetchone()
+        if not row or row["revoked"]:
+            fail("商品管理链接已过期或撤销", 401)
+        try:
+            expires = float(row["expires"])
+        except (TypeError, ValueError, OverflowError):
+            fail("商品管理链接已过期或撤销", 401)
+        if not math.isfinite(expires) or expires <= now:
+            fail("商品管理链接已过期或撤销", 401)
+        permissions = _staff_permissions(row["permissions"])
+        if result is None:
+            result = dict(row)
+            effective_permissions = permissions
+            effective_expires = expires
+        else:
+            if row["product_id"] != result["product_id"]:
+                fail("商品管理链接无效，请重新登录", 401)
+            effective_permissions = [
+                p for p in effective_permissions if p in permissions
+            ]
+            effective_expires = min(effective_expires, expires)
+        if not effective_permissions:
+            fail("商品管理链接无效，请重新登录", 401)
+        current_id = row["parent_id"]
+    if result is None:
+        fail("商品管理链接已过期或撤销", 401)
+    result["permissions"] = effective_permissions
+    result["expires"] = effective_expires
+    return result
+
+
+def authorize_management(c, s, permission=None):
+    """Refresh authorization before accessing or changing management data."""
+    from .models import LINK_PERMISSIONS
+
+    if s["role"] == "admin":
+        s["permissions"] = list(LINK_PERMISSIONS)
+    elif s["role"] == "staff":
+        staff = staff_authorization(c, s.get("staff_id"))
+        s.update(
+            product_id=staff["product_id"],
+            permissions=staff["permissions"],
+            name=staff["name"],
+            link_expires=staff["expires"],
+            parent_id=staff["parent_id"],
+        )
+    else:
+        fail("请先登录", 401)
+    if permission is not None and permission not in s["permissions"]:
+        fail("此商品管理链接没有执行该操作的权限", 403)
+    return s
+
+
+def link_descendant_ids(c, staff_id, include_self=True):
+    """Enumerate descendants once each, even if a corrupt hierarchy cycles."""
+    rows = c.execute(
+        "WITH RECURSIVE descendants(id) AS ("
+        " SELECT id FROM staff WHERE id=?"
+        " UNION"
+        " SELECT staff.id FROM staff JOIN descendants ON staff.parent_id=descendants.id"
+        ") SELECT id FROM descendants ORDER BY id",
+        (staff_id,),
+    )
+    return [r["id"] for r in rows if include_self or r["id"] != staff_id]
 
 
 def grant(c, value):

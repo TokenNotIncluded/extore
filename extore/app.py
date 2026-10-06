@@ -8,7 +8,6 @@ from pathlib import Path
 from fastapi import FastAPI, Request, Response
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel, Field
 
 from . import auth
 from .config import ORIGIN, check_config
@@ -18,18 +17,24 @@ from .models import (
     CodeInput,
     IssueCards,
     JobUpdate,
+    ManagementProduct,
     Product,
+    ProductLinkInput,
     Redemption,
+    StaffInput,
     TokenInput,
 )
 from .security import (
+    authorize_management,
     card_digest,
     create_session,
     digest,
     fail,
     grant,
+    link_descendant_ids,
     rate_limit,
     session,
+    staff_authorization,
     token,
     verify_signature,
 )
@@ -51,7 +56,7 @@ async def lifespan(app):
     yield
 
 
-app = FastAPI(title="Extore API", version="0.1.0", lifespan=lifespan)
+app = FastAPI(title="Extore API", version="0.2.0", lifespan=lifespan)
 app.include_router(auth.router)
 
 
@@ -231,28 +236,22 @@ def create_product(body: Product, request: Request):
 def edit_product(pid: str, body: Product, request: Request):
     session(request)
     with db() as c:
-        old = product(c, pid)
-        # Delivery semantics and automation must not change under outstanding cards.
-        if c.execute(
-            "SELECT 1 FROM cards WHERE product_id=? LIMIT 1", (pid,)
-        ).fetchone():
-            for field in (
-                "mode",
-                "delivery",
-                "view_policy",
-                "script",
-                "webhook_secret",
-            ):
-                if old[field] != getattr(body, field):
-                    fail(
-                        "已发行卡密的商品不能修改处理方式、交付方式、查看规则、脚本或签名密钥；请新建商品",
-                        409,
-                    )
-        c.execute(
-            "UPDATE products SET config=? WHERE id=?", (body.model_dump_json(), pid)
-        )
-        audit(c, "owner", "product.update", pid)
+        save_product(c, pid, body, "owner")
     return {"id": pid, **body.model_dump()}
+
+
+def save_product(c, pid, body, actor):
+    old = product(c, pid)
+    # Delivery semantics and automation must not change under outstanding cards.
+    if c.execute("SELECT 1 FROM cards WHERE product_id=? LIMIT 1", (pid,)).fetchone():
+        for field in ("mode", "delivery", "view_policy", "script", "webhook_secret"):
+            if old[field] != getattr(body, field):
+                fail(
+                    "已发行卡密的商品不能修改处理方式、交付方式、查看规则、脚本或签名密钥；请新建商品",
+                    409,
+                )
+    c.execute("UPDATE products SET config=? WHERE id=?", (body.model_dump_json(), pid))
+    audit(c, actor, "product.update", pid)
 
 
 @app.post("/api/admin/cards")
@@ -290,58 +289,95 @@ def revoke_card(cid: str, request: Request):
     return {"ok": True}
 
 
-class StaffInput(BaseModel):
-    product_id: str
-    name: str = Field(min_length=1, max_length=100)
-    days: int = Field(default=7, ge=1, le=90)
+def link_view(row):
+    return {
+        key: json.loads(row[key]) if key == "permissions" else row[key]
+        for key in (
+            "id",
+            "product_id",
+            "name",
+            "expires",
+            "revoked",
+            "permissions",
+            "parent_id",
+            "created",
+        )
+    }
+
+
+def create_product_link(c, body, s):
+    pid = queue_product_id(s, body.product_id)
+    product(c, pid)
+    now = time.time()
+    parent_id = s["staff_id"] if s["role"] == "staff" else None
+    if parent_id:
+        if not set(body.permissions) < set(s["permissions"]):
+            fail("下级权限必须是当前商品管理权限的严格子集", 403)
+        parent_expires = s["link_expires"]
+        expires = (
+            min(now + 7 * 86400, parent_expires)
+            if body.days is None
+            else now + body.days * 86400
+        )
+        if expires > parent_expires:
+            fail("下级链接期限不能超过当前商品管理链接", 403)
+    else:
+        expires = now + (7 if body.days is None else body.days) * 86400
+    sid = str(uuid.uuid4())
+    value = token()
+    c.execute(
+        "INSERT INTO staff(id,digest,product_id,name,expires,permissions,parent_id,created) VALUES (?,?,?,?,?,?,?,?)",
+        (
+            sid,
+            digest(value),
+            pid,
+            body.name,
+            expires,
+            json.dumps(body.permissions),
+            parent_id,
+            now,
+        ),
+    )
+    audit(c, parent_id or "owner", "staff.create", sid)
+    result = link_view(c.execute("SELECT * FROM staff WHERE id=?", (sid,)).fetchone())
+    return {**result, "url": ORIGIN + "/staff#" + value}
+
+
+def revoke_product_link(c, sid, actor):
+    if not c.execute("SELECT 1 FROM staff WHERE id=?", (sid,)).fetchone():
+        fail("商品管理链接不存在", 404)
+    ids = link_descendant_ids(c, sid)
+    for target in ids:
+        c.execute("UPDATE staff SET revoked=1 WHERE id=?", (target,))
+        c.execute("DELETE FROM sessions WHERE staff_id=?", (target,))
+        # Return unfinished delegated tasks to their product queue.
+        c.execute(
+            "UPDATE jobs SET state='queued',claimed_by=NULL,lease=NULL,progress=0 WHERE claimed_by=? AND state='processing'",
+            (target,),
+        )
+    audit(c, actor, "staff.revoke", sid)
+    return {"ok": True, "revoked_count": len(ids)}
 
 
 @app.post("/api/admin/staff")
 def create_staff(body: StaffInput, request: Request):
-    session(request)
-    value = token()
-    sid = str(uuid.uuid4())
+    s = session(request)
     with db() as c:
-        p = product(c, body.product_id)
-        if p["mode"] != "manual":
-            fail("只能为人工处理商品授权员工")
-        c.execute(
-            "INSERT INTO staff(id,digest,product_id,name,expires) VALUES (?,?,?,?,?)",
-            (
-                sid,
-                digest(value),
-                body.product_id,
-                body.name,
-                time.time() + body.days * 86400,
-            ),
-        )
-        audit(c, "owner", "staff.create", sid)
-    return {"id": sid, "url": ORIGIN + "/staff#" + value}
+        return create_product_link(c, body, s)
 
 
 @app.get("/api/admin/staff")
 def list_staff(request: Request):
     session(request)
     with db() as c:
-        return [
-            dict(r)
-            for r in c.execute("SELECT id,product_id,name,expires,revoked FROM staff")
-        ]
+        return [link_view(r) for r in c.execute("SELECT * FROM staff ORDER BY created")]
 
 
 @app.post("/api/admin/staff/{sid}/revoke")
 def revoke_staff(sid: str, request: Request):
     session(request)
     with db() as c:
-        c.execute("UPDATE staff SET revoked=1 WHERE id=?", (sid,))
-        c.execute("DELETE FROM sessions WHERE staff_id=?", (sid,))
-        # Explicitly release that employee's unfinished tasks to the queue.
-        c.execute(
-            "UPDATE jobs SET state='queued',claimed_by=NULL,lease=NULL,progress=0 WHERE claimed_by=? AND state='processing'",
-            (sid,),
-        )
-        audit(c, "owner", "staff.revoke", sid)
-    return {"ok": True}
+        return revoke_product_link(c, sid, "owner")
 
 
 @app.post("/api/staff/login")
@@ -349,11 +385,11 @@ def staff_login(body: TokenInput, request: Request, response: Response):
     rate_limit(request, "staff-login", 10, 60)
     with db() as c:
         row = c.execute(
-            "SELECT * FROM staff WHERE digest=? AND revoked=0 AND expires>?",
-            (digest(body.token), time.time()),
+            "SELECT * FROM staff WHERE digest=?", (digest(body.token),)
         ).fetchone()
         if not row:
-            fail("员工链接无效或已过期", 401)
+            fail("商品管理链接无效或已过期", 401)
+        staff_authorization(c, row["id"])
         c.execute(
             "DELETE FROM sessions WHERE digest=?",
             (digest(request.cookies.get("extore_session", "")),),
@@ -362,15 +398,53 @@ def staff_login(body: TokenInput, request: Request, response: Response):
     return {"role": "staff"}
 
 
+@app.get("/api/manage/products")
+def managed_products(request: Request):
+    s = session(request, ("admin", "staff"))
+    with db() as c:
+        queue_staff_authorization(c, s)
+        scope = s["product_id"] if s["role"] == "staff" else ""
+        rows = c.execute(
+            "SELECT * FROM products WHERE (?='' OR id=?) ORDER BY created",
+            (scope, scope),
+        ).fetchall()
+        return [
+            {
+                "id": r["id"],
+                **{
+                    key: value
+                    for key, value in json.loads(r["config"]).items()
+                    if key in ("name", "mode", "delivery", "view_policy")
+                },
+            }
+            for r in rows
+        ]
+
+
+def queue_staff_authorization(c, s):
+    return authorize_management(c, s)
+
+
+def queue_product_id(s, product_id):
+    if s["role"] == "staff":
+        if product_id and product_id != s["product_id"]:
+            fail("无权处理此商品", 403)
+        return s["product_id"]
+    if not product_id:
+        fail("请先选择商品")
+    return product_id
+
+
 @app.get("/api/manage/jobs")
 def jobs(request: Request, state: str = "", product_id: str = "", limit: int = 100):
     s = session(request, ("admin", "staff"))
-    if s["role"] == "staff":
-        product_id = s["product_id"]
     with db() as c:
+        authorize_management(c, s, "queue.view")
+        product_id = queue_product_id(s, product_id)
+        product(c, product_id)
         rows = c.execute(
-            "SELECT * FROM jobs WHERE (?='' OR product_id=?) AND (?='' OR state=?) ORDER BY created LIMIT ?",
-            (product_id, product_id, state, state, max(1, min(limit, 500))),
+            "SELECT * FROM jobs WHERE product_id=? AND (?='' OR state=?) ORDER BY created LIMIT ?",
+            (product_id, state, state, max(1, min(limit, 500))),
         ).fetchall()
         return [job_view(c, r, True) for r in rows]
 
@@ -380,19 +454,16 @@ def batch(body: BatchUpdate, request: Request):
     s = session(request, ("admin", "staff"))
     actor = s["staff_id"] if s["role"] == "staff" else "owner"
     with db() as c:
-        if (
-            s["role"] == "staff"
-            and not c.execute(
-                "SELECT 1 FROM staff WHERE id=? AND revoked=0 AND expires>?",
-                (s["staff_id"], time.time()),
-            ).fetchone()
-        ):
-            fail("员工授权已失效", 401)
-        for jid in dict.fromkeys(body.ids):
-            r = job(c, jid)
-            p = product(c, r["product_id"])
-            if s["role"] == "staff" and r["product_id"] != s["product_id"]:
-                fail("无权处理此商品", 403)
+        authorize_management(
+            c, s, "queue.retry" if body.action == "retry" else "queue.process"
+        )
+        product_id = queue_product_id(s, body.product_id)
+        p = product(c, product_id)
+        rows = [job(c, jid) for jid in dict.fromkeys(body.ids)]
+        if any(r["product_id"] != product_id for r in rows):
+            fail("批处理只能包含所选商品的任务", 403)
+        for r in rows:
+            jid = r["id"]
             if p["mode"] != "manual" and body.action != "retry":
                 fail("自动处理任务不能由人工覆盖", 409)
             if body.action == "claim":
@@ -426,13 +497,191 @@ def batch(body: BatchUpdate, request: Request):
                     ),
                 )
             elif body.action == "retry":
-                if s["role"] != "admin":
-                    fail("只有商家能核实并放行重试", 403)
                 if r["state"] != "failed":
                     fail("只能放行失败的任务", 409)
                 c.execute("UPDATE jobs SET retryable=1 WHERE id=?", (jid,))
             audit(c, actor, "job." + body.action, jid)
     return {"ok": True}
+
+
+def management_scope(c, s, product_id, permission):
+    authorize_management(c, s, permission)
+    pid = queue_product_id(s, product_id)
+    product(c, pid)
+    return pid
+
+
+def management_actor(s):
+    return s["staff_id"] if s["role"] == "staff" else "owner"
+
+
+@app.get("/api/manage/product")
+def managed_product(request: Request, product_id: str = ""):
+    s = session(request, ("admin", "staff"))
+    with db() as c:
+        pid = management_scope(c, s, product_id, "product.edit")
+        return managed_product_view(product(c, pid), s)
+
+
+def managed_product_view(p, s):
+    if "fulfillment.configure" not in s["permissions"]:
+        return {**p, "webhook_secret": ""}
+    return p
+
+
+@app.put("/api/manage/product")
+def edit_managed_product(
+    body: ManagementProduct, request: Request, product_id: str = ""
+):
+    s = session(request, ("admin", "staff"))
+    with db() as c:
+        pid = management_scope(c, s, product_id, "product.edit")
+        old = product(c, pid)
+        values = body.model_dump()
+        if not values["webhook_secret"]:
+            values["webhook_secret"] = old["webhook_secret"]
+        if "fulfillment.configure" not in s["permissions"]:
+            for field in (
+                "mode",
+                "delivery",
+                "view_policy",
+                "script",
+                "webhook_url",
+                "webhook_secret",
+                "allow_retry",
+                "max_attempts",
+            ):
+                if values[field] != old[field]:
+                    fail("修改发货、查看或重试配置需要配置发货权限", 403)
+        try:
+            updated = Product.model_validate(values)
+        except ValueError:
+            fail("商品配置格式错误", 422)
+        save_product(c, pid, updated, management_actor(s))
+        return managed_product_view({"id": pid, **updated.model_dump()}, s)
+
+
+@app.get("/api/manage/cards")
+def managed_cards(request: Request, product_id: str = "", limit: int = 100):
+    s = session(request, ("admin", "staff"))
+    with db() as c:
+        pid = management_scope(c, s, product_id, "cards.manage")
+        return [
+            dict(r)
+            for r in c.execute(
+                "SELECT id,product_id,state,created FROM cards WHERE product_id=? ORDER BY created DESC LIMIT ?",
+                (pid, max(1, min(limit, 500))),
+            )
+        ]
+
+
+@app.post("/api/manage/cards")
+def issue_managed_cards(body: IssueCards, request: Request):
+    s = session(request, ("admin", "staff"))
+    with db() as c:
+        pid = management_scope(c, s, body.product_id, "cards.manage")
+        codes = issue_cards(c, pid, body.count)
+        audit(c, management_actor(s), "cards.issue", f"{pid}:{body.count}")
+    return {"codes": codes}
+
+
+@app.post("/api/manage/cards/{cid}/revoke")
+def revoke_managed_card(cid: str, request: Request, product_id: str = ""):
+    s = session(request, ("admin", "staff"))
+    with db() as c:
+        pid = management_scope(c, s, product_id, "cards.manage")
+        row = c.execute("SELECT * FROM cards WHERE id=?", (cid,)).fetchone()
+        if not row:
+            fail("卡密不存在", 404)
+        if row["product_id"] != pid:
+            fail("无权管理此商品的卡密", 403)
+        if row["state"] != "ready":
+            fail("只能撤销尚未兑换的卡密", 409)
+        c.execute("UPDATE cards SET state='revoked' WHERE id=?", (cid,))
+        c.execute("DELETE FROM grants WHERE card_id=?", (cid,))
+        audit(c, management_actor(s), "card.revoke", cid)
+    return {"ok": True}
+
+
+@app.get("/api/manage/events")
+def managed_events(request: Request, product_id: str = "", limit: int = 100):
+    s = session(request, ("admin", "staff"))
+    with db() as c:
+        pid = management_scope(c, s, product_id, "events.manage")
+        return [
+            dict(r)
+            for r in c.execute(
+                "SELECT events.id,type,job_id,product_id,created,outbox.state AS webhook_state,attempts,error FROM events LEFT JOIN outbox ON outbox.id=events.id WHERE events.product_id=? ORDER BY created DESC LIMIT ?",
+                (pid, max(1, min(limit, 500))),
+            )
+        ]
+
+
+@app.post("/api/manage/events/{eid}/retry")
+def retry_managed_event(eid: str, request: Request, product_id: str = ""):
+    s = session(request, ("admin", "staff"))
+    with db() as c:
+        pid = management_scope(c, s, product_id, "events.manage")
+        row = c.execute(
+            "SELECT events.product_id,outbox.state FROM events LEFT JOIN outbox ON outbox.id=events.id WHERE events.id=?",
+            (eid,),
+        ).fetchone()
+        if not row:
+            fail("事件不存在", 404)
+        if row["product_id"] != pid:
+            fail("无权管理此商品的事件", 403)
+        if row["state"] != "dead":
+            fail("只能重试已停止投递的事件", 409)
+        c.execute(
+            "UPDATE outbox SET state='pending',attempts=0,due=? WHERE id=?",
+            (time.time(), eid),
+        )
+        audit(c, management_actor(s), "webhook.retry", eid)
+    return {"ok": True}
+
+
+@app.get("/api/manage/links")
+def managed_links(request: Request, product_id: str = ""):
+    s = session(request, ("admin", "staff"))
+    with db() as c:
+        pid = management_scope(c, s, product_id, "links.delegate")
+        descendants = (
+            set(link_descendant_ids(c, s["staff_id"], include_self=False))
+            if s["role"] == "staff"
+            else None
+        )
+        return [
+            link_view(r)
+            for r in c.execute(
+                "SELECT * FROM staff WHERE product_id=? ORDER BY created", (pid,)
+            )
+            if descendants is None or r["id"] in descendants
+        ]
+
+
+@app.post("/api/manage/links")
+def delegate_link(body: ProductLinkInput, request: Request):
+    s = session(request, ("admin", "staff"))
+    with db() as c:
+        authorize_management(c, s, "links.delegate")
+        return create_product_link(c, body, s)
+
+
+@app.post("/api/manage/links/{sid}/revoke")
+def revoke_managed_link(sid: str, request: Request, product_id: str = ""):
+    s = session(request, ("admin", "staff"))
+    with db() as c:
+        pid = management_scope(c, s, product_id, "links.delegate")
+        if s["role"] == "staff" and sid not in link_descendant_ids(
+            c, s["staff_id"], include_self=False
+        ):
+            fail("只能撤销自己创建的下级商品管理链接", 403)
+        row = c.execute("SELECT product_id FROM staff WHERE id=?", (sid,)).fetchone()
+        if not row:
+            fail("商品管理链接不存在", 404)
+        if row["product_id"] != pid:
+            fail("无权管理此商品的链接", 403)
+        return revoke_product_link(c, sid, management_actor(s))
 
 
 @app.get("/api/admin/events")

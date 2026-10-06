@@ -3,6 +3,52 @@ from urllib.parse import urlsplit
 
 from pydantic import BaseModel, Field, model_validator
 
+LINK_PERMISSIONS = (
+    "queue.view",
+    "queue.process",
+    "queue.retry",
+    "product.edit",
+    "fulfillment.configure",
+    "cards.manage",
+    "events.manage",
+    "links.delegate",
+)
+DEFAULT_LINK_PERMISSIONS = ("queue.view", "queue.process")
+
+
+class ProductLinkInput(BaseModel):
+    product_id: str = Field(default="", max_length=100)
+    name: str = Field(min_length=1, max_length=100)
+    days: float | None = Field(default=None, gt=0, le=90)
+    permissions: list[str] = Field(
+        default_factory=lambda: list(DEFAULT_LINK_PERMISSIONS),
+        min_length=1,
+        max_length=20,
+    )
+
+    @model_validator(mode="after")
+    def permission_scope(self):
+        if set(self.permissions) - set(LINK_PERMISSIONS):
+            raise ValueError("存在未定义的商品管理权限")
+        if {"queue.process", "queue.retry"} & set(
+            self.permissions
+        ) and "queue.view" not in self.permissions:
+            raise ValueError("处理或重试队列必须同时允许查看队列")
+        if (
+            "fulfillment.configure" in self.permissions
+            and "product.edit" not in self.permissions
+        ):
+            raise ValueError("配置发货必须同时允许管理商品展示与参数")
+        self.permissions = [p for p in LINK_PERMISSIONS if p in self.permissions]
+        self.name = self.name.strip()
+        if not self.name:
+            raise ValueError("请输入商品管理链接名称")
+        return self
+
+
+class StaffInput(ProductLinkInput):
+    product_id: str = Field(min_length=1, max_length=100)
+
 
 class Parameter(BaseModel):
     key: str = Field(pattern=r"^[a-z][a-z0-9_]{0,39}$")
@@ -41,13 +87,18 @@ class Product(BaseModel):
 
     @model_validator(mode="after")
     def validate_config(self):
+        return self._validate_config()
+
+    def _validate_config(self, allow_blank_secret=False):
         if len({p.key for p in self.parameters}) != len(self.parameters):
             raise ValueError("参数代码名不能重复")
         if self.webhook_url:
             u = urlsplit(self.webhook_url)
             if u.scheme != "https" or not u.hostname or u.username or u.fragment:
                 raise ValueError("Webhook 必须使用 HTTPS 且不能含用户信息或片段")
-            if len(self.webhook_secret) < 32:
+            if len(self.webhook_secret) < 32 and not (
+                allow_blank_secret and not self.webhook_secret
+            ):
                 raise ValueError("Webhook 密钥至少 32 字符")
         if self.mode == "webhook" and not self.webhook_url:
             raise ValueError("请配置 Webhook 地址")
@@ -59,6 +110,14 @@ class Product(BaseModel):
             ):
                 raise ValueError("商品图片必须是 HTTPS 地址")
         return self
+
+
+class ManagementProduct(Product):
+    @model_validator(mode="after")
+    def validate_config(self):
+        # Management read/edit round trips may omit the masked signing secret.
+        # The API merges the stored secret and validates a complete Product again.
+        return self._validate_config(allow_blank_secret=True)
 
 
 class CodeInput(BaseModel):
@@ -89,6 +148,7 @@ class JobUpdate(BaseModel):
 
 
 class BatchUpdate(BaseModel):
+    product_id: str = Field(min_length=1, max_length=100)
     progress: int = Field(default=0, ge=0, le=99)
     ids: list[str] = Field(min_length=1, max_length=100)
     action: Literal["claim", "progress", "succeed", "fail", "retry"]

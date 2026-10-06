@@ -41,6 +41,7 @@ def status(request: Request):
     with db() as c:
         configured = bool(setting(c, "bootstrap_password"))
         passkeys = c.execute("SELECT count(*) FROM credentials").fetchone()[0]
+    s = None
     try:
         s = session(request, ("admin", "bootstrap", "staff"))
         role = s["role"]
@@ -50,11 +51,21 @@ def status(request: Request):
         if not isinstance(e, HTTPException):
             raise
         role = None
-    return {
+    result = {
         "configured": configured or bool(passkeys),
         "password_enabled": configured and not passkeys,
         "role": role,
     }
+    if role == "staff":
+        result.update(
+            product_id=s["product_id"],
+            permissions=s["permissions"],
+            link_id=s["staff_id"],
+            link_name=s["name"],
+            link_expires=s["link_expires"],
+            parent_id=s["parent_id"],
+        )
+    return result
 
 
 @router.post("/password")

@@ -7,7 +7,7 @@
 ```mermaid
 stateDiagram-v2
   [*] --> queued: 提交兑换
-  queued --> processing: 员工领取 / worker / 平台进度
+  queued --> processing: 管理者领取 / worker / 平台进度
   queued --> succeeded: 平台直接完成
   queued --> failed: 平台明确失败
   processing --> succeeded: 交付完成
@@ -148,20 +148,98 @@ Content-Type: application/json
 | `POST /api/receipt/reveal` | `{token}` | 显式领取内容；一次领取原子消费 |
 | `POST /api/receipt/destroy` | `{token}` | 永久关闭应用内交付内容 |
 
-不能根据商品 UUID 直接打开非公开商品。兑换凭证、员工链接和卡密都是秘密，不记录在分析工具中，不植入第三方前端脚本。API 不在状态查询中自动返回交付内容。
+不能根据商品 UUID 直接打开非公开商品。兑换凭证、商品管理链接和卡密都是秘密，不记录在分析工具中，不植入第三方前端脚本。API 不在状态查询中自动返回交付内容。
 
-## 商家与员工接口
+## 商家接口
 
 商家完整接口可在 `/docs` 查看。认证 Cookie HttpOnly、SameSite=Strict、生产 Secure；写操作校验 Origin。
 
-商家可维护商品、批量制卡、撤销未兑换卡密、维护员工链接、查看事件、重投事件和管理多个 Passkey。员工会话只可调用 `/api/manage/jobs` 与 `/api/manage/batch`，服务端强制限定商品。
+商家可创建与维护商品、批量制卡、撤销未兑换卡密、维护商品管理链接、查看与重投事件，以及管理多个 Passkey。第一次注册 Passkey 后密码登录禁用；添加或移除 Passkey 需要最近 10 分钟内登录，最后一个 Passkey 不能从网页删除。全部遗失时通过 SSH 的 `reset-auth` 命令恢复。
+
+## 商品管理链接
+
+一个链接只授权一个商品。店长、处理人员等名称用于区分管理者，权限由链接的 `permissions` 决定。最大权限是该商品的全部管理权限，不包括创建其他商品、全店设置、支付平台 Key、商家认证或 Passkey 管理。
+
+| 权限 | 允许的操作 |
+|---|---|
+| `queue.view` | 查看该商品任务、参数和处理进度 |
+| `queue.process` | 领取人工任务，更新、完成或标记自己领取的任务失败；须同时有 `queue.view` |
+| `queue.retry` | 核实失败任务后放行重试；须同时有 `queue.view` |
+| `product.edit` | 查看与编辑商品展示信息和顾客参数；单独授予时不能读取签名密钥或更改发货、查看与重试规则 |
+| `fulfillment.configure` | 读取与配置该商品发货方式、查看与重试规则、脚本和签名密钥；须同时有 `product.edit` |
+| `cards.manage` | 为该商品生成卡密、查看卡密状态、撤销未兑换卡密 |
+| `events.manage` | 查看与重投该商品事件 |
+| `links.delegate` | 为该商品生成更小权限的链接，查看与撤销自己的后代链接 |
+
+全部八项权限用于店长管理指定商品。默认权限和升级前已有链接的权限为 `["queue.view","queue.process"]`，不会自动扩大。未知权限、空权限列表、处理或重试权限缺少 `queue.view`，以及自动发货配置权限缺少 `product.edit`，都返回 422。
+
+`fulfillment.configure` 可以读取 Webhook 签名密钥。对于采用 Webhook 处理的商品，持有该密钥可以向系统提交该商品的签名回调。因此，此权限具有控制该商品外部发货的能力，不能只因为需要编辑商品展示就授予。队列操作仍单独校验 `queue.process` 与 `queue.retry`。
+
+持有 `links.delegate` 的管理者可以创建子链接，限制如下：
+
+- 商品必须与父链接相同。
+- 子链接权限必须是父链接权限的**严格子集**，不能相同或增加。是否允许子链接继续委派，由是否保留 `links.delegate` 决定。
+- 有效期不能超过父链接或任何祖先。父链接撤销或过期时，所有后代都失效，已登录会话也不能继续操作。
+- 管理者只能查看和撤销自己的后代，不能撤销父链接或其他分支。撤销会级联撤销后代，并把它们尚在处理的人工任务放回原商品队列。
+
+登录使用链接片段中的凭证提交 `POST /api/staff/login`，请求为 `{token}`。`/staff`、`/api/admin/staff` 和认证角色 `staff` 为兼容保留，界面统一称为商品管理链接。原始链接只在创建时返回，列表不包含凭证或数据库摘要。
+
+`GET /api/auth/status` 的链接会话返回 `role="staff"`、`product_id`、`permissions`、`link_id`、`link_name`、`link_expires` 和 `parent_id`。`link_expires` 是当前链接与全部祖先中最早的到期时间，使用 Unix 秒。权限与祖先有效性在每次操作时重新校验，不能只信任前端缓存的认证状态。
+
+商家创建店长链接：
+
+```http
+POST /api/manage/links
+Content-Type: application/json
+
+{
+  "product_id": "商品 UUID",
+  "name": "店长",
+  "days": 7,
+  "permissions": ["queue.view", "queue.process", "queue.retry", "product.edit", "fulfillment.configure", "cards.manage", "events.manage", "links.delegate"]
+}
+```
+
+店长使用同一接口生成处理人员链接，商品可省略，由当前链接确定：
+
+```json
+{"name":"资料处理","days":1,"permissions":["queue.view","queue.process"]}
+```
+
+`name` 长 1–100 字符；`days` 为大于 0、最多 90 的天数，可使用小数。商家省略 `days` 时有效 7 天；下级省略时为 7 天与父链接剩余有效期的较短者。显式期限超过父链接、权限相同或扩大，均返回 403。`permissions` 省略时使用默认的队列查看与处理权限，重复权限会去重。
+
+创建响应包含 `id`、`product_id`、`name`、`permissions`、`parent_id`、`created`、`expires`、`revoked` 和一次性返回的 `url`。列表省略 `url`。撤销返回 `{ok:true,revoked_count}`，数量包括被撤销的链接及后代。商家兼容接口 `POST /api/admin/staff` 使用相同创建字段，但 `product_id` 必填；`GET /api/admin/staff` 查看全店管理链接，`POST /api/admin/staff/{id}/revoke` 撤销指定分支。
+
+## 按商品管理接口
+
+以下接口同时供商家和商品管理链接使用。GET、PUT 与路径撤销/重投接口用查询参数 `product_id` 选择商品：商家必须指定，链接持有人可省略并默认自己的商品；指定其他商品返回 403。`GET /api/manage/products` 返回最小商品概要，不需要队列查看权限。
+
+| 接口 | 权限 | 请求与结果 |
+|---|---|---|
+| `GET /api/manage/products` | 有效管理会话 | 商品概要列表：`id,name,mode,delivery,view_policy` |
+| `GET /api/manage/product` | `product.edit` | 当前商品配置；没有 `fulfillment.configure` 时 `webhook_secret` 为空字符串 |
+| `PUT /api/manage/product` | `product.edit` | JSON 为商品配置；`product_id` 在查询参数，不放入 JSON；发货配置还需 `fulfillment.configure`，响应按 GET 的规则隐藏密钥 |
+| `GET /api/manage/cards` | `cards.manage` | 卡密 ID、商品、状态与创建时间；不返回原卡密或摘要 |
+| `POST /api/manage/cards` | `cards.manage` | `{product_id,count}`；商品必填，数量 1–1000，默认 1；返回 `{codes}` |
+| `POST /api/manage/cards/{id}/revoke` | `cards.manage` | 仅撤销当前商品尚未兑换的卡密 |
+| `GET /api/manage/events` | `events.manage` | 当前商品的事件及投递状态，不含完整参数、内容或签名密钥 |
+| `POST /api/manage/events/{id}/retry` | `events.manage` | 仅重投当前商品 `dead` 的事件 |
+| `GET /api/manage/links` | `links.delegate` | 商家查看当前商品全部链接；管理者只查看自己的后代 |
+| `POST /api/manage/links` | `links.delegate` | `{product_id?,name,days?,permissions?}`；创建同商品的更小权限链接 |
+| `POST /api/manage/links/{id}/revoke` | `links.delegate` | 级联撤销当前商品内有权管理的链接分支 |
+
+商品更新时，`webhook_secret` 留空表示保留原值，合并后再验证完整配置。没有 `fulfillment.configure` 的管理者不能更改 `mode`、`delivery`、`view_policy`、`script`、`webhook_url`、`webhook_secret`、`allow_retry` 或 `max_attempts`，修改返回 403。拥有此权限可以配置这些字段，但仍受前文所述的已发卡配置限制，改变已冻结字段仍返回 409。商品管理链接不能安装服务器脚本、创建新商品或调用全店 `/api/admin/*` 接口。
+
+## 商品队列
+
+队列按商品分开。`GET /api/manage/products` 返回有权管理的商品概要；商品管理链接只得到授权商品。商家查询 `GET /api/manage/jobs?product_id=<商品 UUID>` 必须指定商品，链接持有人可省略并默认使用授权商品；查看队列需要 `queue.view`。排队顺序和前方任务数量在商品内独立计算。
 
 `POST /api/manage/batch`：
 
 ```json
-{"ids":["任务 UUID"],"action":"progress","progress":50,"message":"资料审核完成"}
+{"product_id":"商品 UUID","ids":["任务 UUID"],"action":"progress","progress":50,"message":"资料审核完成"}
 ```
 
-`action`: `claim` / `progress` / `succeed` / `fail` / `retry`。一次最多 100 个任务，整批事务要么成功、要么回滚。领取只接受排队任务；进度、完成和失败只接受自己领取的人工任务；`retry` 仅商家可用，核实后允许失败任务由顾客再次提交。自动任务不能人工覆盖交付。
+`action`: `claim` / `progress` / `succeed` / `fail` / `retry`。`product_id` 必填，一次最多 100 个同商品任务，混入其他商品返回 403 且整批回滚。整批事务要么成功、要么回滚。`claim`、`progress`、`succeed` 与 `fail` 需要 `queue.process`；领取只接受排队任务，进度、完成和失败只接受自己领取的人工任务。`retry` 需要 `queue.retry`，核实后允许失败任务由顾客再次提交。商家拥有这些权限。自动任务不能人工覆盖交付。
 
 事件记录不含完整参数和交付内容，审计记录保存操作者、动作、目标及时间。敏感内容的完整备份、保留期和外部平台删除策略需由商家制定。

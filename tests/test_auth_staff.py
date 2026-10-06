@@ -61,20 +61,27 @@ def test_staff_scoping_claim_and_revocation(owner, setup_product):
     assert [j["id"] for j in owner.get("/api/manage/jobs").json()] == [j["id"]]
     assert (
         owner.post(
-            "/api/manage/batch", json={"ids": [j2["id"]], "action": "claim"}
+            "/api/manage/batch",
+            json={"product_id": j["product_id"], "ids": [j2["id"]], "action": "claim"},
         ).status_code
         == 403
     )
     assert (
         owner.post(
             "/api/manage/batch",
-            json={"ids": [j["id"]], "action": "succeed", "content": "x"},
+            json={
+                "product_id": j["product_id"],
+                "ids": [j["id"]],
+                "action": "succeed",
+                "content": "x",
+            },
         ).status_code
         == 409
     )
     assert (
         owner.post(
-            "/api/manage/batch", json={"ids": [j["id"]], "action": "claim"}
+            "/api/manage/batch",
+            json={"product_id": j["product_id"], "ids": [j["id"]], "action": "claim"},
         ).status_code
         == 200
     )
@@ -96,7 +103,12 @@ def test_staff_scoping_claim_and_revocation(owner, setup_product):
     assert (
         owner.post(
             "/api/manage/batch",
-            json={"ids": [j["id"]], "action": "succeed", "content": "x"},
+            json={
+                "product_id": j["product_id"],
+                "ids": [j["id"]],
+                "action": "succeed",
+                "content": "x",
+            },
         ).status_code
         == 409
     )

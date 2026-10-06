@@ -16,4 +16,7 @@ jobs:
       - run: uv run pytest -q
       - run: uv run python -m compileall -q extore scripts
       - run: node --check extore/static/app.js
+      - run: node --check extore/static/webmcp.js
+      - run: node --test tests/webmcp.test.cjs
+      - run: node --test tests/receipt-context.test.cjs
       - run: uv build

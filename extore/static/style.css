@@ -716,3 +716,197 @@ td pre {
     scroll-behavior: auto !important;
   }
 }
+
+/* Paper slips: straight perforations and a deliberately simplified torn edge. */
+:root {
+  --perforation: url("/static/perforation.svg");
+}
+header,
+footer {
+  border: 0;
+  background-image: var(--perforation);
+  background-repeat: repeat-x;
+}
+header {
+  background-position: left bottom;
+}
+footer {
+  background-position: left top;
+}
+.intro {
+  grid-template-columns: minmax(230px, 340px) minmax(0, 560px);
+  justify-content: center;
+  gap: 64px;
+  align-items: center;
+}
+.intro-copy {
+  padding: 34px 30px 28px;
+  background: var(--white);
+  min-height: 140px;
+}
+.intro-copy h1 {
+  max-width: none;
+  font-size: 28px;
+  font-weight: 550;
+}
+.paper-divider {
+  height: 1px;
+  margin: 26px 0 0;
+  background: var(--perforation) repeat-x;
+}
+.intro-copy,
+.exchange,
+.panel {
+  position: relative;
+  border: 0;
+  border-radius: 0;
+  filter: drop-shadow(0 10px 16px rgb(36 60 53 / 5%));
+}
+.intro-copy::after,
+.exchange::after,
+.panel::after {
+  content: "";
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: -12px;
+  height: 13px;
+  background: var(--white);
+  clip-path: polygon(
+    0 0,
+    100% 0,
+    100% 35%,
+    97% 100%,
+    94% 30%,
+    91% 90%,
+    88% 38%,
+    85% 100%,
+    82% 30%,
+    79% 94%,
+    76% 40%,
+    73% 100%,
+    70% 32%,
+    67% 88%,
+    64% 35%,
+    61% 100%,
+    58% 30%,
+    55% 92%,
+    52% 38%,
+    49% 100%,
+    46% 30%,
+    43% 90%,
+    40% 38%,
+    37% 100%,
+    34% 30%,
+    31% 94%,
+    28% 35%,
+    25% 100%,
+    22% 32%,
+    19% 88%,
+    16% 35%,
+    13% 100%,
+    10% 30%,
+    7% 92%,
+    4% 38%,
+    0 80%
+  );
+  pointer-events: none;
+}
+.exchange .footnote {
+  padding-top: 20px;
+  margin-top: 28px;
+  background: var(--perforation) left top repeat-x;
+}
+.product-list,
+.product-row,
+.parameter,
+.form-divider,
+.tabs,
+.empty,
+td,
+th {
+  border-color: #bac6bb;
+  border-style: dashed;
+  border-left: 0;
+  border-right: 0;
+}
+.product-list {
+  border-bottom: 0;
+}
+.product-row {
+  border-top: 0;
+}
+.tabs {
+  border-top: 0;
+}
+.parameter,
+.form-divider,
+.empty {
+  border-bottom: 0;
+}
+.table-wrap td,
+.table-wrap th {
+  border-top: 0;
+}
+.queue-picker {
+  margin-top: 24px;
+}
+.queue-heading {
+  margin-top: 26px;
+}
+.queue-heading .caption {
+  margin-top: 6px;
+}
+@media (max-width: 760px) {
+  .intro {
+    grid-template-columns: 1fr;
+    gap: 34px;
+  }
+  .intro-copy {
+    padding: 24px;
+    min-height: 0;
+  }
+  .intro-copy h1 {
+    font-size: 24px;
+  }
+  .intro-copy .paper-divider {
+    margin-top: 22px;
+  }
+}
+
+.permission-fields {
+  border: 1px dashed var(--line);
+  margin: 20px 0;
+  padding: 20px;
+}
+.permission-fields legend {
+  font-weight: 600;
+  padding: 0 8px;
+}
+.permission-presets {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-bottom: 18px;
+}
+.permission-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 14px 24px;
+}
+.permission-grid label {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  margin: 0;
+  font-weight: 400;
+}
+.permission-grid input {
+  flex: 0 0 auto;
+  margin-top: 2px;
+}
+@media (max-width: 760px) {
+  .permission-grid {
+    grid-template-columns: 1fr;
+  }
+}

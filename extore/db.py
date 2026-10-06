@@ -12,7 +12,7 @@ CREATE TABLE IF NOT EXISTS products (id TEXT PRIMARY KEY, config TEXT NOT NULL, 
 CREATE TABLE IF NOT EXISTS cards (id TEXT PRIMARY KEY, digest TEXT UNIQUE NOT NULL, product_id TEXT NOT NULL REFERENCES products(id), state TEXT NOT NULL DEFAULT 'ready', created REAL NOT NULL);
 CREATE TABLE IF NOT EXISTS grants (digest TEXT PRIMARY KEY, card_id TEXT NOT NULL REFERENCES cards(id), expires REAL NOT NULL);
 CREATE TABLE IF NOT EXISTS jobs (id TEXT PRIMARY KEY, card_id TEXT UNIQUE NOT NULL REFERENCES cards(id), product_id TEXT NOT NULL REFERENCES products(id), state TEXT NOT NULL, params TEXT NOT NULL, content TEXT, message TEXT NOT NULL DEFAULT '', progress INTEGER NOT NULL DEFAULT 0, attempt INTEGER NOT NULL DEFAULT 1, retryable INTEGER NOT NULL DEFAULT 0, claimed_by TEXT, lease REAL, created REAL NOT NULL, updated REAL NOT NULL, revealed INTEGER NOT NULL DEFAULT 0);
-CREATE TABLE IF NOT EXISTS staff (id TEXT PRIMARY KEY, digest TEXT UNIQUE NOT NULL, product_id TEXT NOT NULL REFERENCES products(id), name TEXT NOT NULL, expires REAL NOT NULL, revoked INTEGER NOT NULL DEFAULT 0);
+CREATE TABLE IF NOT EXISTS staff (id TEXT PRIMARY KEY, digest TEXT UNIQUE NOT NULL, product_id TEXT NOT NULL REFERENCES products(id), name TEXT NOT NULL, expires REAL NOT NULL, revoked INTEGER NOT NULL DEFAULT 0, permissions TEXT NOT NULL DEFAULT '["queue.view","queue.process"]', parent_id TEXT REFERENCES staff(id), created REAL NOT NULL DEFAULT 0);
 CREATE TABLE IF NOT EXISTS sessions (digest TEXT PRIMARY KEY, role TEXT NOT NULL, staff_id TEXT REFERENCES staff(id), expires REAL NOT NULL, created REAL NOT NULL);
 CREATE TABLE IF NOT EXISTS credentials (id TEXT PRIMARY KEY, public_key BLOB NOT NULL, sign_count INTEGER NOT NULL, name TEXT NOT NULL, created REAL NOT NULL);
 CREATE TABLE IF NOT EXISTS challenges (digest TEXT PRIMARY KEY, challenge BLOB NOT NULL, kind TEXT NOT NULL, session_digest TEXT, expires REAL NOT NULL);
@@ -24,7 +24,6 @@ CREATE TABLE IF NOT EXISTS rate_limits (key TEXT PRIMARY KEY, count INTEGER NOT 
 CREATE TABLE IF NOT EXISTS audit (id INTEGER PRIMARY KEY, actor TEXT NOT NULL, action TEXT NOT NULL, target TEXT NOT NULL, created REAL NOT NULL);
 CREATE INDEX IF NOT EXISTS jobs_queue ON jobs(state, created);
 CREATE INDEX IF NOT EXISTS outbox_due ON outbox(state, due);
-PRAGMA user_version=1;
 """
 
 
@@ -50,6 +49,24 @@ def init():
     DATA.mkdir(parents=True, exist_ok=True, mode=0o700)
     with db() as c:
         c.executescript(SCHEMA)
+        # executescript commits the connection's previous transaction. Keep all
+        # migration checks and changes together for concurrent server starts.
+        c.execute("BEGIN IMMEDIATE")
+        columns = {r["name"] for r in c.execute("PRAGMA table_info(staff)")}
+        if "permissions" not in columns:
+            c.execute(
+                "ALTER TABLE staff ADD COLUMN permissions TEXT NOT NULL "
+                'DEFAULT \'["queue.view","queue.process"]\''
+            )
+        if "parent_id" not in columns:
+            c.execute(
+                "ALTER TABLE staff ADD COLUMN parent_id TEXT REFERENCES staff(id)"
+            )
+        if "created" not in columns:
+            c.execute("ALTER TABLE staff ADD COLUMN created REAL NOT NULL DEFAULT 0")
+        c.execute("CREATE INDEX IF NOT EXISTS staff_parent ON staff(parent_id)")
+        if c.execute("PRAGMA user_version").fetchone()[0] < 2:
+            c.execute("PRAGMA user_version=2")
     # WAL is set outside a transaction.
     with sqlite3.connect(DATA / "extore.sqlite3") as c:
         c.execute("PRAGMA journal_mode=WAL")

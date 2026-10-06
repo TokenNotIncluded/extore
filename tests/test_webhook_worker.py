@@ -82,7 +82,10 @@ def test_script_sdk_end_to_end(owner, setup_product):
 def test_interruption_does_not_auto_retry(owner, setup_product):
     _, code = setup_product()
     t, j = redeem(owner, code)
-    owner.post("/api/manage/batch", json={"ids": [j["id"]], "action": "claim"})
+    owner.post(
+        "/api/manage/batch",
+        json={"product_id": j["product_id"], "ids": [j["id"]], "action": "claim"},
+    )
     with db() as c:
         c.execute("UPDATE jobs SET lease=1 WHERE id=?", (j["id"],))
     asyncio.run(job_once())
