@@ -3,13 +3,15 @@
 import os
 import re
 import stat
-from urllib.parse import quote
+from urllib.parse import quote, urlsplit
 
 from . import manage_commands as business
 from .manage_client import ManageError
 
-COMMANDS = {"platform", "account", "totp", "processor-profiles", "maintenance"}
+COMMANDS = {"platform", "account", "totp", "processor-profiles", "maintenance", "proxy"}
 PROFILE_PREFIX = "/api/admin/processor-profiles"
+PROXY_PREFIX = "/api/admin/proxy"
+PROXY_PUBLIC_FIELDS = ("route_id", "issuer_id", "name", "origin", "path", "public_key")
 SECRET_RESPONSES = {
     ("POST", "/api/auth/totp/setup"),
     ("POST", "/api/auth/totp/confirm"),
@@ -28,6 +30,36 @@ def _operations(parent, operations):
 
 
 def add_commands(subcommands):
+    proxy = subcommands.add_parser(
+        "proxy", help="shop-isolated signed card destinations; no private-key exports"
+    )
+    proxy_groups = proxy.add_subparsers(dest="proxy_command", required=True)
+    identities = _operations(proxy_groups.add_parser("identities"), ("list", "create"))
+    identities["create"].add_argument("--name", required=True)
+    routes = _operations(
+        proxy_groups.add_parser("routes"),
+        ("list", "create", "import", "export", "enable", "disable", "default"),
+    )
+    for parser in (*identities.values(), *routes.values()):
+        parser.add_argument(
+            "--shop", help="explicit shop UUID; required for platform-root devices"
+        )
+    routes["create"].add_argument("--name", required=True)
+    routes["create"].add_argument(
+        "--identity", required=True, help="this shop's issuer identity ID"
+    )
+    routes["create"].add_argument(
+        "--default-issuer",
+        action="store_true",
+        help="use this local route when issuing new codes",
+    )
+    business._json_arguments(routes["import"])
+    routes["import"].add_argument("--name", help="optional local display name")
+    for operation in ("export", "enable", "disable", "default"):
+        routes[operation].add_argument("id", help="immutable route ID")
+    routes["default"].add_argument(
+        "--clear", action="store_true", help="stop using this route for new issuance"
+    )
     maintenance = _operations(
         subcommands.add_parser(
             "maintenance",
@@ -274,6 +306,8 @@ def profile_metadata(value):
 
 def dispatch(client, owner, args):
     command, operation = args.manage_command, args.operation
+    if command == "proxy":
+        return _proxy_dispatch(client, owner, args)
     if command == "maintenance":
         _profile_shop(owner, args.shop)
         if operation == "status":
@@ -444,3 +478,154 @@ def _profile_shop(owner, selected):
         raise ManageError("Refresh the pinned owner identity", code="invalid_response")
     if owner["shop_id"] is not None and selected not in (None, owner["shop_id"]):
         raise ManageError("Profile belongs to a different shop", code="no_scope")
+
+
+def proxy_metadata(value, *, public=False):
+    """Allow only public routing material; an unexpected secret is never echoed."""
+    if isinstance(value, list):
+        return [proxy_metadata(item, public=public) for item in value]
+    if not isinstance(value, dict):
+        raise ManageError("Invalid proxy metadata", code="invalid_response")
+    keys = (
+        PROXY_PUBLIC_FIELDS
+        if public
+        else (
+            *PROXY_PUBLIC_FIELDS,
+            "id",
+            "shop_id",
+            "identity_id",
+            "enabled",
+            "default_issuer",
+            "created",
+            "updated",
+            "kind",
+        )
+    )
+    return {key: value[key] for key in keys if key in value}
+
+
+def _public_proxy_route(value, *, input=False):
+    code = "invalid_input" if input else "invalid_response"
+    if (
+        not isinstance(value, dict)
+        or not set(PROXY_PUBLIC_FIELDS) <= set(value)
+        or input
+        and set(value) != set(PROXY_PUBLIC_FIELDS)
+    ):
+        raise ManageError(
+            "Provide the six public route fields exported by the issuing site",
+            code=code,
+        )
+    route = proxy_metadata(value, public=True)
+    if (
+        any(not isinstance(route[key], str) for key in PROXY_PUBLIC_FIELDS)
+        or any(
+            not re.fullmatch(r"[0-9a-f]{32}", route[key])
+            for key in ("route_id", "issuer_id")
+        )
+        or not re.fullmatch(r"[A-Za-z0-9_-]{43}", route["public_key"])
+        or not route["name"].strip()
+        or len(route["name"]) > 100
+        or not re.fullmatch(r"/[A-Za-z0-9/_-]*", route["path"])
+        or "//" in route["path"]
+    ):
+        raise ManageError("Invalid public route identity, key or path", code=code)
+    try:
+        url = urlsplit(route["origin"])
+        if (
+            url.scheme != "https"
+            or not url.hostname
+            or "." not in url.hostname
+            or url.username
+            or url.password
+            or url.path
+            or url.query
+            or url.fragment
+            or url.port not in (None, 443)
+            or "\\" in route["origin"]
+            or re.search(r"[\s\x00-\x1f\x7f]", route["origin"])
+        ):
+            raise ValueError
+    except ValueError:
+        raise ManageError(
+            "The route target must be a bare public HTTPS origin", code=code
+        ) from None
+    return route
+
+
+def _proxy_dispatch(client, owner, args):
+    if "shop_id" not in owner:
+        raise ManageError("Refresh the pinned owner identity", code="invalid_response")
+    shop = args.shop or owner["shop_id"]
+    if not shop:
+        raise ManageError("Select a shop explicitly with --shop", code="no_scope")
+    _profile_shop(owner, shop)
+    query = {"shop_id": shop}
+    group, operation = args.proxy_command, args.operation
+    path = PROXY_PREFIX + "/" + group
+    if group == "identities" and operation == "create":
+        value = client.request(
+            owner, "POST", path, json={"name": args.name, "shop_id": shop}
+        )
+        if not isinstance(value, dict) or value.get("shop_id") != shop:
+            raise ManageError(
+                "Issuer response belongs to a different shop", code="invalid_response"
+            )
+        return business._finish(args, {"ok": True, "result": proxy_metadata(value)})
+    if group == "routes" and operation in ("create", "import"):
+        if operation == "create":
+            body = {
+                "name": args.name,
+                "identity_id": args.identity,
+                "origin": owner["origin"],
+                "path": "/",
+                "default_issuer": args.default_issuer,
+                "shop_id": shop,
+            }
+        else:
+            body = _public_proxy_route(business.read_json(args), input=True)
+            if args.name:
+                body["name"] = args.name
+            body["shop_id"] = shop
+        value = client.request(owner, "POST", path, json=body)
+        if not isinstance(value, dict) or value.get("shop_id") != shop:
+            raise ManageError(
+                "Route response belongs to a different shop", code="invalid_response"
+            )
+        return business._finish(args, {"ok": True, "result": proxy_metadata(value)})
+    rows = client.request(owner, "GET", path, params=query)
+    if not isinstance(rows, list) or any(
+        not isinstance(row, dict) or row.get("shop_id") != shop for row in rows
+    ):
+        raise ManageError(
+            "Proxy list belongs to a different shop", code="invalid_response"
+        )
+    if operation == "list":
+        return business._finish(args, {"ok": True, "result": proxy_metadata(rows)})
+    row = next((item for item in rows if item.get("route_id") == args.id), None)
+    if row is None:
+        raise ManageError("Route is not in the selected shop", code="no_scope")
+    if operation == "export":
+        return business._finish(args, _public_proxy_route(row))
+    if operation == "default" and not row.get("identity_id"):
+        raise ManageError(
+            "An imported route cannot issue local codes", code="invalid_input"
+        )
+    body = (
+        {"default_issuer": not args.clear}
+        if operation == "default"
+        else {"enabled": operation == "enable"}
+    )
+    value = client.request(
+        owner, "PUT", path + "/" + quote(args.id, safe=""), json=body, params=query
+    )
+    if (
+        not isinstance(value, dict)
+        or value.get("shop_id") != shop
+        or value.get("route_id") != args.id
+    ):
+        raise ManageError(
+            "Route update response does not match the selected route",
+            code="invalid_response",
+        )
+    return business._finish(args, {"ok": True, "result": proxy_metadata(value)})

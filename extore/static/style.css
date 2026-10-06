@@ -1695,6 +1695,10 @@ th {
 .header-home:hover { opacity: .75; }
 
 .processor-config-card { min-width: 0; }
+.proxy-config .section-head { flex-wrap: wrap; align-items: flex-start; }
+.proxy-config .section-head > div { min-width: 0; }
+.proxy-config .mono { overflow-wrap: anywhere; }
+.proxy-config dd { margin-inline-start: 0; }
 .processor-config-card .section-head { align-items: flex-start; }
 .processor-config-card .section-head > div { min-width: 0; }
 .processor-config-form { min-width: 0; }

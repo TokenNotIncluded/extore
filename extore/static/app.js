@@ -15,6 +15,7 @@ let lang = preferences.resolved.language,
   ownerCliApproval = null,
   deviceCliApproval = null,
   pipelineAuthView = null,
+  proxyConfigView = null,
   accountView = null,
   authStatus = {},
   waitingAnimationPaused = false,
@@ -1202,7 +1203,7 @@ function managementTabs() {
   ].filter(([, , permission]) => permitted(permission));
   items.push(["sessions", "会话与审计"]);
   if (role === "admin") {
-    items.push(["security", "账户安全"], ["profiles", "商品处理器配置"]);
+    items.push(["security", "账户安全"], ["profiles", "商品处理器配置"], ["proxy", "兑换路由"]);
     if (window.ExtoreAccount?.rootScope(authStatus)) items.push(["shops", "店铺"], ["mail", "邮箱服务器"]);
   }
   return items;
@@ -1224,6 +1225,8 @@ function shell() {
   );
 }
 async function renderTab() {
+  proxyConfigView?.dispose();
+  proxyConfigView = null;
   pipelineAuthView?.dispose();
   pipelineAuthView = null;
   accountView?.dispose();
@@ -1240,6 +1243,14 @@ async function renderTab() {
   if (tab === "events") await renderEvents();
   if (["security", "shops", "mail", "profiles"].includes(tab)) renderAccountTab();
   if (tab === "sessions") await renderSessions();
+  if (tab === "proxy") renderProxyConfig();
+}
+function renderProxyConfig() {
+  const generation = queueLoadId, pathname = location.pathname;
+  if (!window.ExtoreProxyConfig) throw new Error(tr("兑换路由未加载，请刷新页面。", "Redemption routes did not load. Refresh the page."));
+  proxyConfigView = window.ExtoreProxyConfig.mount({ root: $("#workspace"), api, auth: authStatus,
+    origin: location.origin, language: () => lang,
+    isCurrent: () => generation === queueLoadId && tab === "proxy" && location.pathname === pathname });
 }
 function productOptions() {
   return products
@@ -1869,6 +1880,8 @@ async function staff() {
   await renderTab();
 }
 async function start() {
+  proxyConfigView?.dispose();
+  proxyConfigView = null;
   window.ExtoreTaskFlow?.dispose(app);
   clearDeliveryBlobs();
   accountView?.dispose();
