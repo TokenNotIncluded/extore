@@ -70,12 +70,15 @@
       : (en
         ? "Use --product PRODUCT_ID to request access to that product directly. No management link must be created first. The merchant reviews the named product and requested permissions before approving. Default permissions are queue.view, queue.process and queue.retry; product or permission additions always need another human approval."
         : "使用 --product PRODUCT_ID，主动申请该商品的处理权限，无需先创建管理链接。商家核对商品及请求权限后批准。默认权限为 queue.view、queue.process、queue.retry；增加商品或权限都须本人再次批准。");
-    const workflow = en
-      ? "Install the open-source CLI, complete the requested authorization, then list queues. queues --all aggregates only approved product scopes locally; it does not grant access to other products. It defaults to active tasks; use --view processed only when history is needed. Read one job before acting, claim it before updating progress or making a disposition, and always supply --product explicitly. Preserve the job's parameter/output definitions, existing completed steps and attachment ownership. Use request-retry with a clear reason for missing input, external failures or processor problems; choose revise for corrected inputs or reuse for unchanged stored inputs; reject only a claimed processing task when permanently refusing it, and explain the reason. Complete only after actual delivery. Do not claim success, retry external delivery, reveal goods or destroy delivery without the merchant's authorization."
-      : "安装开源 CLI，完成本次范围的授权后查看队列。queues --all 只在本地聚合已批准的商品范围，不会扩大商品权限；默认只看待处理任务，需要历史时再用 --view processed。先读取单个任务，领取后才更新进度或作出处理结果，每次写操作明确指定 --product。遵守任务保存的输入、输出和步骤定义，保留已完成步骤，附件仅属于自己的任务。资料不完整、外部服务或程序问题时用 request-retry 写清原因；revise 要求修改输入，reuse 允许保留原输入重试；永久拒绝时仅对已领取的处理中任务使用 reject 并解释原因。真正完成交付后才标记 complete。未经商家授权，不假报成功、不再次调用外部交付、不领取商品或销毁交付。";
-    const plans = en
-      ? "For a task without a saved step plan, claim or progress accepts --steps-file steps.json with 1–30 ordered steps such as [{\"id\":\"research\",\"label\":{\"en\":\"Research\",\"zh-CN\":\"检索资料\"}}]. Report completed step IDs with repeated --completed-step flags. Do not replace an existing plan or unmark completed steps."
-      : "任务尚未定义步骤时，可在 claim 或 progress 加 --steps-file steps.json，一次定义 1–30 个有序步骤，例如 [{\"id\":\"research\",\"label\":{\"zh-CN\":\"检索资料\",\"en\":\"Research\"}}]。通过可重复的 --completed-step 参数上报已完成步骤，不替换已有计划，不取消已完成步骤。";
+    const canProcess = requestedPermissions.includes("queue.process");
+    const workflow = canProcess ? (en
+      ? "After authorization, use next --watch to wait and atomically claim the first batch. It operates only on approved product scopes; future products still require approval. Idle waiting stays inside the CLI and prints nothing to the model. Do not list whole queues or claim again after next. Use the returned product_id, grant_id and job.attempt for every write; flow tasks also require execution.flow_epoch and execution.action_id. Use only this current step's parameter/output definitions and attachments. Read history with --view processed only when needed. Report actual progress, request-retry with a reason (revise to correct inputs, reuse for unchanged inputs), or reject a claimed processing task with a reason. Complete only after checking actual deliverables. Do not repeat external delivery, reveal goods or destroy delivery without authorization."
+      : "授权后使用 next --watch 等待并原子领取首批任务，只处理已批准商品；以后新增商品仍须再次批准。空队列由 CLI 内部等待，不向模型输出。不读取整个队列，next 已领取任务，不再 claim。每次写操作使用返回的 product_id、grant_id 和 job.attempt；流程任务还必须带 execution.flow_epoch、execution.action_id。只使用当前步骤的输入、输出定义和本任务附件，需要历史时再用 --view processed。汇报真实进度；需要重试时写清原因，revise 要求修改输入，reuse 允许原输入重试；永久拒绝仅处理自己领取的任务并说明原因。检查实际成品后再 complete，不假报成功，不擅自再次调用外部交付、领取商品或销毁内容。") : (en
+      ? "This scope does not include queue.process. View only approved queue summaries and one job when needed; do not claim, upload, update or complete tasks. Request the required permission through a new human-reviewed authorization before processing."
+      : "此范围没有 queue.process，只查看已批准商品的队列摘要，按需读取单个任务；不领取、上传、修改或完成任务。处理前须另行申请所需权限，由商家核对批准。");
+    const plans = !canProcess ? "" : en
+      ? "For a non-flow task without a saved step plan, progress accepts --steps-file steps.json with 1–30 ordered steps such as [{\"id\":\"research\",\"label\":{\"en\":\"Research\",\"zh-CN\":\"检索资料\"}}]. Report completed step IDs with repeated --completed-step flags. Do not replace an existing plan or unmark completed steps."
+      : "非流程任务尚未定义步骤时，可在 progress 加 --steps-file steps.json，一次定义 1–30 个有序步骤，例如 [{\"id\":\"research\",\"label\":{\"zh-CN\":\"检索资料\",\"en\":\"Research\"}}]。通过可重复的 --completed-step 参数上报已完成步骤，不替换已有计划，不取消已完成步骤。";
     const quotedOrigin = "'" + base.replaceAll("'", "'\\''") + "'";
     const loginTarget = pipelineScope ? "--shop SHOP_ID --pipelines-all" : "--product PRODUCT_ID";
     const loginBase = `extore manage login --device-code --origin ${quotedOrigin} ${loginTarget}${options.existingLink ? " --existing-link" : ""}${activeDevice ? " --permissions '" + requestedPermissions.join(",") + "'" : ""}`;
@@ -100,16 +103,15 @@
     const upgradeCommands = !options.deviceCode ? "" : `\n\n${upgrade}\n\n\`\`\`text\n${upgradeBase} --no-wait\n# ${en ? "After the merchant personally approves, resume on the same device and profile:" : "商家本人批准后，在同一设备和配置恢复："}\n${upgradeBase}\n\`\`\``;
     return `${goal}\n\n${login}${scope ? "\n\n" + scope : ""}\n\n${workflow}\n\n${plans}\n\n${en ? "CLI commands (replace IDs and filenames with the actual values):" : "CLI 命令（把 ID、文件名替换为实际值）："}\n\n\`\`\`text
 uv tool install --upgrade 'extore>=0.8.0'
-${loginCommands}extore manage queues --all
-extore manage job JOB_ID --product PRODUCT_ID
-extore manage claim JOB_ID --product PRODUCT_ID
-extore manage progress JOB_ID --product PRODUCT_ID --progress 30 --message "处理说明"
-extore manage files JOB_ID --product PRODUCT_ID
-extore manage download JOB_ID --product PRODUCT_ID --file-id FILE_ID --output ./input-file
-extore manage upload JOB_ID --product PRODUCT_ID --field FIELD_KEY --file ./artifact
-extore manage complete JOB_ID --product PRODUCT_ID --output-file result.json --message "交付说明"
-extore manage request-retry JOB_ID --product PRODUCT_ID --reason "外部服务恢复后可重试" --reason-type external --retry-mode reuse
-extore manage reject JOB_ID --product PRODUCT_ID --reason "永久拒绝的原因"
+${loginCommands}${canProcess ? `extore manage next ${pipelineScope ? "--all" : "--product PRODUCT_ID"} --origin ${quotedOrigin} --watch --limit 1
+# ${en ? "Replace ATTEMPT with job.attempt; include epoch/action flags only for flow tasks. Omit --file for outputs without attachments." : "ATTEMPT 使用 job.attempt；仅流程任务带步骤 epoch/action 参数，无附件输出时去掉 --file。"}
+extore manage progress JOB_ID --product PRODUCT_ID --grant GRANT_ID --attempt ATTEMPT --flow-epoch EPOCH --action-id ACTION_ID --progress 30 --message "处理说明"
+extore manage files JOB_ID --product PRODUCT_ID --grant GRANT_ID
+extore manage download JOB_ID --product PRODUCT_ID --grant GRANT_ID --file-id FILE_ID --output ./input-file
+extore manage complete JOB_ID --product PRODUCT_ID --grant GRANT_ID --attempt ATTEMPT --flow-epoch EPOCH --action-id ACTION_ID --output-file result.json --file OUTPUT_FIELD=./artifact
+extore manage request-retry JOB_ID --product PRODUCT_ID --grant GRANT_ID --attempt ATTEMPT --flow-epoch EPOCH --action-id ACTION_ID --reason "外部服务恢复后可重试" --reason-type external --retry-mode reuse
+extore manage reject JOB_ID --product PRODUCT_ID --grant GRANT_ID --attempt ATTEMPT --flow-epoch EPOCH --action-id ACTION_ID --reason "永久拒绝的原因"` : `extore manage queues --all --origin ${quotedOrigin}
+extore manage job JOB_ID --product PRODUCT_ID`}
 \`\`\`${upgradeCommands}\n\n${en ? "Reference data:" : "参考资料："}\n\n\`\`\`json\n${JSON.stringify(reference, null, 2).replaceAll("`", "\\u0060")}\n\`\`\``;
   }
   function buildOwner(options = {}) {

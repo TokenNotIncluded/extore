@@ -42,9 +42,9 @@ test("explicit legacy CLI prompts retain stdin compatibility and whitelist refer
   });
   assert.match(prompt, /uv tool install --upgrade 'extore>=0\.8\.0'/);
   assert.match(prompt, /extore manage login --link-stdin/);
-  assert.match(prompt, /extore manage queues --all/);
-  assert.match(prompt, /extore manage request-retry JOB_ID --product PRODUCT_ID --reason/);
-  assert.match(prompt, /extore manage reject JOB_ID --product PRODUCT_ID --reason/);
+  assert.match(prompt, /extore manage next --product PRODUCT_ID.*--watch --limit 1/);
+  assert.match(prompt, /extore manage request-retry JOB_ID --product PRODUCT_ID --grant GRANT_ID --attempt ATTEMPT --flow-epoch EPOCH --action-id ACTION_ID --reason/);
+  assert.match(prompt, /extore manage reject JOB_ID --product PRODUCT_ID --grant GRANT_ID --attempt ATTEMPT --flow-epoch EPOCH --action-id ACTION_ID --reason/);
   assert.match(prompt, /--view processed/);
   assert.match(prompt, /--steps-file steps\.json/);
   assert.match(prompt, /--completed-step/);
@@ -349,4 +349,19 @@ test("new management links retain independent quotas while their copied AI promp
   await page.node("#copy-link-ai").emit("click");
   assert.equal(page.requests.length, 3);
   assert.equal(copied[1], copied[0]);
+});
+
+
+test("processing prompts use compact atomic next while view-only prompts never suggest mutations", () => {
+  for (const language of ["zh-CN", "en"]) {
+    const full = helper().build({ origin: "https://example.test", language, deviceCode: true, allPipelines: true, shopId: "s", permissions: ["queue.view", "queue.process"] });
+    assert.match(full, /extore manage next --all --origin 'https:\/\/example\.test' --watch --limit 1/);
+    assert.match(full, /job\.attempt/);
+    assert.match(full, /execution\.flow_epoch/);
+    assert.match(full, /execution\.action_id/);
+    assert.doesNotMatch(full, /extore manage queues --all|extore manage claim/);
+    const readonly = helper().build({ origin: "https://example.test", language, deviceCode: true, existingLink: true, permissions: ["queue.view"] });
+    assert.match(readonly, /extore manage queues --all/);
+    assert.doesNotMatch(readonly, /extore manage (next|claim|progress|complete|upload|request-retry|reject) /);
+  }
 });
