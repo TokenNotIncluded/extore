@@ -176,7 +176,7 @@ def _manage_scope(c, s, row, permission):
     authorize_product(c, s, row["product_id"])
 
 
-def _output_scope(c, s, jid, field_key, *, flow_epoch=None):
+def _output_scope(c, s, jid, field_key, *, flow_epoch=None, action_id=None):
     row = _row(c, jid)
     _manage_scope(c, s, row, "queue.process")
     p = _job_product(c, row)
@@ -192,7 +192,9 @@ def _output_scope(c, s, jid, field_key, *, flow_epoch=None):
         fail("请先领取任务，且只能处理自己领取的任务", 409)
     from .flow_adapter import output_file_scope
 
-    output_file_scope(c, row, flow_epoch=flow_epoch)
+    execution = output_file_scope(c, row, flow_epoch=flow_epoch)
+    if execution and action_id is not None and action_id != execution["action_id"]:
+        fail("上传所属处理动作已改变", 409)
     _field(p, field_key, "output")
     return row
 
@@ -209,6 +211,11 @@ def _flow_upload_args(fields, *, output=False):
             result[name] = int(value)
     if not output and "node_id" in fields:
         result["node_id"] = fields["node_id"]
+    if output and "action_id" in fields:
+        value = fields["action_id"]
+        if not isinstance(value, str) or not 1 <= len(value) <= 100:
+            fail("上传处理动作无效", 422)
+        result["action_id"] = value
     return result
 
 
@@ -558,7 +565,7 @@ async def upload_output(request: Request):
                     ("job_id", "field_key", "file"),
                     reservation,
                     bind_scope,
-                    optional=("flow_epoch",),
+                    optional=("flow_epoch", "action_id"),
                 )
                 try:
                     s = session(request, ("admin", "staff"))

@@ -886,6 +886,9 @@ def revoke_product_link(c, sid, actor):
     for target in ids:
         c.execute("UPDATE staff SET revoked=1 WHERE id=?", (target,))
         revoke_staff_sessions(c, target, actor)
+        from .flow_adapter import release_actor_tasks
+
+        release_actor_tasks(c, target)
         # Return unfinished delegated tasks to their product queue.
         c.execute(
             "UPDATE jobs SET state='queued',claimed_by=NULL,lease=NULL,"
@@ -1116,8 +1119,32 @@ def batch(body: BatchUpdate, request: Request):
         rows = [job(c, jid) for jid in dict.fromkeys(body.ids)]
         if any(r["product_id"] != product_id for r in rows):
             fail("批处理只能包含所选商品的任务", 403)
+        if set(body.flow_scopes) - set(body.ids):
+            fail("流程身份包含未选择的任务")
         for r in rows:
             jid = r["id"]
+            if body.attempt is not None and body.attempt != r["attempt"]:
+                fail("提交对应的任务尝试已失效", 409)
+            scope = body.flow_scopes.get(jid, {})
+            if set(scope) - {"flow_epoch", "action_id", "attempt"}:
+                fail("流程身份字段无效")
+            epoch = scope.get("flow_epoch", body.flow_epoch)
+            action_id = scope.get("action_id", body.action_id)
+            if scope.get("attempt", r["attempt"]) != r["attempt"]:
+                fail("提交对应的流程尝试已失效", 409)
+            if epoch is not None and (type(epoch) is not int or epoch < 1):
+                fail("流程步骤身份无效")
+            from . import task_flow
+
+            if task_flow.is_flow(c, r) and body.action != "retry":
+                current = task_flow.view(c, r)
+                if epoch is None or epoch != current["flow_epoch"]:
+                    fail("提交对应的流程步骤已失效", 409)
+                execution = task_flow.execution(c, r)
+                if execution is None:
+                    fail("当前流程步骤不能由队列处理", 409)
+                if action_id is not None and action_id != execution["action_id"]:
+                    fail("提交对应的流程动作已失效", 409)
             if p["mode"] != "manual" and body.action != "retry":
                 fail("自动处理任务不能由队列处理覆盖", 409)
             if body.progress_steps is not None:
@@ -1129,11 +1156,11 @@ def batch(body: BatchUpdate, request: Request):
                 from . import task_flow
 
                 if task_flow.is_flow(c, r):
-                    if body.flow_epoch is None:
+                    if epoch is None:
                         fail("领取流程步骤必须指定 flow_epoch", 409)
                     from .service import finalize_task_flow
 
-                    finalize_task_flow(c, task_flow.claim(c, r, actor, body.flow_epoch))
+                    finalize_task_flow(c, task_flow.claim(c, r, actor, epoch))
                     audit(c, actor, "job.claim", jid)
                     continue
                 if r["state"] != "queued":
@@ -1169,8 +1196,8 @@ def batch(body: BatchUpdate, request: Request):
                         output=body.output,
                         message=body.message,
                         retryable=body.retryable,
-                        flow_epoch=body.flow_epoch,
-                        action_id=body.action_id,
+                        flow_epoch=epoch,
+                        action_id=action_id,
                     ),
                 )
             elif body.action in ("request_changes", "request_retry", "reject"):

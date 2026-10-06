@@ -601,6 +601,9 @@ def revoke_authorization(c, authorization_id, actor="owner"):
             (product_id, staff_id),
         ).fetchall()
         for job in jobs:
+            from .flow_adapter import release_actor_tasks
+
+            release_actor_tasks(c, staff_id)
             c.execute(
                 "UPDATE jobs SET state='queued',claimed_by=NULL,lease=NULL,updated=? "
                 "WHERE id=? AND state='processing' AND claimed_by=?",

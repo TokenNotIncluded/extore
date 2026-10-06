@@ -201,6 +201,9 @@ def _release_last_staff_session(c, staff_id):
         (staff_id, staff_id),
     ).fetchall()
     for job in jobs:
+        from .flow_adapter import release_actor_tasks
+
+        release_actor_tasks(c, staff_id)
         c.execute(
             "UPDATE jobs SET state='queued',claimed_by=NULL,lease=NULL,updated=? "
             "WHERE id=? AND state='processing' AND claimed_by=?",
@@ -226,6 +229,9 @@ def _release_last_shop_session(c, shop_id):
         (shop_id, actor),
     ).fetchall()
     for job in jobs:
+        from .flow_adapter import release_actor_tasks
+
+        release_actor_tasks(c, actor)
         c.execute(
             "UPDATE jobs SET state='queued',claimed_by=NULL,lease=NULL,updated=? "
             "WHERE id=? AND state='processing' AND claimed_by=?",

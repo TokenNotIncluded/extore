@@ -49,7 +49,7 @@ def preview(p):
     entry = next(n for n in definition["nodes"] if n["id"] == definition["entry"])
     current = {
         key: entry[key]
-        for key in ("id", "kind", "label", "prompt", "question", "fields", "start_policy", "content")
+        for key in ("id", "kind", "label", "prompt", "start_policy", "content")
         if key in entry
     }
     return {
@@ -310,6 +310,19 @@ def private_worker_file_scope(c, row, execution, field_key, kind, file_id=None):
 def bind_private_worker_file(c, row, execution, field_key, file_id):
     private_worker_file_scope(c, row, execution, field_key, "output")
     bind_stage_file(c, row, execution["node_id"], execution["flow_epoch"], "output", file_id)
+
+
+def release_actor_tasks(c, actor):
+    """Keep step and job claim state consistent when authorization is revoked."""
+    from . import task_flow
+
+    rows = c.execute(
+        "SELECT * FROM jobs WHERE claimed_by=? AND state='processing'", (actor,)
+    ).fetchall()
+    for row in rows:
+        if task_flow.is_flow(c, row):
+            current = task_flow.view(c, row)
+            finalize(c, task_flow.release_claim(c, row, actor, current["flow_epoch"]))
 
 
 def _customer_action(operation, body, request):

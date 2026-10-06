@@ -441,6 +441,8 @@ class BatchUpdate(BaseModel):
     retryable: bool = False
     flow_epoch: int | None = Field(default=None, ge=1)
     action_id: str | None = Field(default=None, max_length=100)
+    attempt: int | None = Field(default=None, ge=1)
+    flow_scopes: dict[str, dict] = Field(default_factory=dict, max_length=100)
     retry_mode: Literal["revise", "reuse"] = "revise"
     reason_type: Literal["customer_input", "external", "processor"] = "customer_input"
 

@@ -100,7 +100,7 @@ def _view(c, card, index, suffix="", *, screening=False):
         else:
             ensure_card_usable(c, card)
             shops.require_enabled_product(c, card["product_id"])
-            p = service.product(c, card["product_id"])
+            p = service.card_product(c, card)
     meta = c.execute(
         "SELECT code_suffix FROM card_meta WHERE card_id=?", (card["id"],)
     ).fetchone()
