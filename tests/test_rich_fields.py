@@ -5,7 +5,7 @@ import pytest
 from fastapi import HTTPException
 from pydantic import ValidationError
 
-from extore.field_values import attachment_ids
+from extore.field_values import attachment_ids, normalize_rich_value
 from extore.models import OutputField, Parameter, Product
 from extore.service import validate_output, validate_params
 
@@ -140,3 +140,14 @@ def test_sensitive_input_is_explicit_text_only_and_not_an_output():
 def test_service_products_remain_outputless_for_arbitrary_declared_inputs():
     product = Product(name="服务", delivery="service", parameters=[field("boolean")])
     assert product.outputs == []
+
+
+@pytest.mark.parametrize("kind", ["file", "image", "images"])
+@pytest.mark.parametrize("value", [0, False, None, [], {}])
+def test_attachment_helpers_do_not_coerce_invalid_empty_values(kind, value):
+    definition = {"key": "asset", "type": kind, "required": False}
+    with pytest.raises(ValueError, match="文本"):
+        attachment_ids(definition, value)
+    with pytest.raises(ValueError, match="文本"):
+        normalize_rich_value(definition, value)
+    assert attachment_ids(definition, "") == []

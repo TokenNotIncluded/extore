@@ -13,10 +13,12 @@ _FILE_ID = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]
 
 def attachment_ids(field, value):
     """Return references in order, never interpreting URLs or embedded files."""
-    if field.get("type") not in ATTACHMENT_TYPES or not value:
+    if field.get("type") not in ATTACHMENT_TYPES:
         return []
     if not isinstance(value, str):
         raise ValueError("附件字段必须是文本")
+    if not value:
+        return []
     if field["type"] != "images":
         return [value]
     try:
@@ -40,6 +42,8 @@ def attachment_ids(field, value):
 
 def normalize_rich_value(field, value):
     """Canonicalize new types while preserving the existing string API."""
+    if not isinstance(value, str):
+        raise ValueError("字段值必须是文本")
     kind = field.get("type", "text")
     if kind == "images":
         ids = attachment_ids(field, value)
