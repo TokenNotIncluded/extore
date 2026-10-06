@@ -2,7 +2,14 @@ import re
 from typing import Any, Literal
 from urllib.parse import urlsplit
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    field_validator,
+    model_serializer,
+    model_validator,
+)
 
 from .variants import default_variant, normalize_price, validate_attributes
 
@@ -81,13 +88,43 @@ class QuickProductInput(BaseModel):
         return self
 
 
+class FieldOption(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    value: str = Field(pattern=r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,99}$")
+    label: dict[str, str] = Field(min_length=1, max_length=20)
+
+    @model_validator(mode="after")
+    def labels(self):
+        if any(not key.strip() or len(key) > 40 for key in self.label):
+            raise ValueError("选项语言代码无效")
+        if any(not value.strip() or len(value) > 200 for value in self.label.values()):
+            raise ValueError("请填写选项显示名称，最多二百字符")
+        return self
+
+
 class Parameter(BaseModel):
     key: str = Field(pattern=r"^[a-z][a-z0-9_]{0,39}$")
     label: dict[str, str]
     description: dict[str, str] = Field(default_factory=dict)
     collapsed: bool = True
     required: bool = True
-    type: Literal["text", "email", "url", "textarea", "number", "file"] = "text"
+    type: Literal[
+        "text",
+        "email",
+        "url",
+        "textarea",
+        "number",
+        "file",
+        "select",
+        "boolean",
+        "image",
+        "images",
+    ] = "text"
+    options: list[FieldOption] = Field(default_factory=list, max_length=100)
+    max_items: int | None = Field(default=None, strict=True, ge=1, le=20)
+    sensitive: bool = Field(default=False, strict=True)
+    sensitive_ttl_seconds: int = Field(default=120, strict=True, ge=1, le=600)
 
     @model_validator(mode="after")
     def labels(self):
@@ -97,11 +134,41 @@ class Parameter(BaseModel):
             raise ValueError("请输入参数显示名称")
         if any(len(v) > 10000 for v in self.description.values()):
             raise ValueError("教程过长")
+        if self.type == "select":
+            if not self.options or len({item.value for item in self.options}) != len(
+                self.options
+            ):
+                raise ValueError("下拉选项不能为空，且选项代码不能重复")
+        elif self.options:
+            raise ValueError("只有下拉选项字段可以配置选项")
+        if self.type == "images":
+            if self.max_items is None:
+                self.max_items = 10
+        elif self.max_items is not None:
+            raise ValueError("只有图片集合可以配置图片数量")
+        if self.sensitive and self.type != "text":
+            raise ValueError("敏感输入只能使用文本字段")
         return self
+
+    @model_serializer(mode="wrap")
+    def serialize(self, handler):
+        result = handler(self)
+        if self.type != "select":
+            result.pop("options", None)
+        if self.type != "images":
+            result.pop("max_items", None)
+        if not self.sensitive:
+            result.pop("sensitive", None)
+            result.pop("sensitive_ttl_seconds", None)
+        return result
 
 
 class OutputField(Parameter):
-    type: Literal["text", "email", "url", "textarea", "number", "file"] = "text"
+    @model_validator(mode="after")
+    def public_output(self):
+        if self.sensitive:
+            raise ValueError("交付输出不能配置敏感输入")
+        return self
 
 
 class ProgressStep(BaseModel):
@@ -263,6 +330,8 @@ class Product(BaseModel):
             raise ValueError("只有商品处理器模式可以配置处理器")
         if len({p.key for p in self.parameters}) != len(self.parameters):
             raise ValueError("参数代码名不能重复")
+        if any(p.sensitive for p in self.parameters):
+            raise ValueError("敏感输入只能在流水线的独立输入步骤中配置")
         if self.delivery == "service":
             if "outputs" not in self.model_fields_set:
                 self.outputs = []

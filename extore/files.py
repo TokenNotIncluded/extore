@@ -23,6 +23,8 @@ from .config import (
     UPLOAD_TIMEOUT_SECONDS,
 )
 from .db import db
+from .field_values import ATTACHMENT_TYPES, IMAGE_TYPES, attachment_ids
+from .image_validation import image_content_type
 from .security import (
     authorize_management,
     fail,
@@ -91,7 +93,7 @@ def _row(c, jid):
 def _field(product, key, kind):
     fields = product["parameters" if kind == "input" else "outputs"]
     for field in fields:
-        if field["key"] == key and field["type"] == "file":
+        if field["key"] == key and field["type"] in ATTACHMENT_TYPES:
             return field
     fail("商品未定义这个文件字段")
 
@@ -140,7 +142,7 @@ def _file(c, fid, *, content=False):
     return row
 
 
-def _input_scope(c, card, field_key):
+def _input_scope(c, card, field_key, *, flow_epoch=None, revision=None, node_id=None):
     from .shops import require_enabled_product
 
     require_enabled_product(c, card["product_id"])
@@ -167,7 +169,7 @@ def _manage_scope(c, s, row, permission):
     authorize_product(c, s, row["product_id"])
 
 
-def _output_scope(c, s, jid, field_key):
+def _output_scope(c, s, jid, field_key, *, flow_epoch=None):
     row = _row(c, jid)
     _manage_scope(c, s, row, "queue.process")
     p = _job_product(c, row)
@@ -376,7 +378,19 @@ def _content_type(value):
     )
 
 
-def _store(c, card_id, product_id, job_id, attempt, key, kind, upload, reservation):
+def _store(
+    c,
+    card_id,
+    product_id,
+    job_id,
+    attempt,
+    key,
+    kind,
+    upload,
+    reservation,
+    *,
+    field=None,
+):
     from .storage import check_storage_quota, require_disk_space
 
     size = upload.size
@@ -391,6 +405,12 @@ def _store(c, card_id, product_id, job_id, attempt, key, kind, upload, reservati
     if inventory["count"] >= MAX_CARD_FILES:
         fail(f"此卡密的文件数量超过 {MAX_CARD_FILES} 个限制", 413)
     check_storage_quota(c, size, reservation_id=reservation.id, product_id=product_id)
+    content_type = _content_type(upload.content_type)
+    if field and field["type"] in IMAGE_TYPES:
+        try:
+            content_type = image_content_type(upload.file)
+        except ValueError as exc:
+            fail(str(exc))
     fid = str(uuid.uuid4())
     cursor = c.execute(
         "INSERT INTO job_files(id,card_id,product_id,job_id,field_key,kind,attempt,filename,content_type,size,content,created) VALUES (?,?,?,?,?,?,?,?,?,?,zeroblob(?),?)",
@@ -403,7 +423,7 @@ def _store(c, card_id, product_id, job_id, attempt, key, kind, upload, reservati
             kind,
             attempt,
             _filename(upload.filename),
-            _content_type(upload.content_type),
+            content_type,
             size,
             size,
             time.time(),
@@ -451,14 +471,14 @@ async def upload_input(request: Request):
                     ("token", "field_key", "file"),
                     reservation,
                     bind_scope,
-                    optional=("card_id",),
+                    optional=("card_id", "flow_epoch", "expected_revision", "node_id"),
                 )
                 try:
                     with db() as c:
                         card = resolve_customer_card(
                             c, form["token"], form.get("card_id") or None
                         )
-                        _, row = _input_scope(c, card, form["field_key"])
+                        p, row = _input_scope(c, card, form["field_key"])
                         return _store(
                             c,
                             card["id"],
@@ -469,6 +489,7 @@ async def upload_input(request: Request):
                             "input",
                             form["file"],
                             reservation,
+                            field=_field(p, form["field_key"], "input"),
                         )
                 finally:
                     await _close_form(form)
@@ -497,7 +518,11 @@ async def upload_output(request: Request):
 
             async with asyncio.timeout(UPLOAD_TIMEOUT_SECONDS):
                 form = await _multipart(
-                    request, ("job_id", "field_key", "file"), reservation, bind_scope
+                    request,
+                    ("job_id", "field_key", "file"),
+                    reservation,
+                    bind_scope,
+                    optional=("flow_epoch",),
                 )
                 try:
                     s = session(request, ("admin", "staff"))
@@ -513,6 +538,9 @@ async def upload_output(request: Request):
                             "output",
                             form["file"],
                             reservation,
+                            field=_field(
+                                _job_product(c, row), form["field_key"], "output"
+                            ),
                         )
                 finally:
                     await _close_form(form)
@@ -522,52 +550,77 @@ async def upload_output(request: Request):
         translate_storage_error(exc)
 
 
+def _attachment_ids(field, value):
+    try:
+        return attachment_ids(field, value)
+    except ValueError as exc:
+        fail(str(exc))
+
+
+def _validate_image(c, item, field):
+    if field["type"] not in IMAGE_TYPES:
+        return
+    # A file uploaded before a product's schema change may have a forged raster
+    # MIME label. Recheck its bytes instead of trusting the stored descriptor.
+    rowid = c.execute(
+        "SELECT rowid FROM job_files WHERE id=?", (item["id"],)
+    ).fetchone()[0]
+    try:
+        with c.blobopen("job_files", "content", rowid, readonly=True) as blob:
+            content_type = image_content_type(blob)
+    except ValueError as exc:
+        fail(str(exc))
+    if item["content_type"] != content_type:
+        c.execute(
+            "UPDATE job_files SET content_type=? WHERE id=?", (content_type, item["id"])
+        )
+
+
 def validate_input_files(c, card, p, params):
     existing = c.execute(
-        "SELECT id FROM jobs WHERE card_id=?", (card["id"],)
+        "SELECT id,attempt FROM jobs WHERE card_id=?", (card["id"],)
     ).fetchone()
     for field in p["parameters"]:
-        fid = params.get(field["key"], "")
-        if field["type"] != "file" or not fid:
-            continue
-        item = _file(c, fid)
-        if (
-            item["card_id"] != card["id"]
-            or item["product_id"] != p["id"]
-            or item["field_key"] != field["key"]
-            or item["kind"] != "input"
-            or not item["available"]
-            or (
-                item["job_id"] is not None
-                and (not existing or item["job_id"] != existing["id"])
-            )
-        ):
-            fail("输入文件不属于此卡密或字段", 403)
+        for fid in _attachment_ids(field, params.get(field["key"], "")):
+            item = _file(c, fid)
+            if (
+                item["card_id"] != card["id"]
+                or item["product_id"] != p["id"]
+                or item["field_key"] != field["key"]
+                or item["kind"] != "input"
+                or item["attempt"] != (existing["attempt"] if existing else 1)
+                or not item["available"]
+                or (
+                    item["job_id"] is not None
+                    and (not existing or item["job_id"] != existing["id"])
+                )
+            ):
+                fail("输入文件不属于此卡密、尝试或字段", 403)
+            _validate_image(c, item, field)
 
 
 def validate_output_files(c, row, p, output):
     for field in p["outputs"]:
-        fid = output.get(field["key"], "")
-        if field["type"] != "file" or not fid:
-            continue
-        item = _file(c, fid)
-        if (
-            item["card_id"] != row["card_id"]
-            or item["product_id"] != row["product_id"]
-            or item["job_id"] != row["id"]
-            or item["attempt"] != row["attempt"]
-            or item["field_key"] != field["key"]
-            or item["kind"] != "output"
-            or not item["available"]
-        ):
-            fail("交付文件不属于此任务、尝试或字段", 403)
+        for fid in _attachment_ids(field, output.get(field["key"], "")):
+            item = _file(c, fid)
+            if (
+                item["card_id"] != row["card_id"]
+                or item["product_id"] != row["product_id"]
+                or item["job_id"] != row["id"]
+                or item["attempt"] != row["attempt"]
+                or item["field_key"] != field["key"]
+                or item["kind"] != "output"
+                or not item["available"]
+            ):
+                fail("交付文件不属于此任务、尝试或字段", 403)
+            _validate_image(c, item, field)
 
 
 def bind_inputs(c, row, params):
     selected = {
-        params[field["key"]]
+        fid
         for field in _job_product(c, row)["parameters"]
-        if field["type"] == "file" and params.get(field["key"])
+        for fid in _attachment_ids(field, params.get(field["key"], ""))
     }
     for item in c.execute(
         "SELECT id FROM job_files WHERE card_id=? AND kind='input'", (row["card_id"],)
@@ -583,9 +636,9 @@ def bind_inputs(c, row, params):
 
 def bind_outputs(c, row, output):
     selected = {
-        output[field["key"]]
+        fid
         for field in _job_product(c, row)["outputs"]
-        if field["type"] == "file" and output.get(field["key"])
+        for fid in _attachment_ids(field, output.get(field["key"], ""))
     }
     for item in c.execute(
         "SELECT id FROM job_files WHERE job_id=? AND kind='output'", (row["id"],)
@@ -600,11 +653,11 @@ def release_output_files(c, row):
     output = json.loads(row["result_json"]) if row["result_json"] else {}
     p = _job_product(c, row)
     validate_output_files(c, row, p, output)
-    ids = {
-        output[field["key"]]
+    ids = [
+        fid
         for field in p["outputs"]
-        if field["type"] == "file" and output.get(field["key"])
-    }
+        for fid in _attachment_ids(field, output.get(field["key"], ""))
+    ]
     result = []
     for fid in ids:
         item = _file(c, fid)
@@ -612,7 +665,7 @@ def release_output_files(c, row):
             fail("交付文件尚未完成", 409)
         c.execute("UPDATE job_files SET released=1 WHERE id=?", (fid,))
         result.append(_descriptor(item))
-    return sorted(result, key=lambda item: (item["field_key"], item["id"]))
+    return result
 
 
 def purge_job_outputs(c, jid):

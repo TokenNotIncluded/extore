@@ -135,6 +135,8 @@ def issue_cards(c, pid, count, label="", expires=None, variant_id="default"):
 
 
 def validate_params(p, params):
+    from .field_values import normalize_rich_value
+
     if set(params) - {v["key"] for v in p["parameters"]}:
         fail("提交了未定义的参数")
     clean = {}
@@ -160,6 +162,10 @@ def validate_params(p, params):
                 fail("请输入数字")
         if v and f["type"] == "url" and not valid_delivery_url(v):
             fail("链接格式不正确")
+        try:
+            v = normalize_rich_value(f, v)
+        except ValueError as error:
+            fail(str(error))
         clean[f["key"]] = v
     if p["mode"] == "script":
         from extore_processors import validate_parameters
@@ -191,6 +197,8 @@ def valid_delivery_url(value):
 
 def validate_output(p, output):
     """Validate a delivery against the product's declared result fields."""
+    from .field_values import normalize_rich_value
+
     fields = p["outputs"]
     if set(output) - {f["key"] for f in fields}:
         fail("提交了未定义的输出字段")
@@ -224,6 +232,15 @@ def validate_output(p, output):
         if value and kind == "url":
             if not valid_delivery_url(value):
                 fail("输出链接格式不正确")
+        try:
+            value = normalize_rich_value(
+                field,
+                value.strip()
+                if kind in ("select", "boolean", "image", "images")
+                else value,
+            )
+        except ValueError as error:
+            fail(str(error))
         clean[field["key"]] = value
     return clean
 

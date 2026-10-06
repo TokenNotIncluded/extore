@@ -49,16 +49,29 @@ def normalize_processor_product(config, *, strict_schema=True, allow_incomplete=
 
 
 def _fields(fields):
-    return [
-        {
+    result = []
+    for field in fields:
+        normalized = {
             "description": {},
             "collapsed": True,
             "required": True,
             "type": "text",
             **field,
         }
-        for field in fields
-    ]
+        # Defaults for extension fields must not alter legacy catalog schemas.
+        if normalized["type"] != "select":
+            normalized.pop("options", None)
+        if normalized["type"] == "images":
+            normalized.setdefault("max_items", 10)
+        else:
+            normalized.pop("max_items", None)
+        if not normalized.get("sensitive"):
+            normalized.pop("sensitive", None)
+            normalized.pop("sensitive_ttl_seconds", None)
+        else:
+            normalized.setdefault("sensitive_ttl_seconds", 120)
+        result.append(normalized)
+    return result
 
 
 def normalize_product(config, *, allow_incomplete=True):
