@@ -22,6 +22,8 @@ STATES = {
     "expired",
 }
 SAFE_CARD_FIELDS = {
+    "variant_id",
+    "variant_name",
     "id",
     "product_id",
     "product_name",

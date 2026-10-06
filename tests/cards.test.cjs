@@ -25,6 +25,7 @@ function fixture(handler, { language = "zh-CN" } = {}) {
   const nodes = new Map();
   const requests = [];
   const copied = [];
+  const created = [];
   const clipboard = {
     async writeText(value) {
       copied.push(value);
@@ -102,7 +103,13 @@ function fixture(handler, { language = "zh-CN" } = {}) {
       confirm: () => confirmation,
       ExtorePreferences: { resolved: { language } },
     },
-    document: { createElement: (tag) => new Node(tag) },
+    document: {
+      createElement(tag) {
+        const element = new Node(tag);
+        created.push(element);
+        return element;
+      },
+    },
     navigator: { clipboard },
     AbortController,
     Blob,
@@ -145,6 +152,7 @@ function fixture(handler, { language = "zh-CN" } = {}) {
     workspace,
     requests,
     copied,
+    created,
     clipboard,
     options,
     module: context.window.ExtoreCards,
@@ -468,4 +476,277 @@ test("复用统一剪贴板 helper，false 仍提供原文选择与失败反馈"
     /已复制第 2 条/,
   );
   assert.deepEqual(page.copied, []);
+});
+
+const variantProduct = (variants) => ({
+  id: "product-a",
+  name: "规格商品",
+  variants,
+});
+const standardVariant = {
+  id: "default",
+  name: "标准版",
+  description: "默认规格",
+  price: "9.90",
+  currency: "CNY",
+  attributes: { seats: 1 },
+  enabled: true,
+};
+const premiumVariant = {
+  id: "annual-pro",
+  name: "年卡 Deluxe",
+  description: "年度规格",
+  price: "49.90",
+  currency: "CNY",
+  attributes: { seats: 3 },
+  enabled: true,
+};
+function selectMarkup(page, id) {
+  const select = page.nodes.get("#" + id);
+  return (
+    select?.innerHTML ||
+    page.workspace.innerHTML.match(
+      new RegExp(`<select\\b[^>]*\\bid="${id}"[^>]*>([\\s\\S]*?)<\\/select>`),
+    )?.[1] ||
+    ""
+  );
+}
+const latestInventoryQuery = (page) =>
+  new URL(
+    "https://example.test" +
+      page.requests.findLast((request) =>
+        request.url.includes("card-inventory"),
+      ).url,
+  ).searchParams;
+
+test("制卡只列出可用规格，默认预选 default，并绑定明确选择的规格", async () => {
+  const page = fixture(issueResponse);
+  page.options.products = [
+    variantProduct([
+      premiumVariant,
+      { ...standardVariant, enabled: false, id: "archived", name: "停售规格" },
+      standardVariant,
+    ]),
+  ];
+  await page.module.render(page.options);
+  assert.equal(page.nodes.get("#cards-issue-variant").value, "default");
+  const choices = selectMarkup(page, "cards-issue-variant");
+  assert.match(choices, /annual-pro/);
+  assert.match(choices, /default/);
+  assert.doesNotMatch(choices, /archived|停售规格/);
+  page.nodes.get("#cards-issue-variant").value = "annual-pro";
+  page.nodes.get("#cards-issue-variant").fire("change");
+  page.nodes.get("#cards-issue").fire("submit");
+  await settle();
+  const request = page.requests.find((item) => item.method === "POST");
+  assert.equal(request.body.product_id, "product-a");
+  assert.equal(request.body.variant_id, "annual-pro");
+});
+
+test("旧商品兼容 default，停用 default 后预选第一个可用规格", async () => {
+  for (const [product, expected] of [
+    [{ id: "product-a", name: "旧商品" }, "default"],
+    [
+      variantProduct([
+        { ...standardVariant, enabled: false },
+        premiumVariant,
+        { ...premiumVariant, id: "monthly", name: "月卡" },
+      ]),
+      "annual-pro",
+    ],
+  ]) {
+    const page = fixture(issueResponse);
+    page.options.products = [product];
+    await issue(page);
+    assert.equal(page.nodes.get("#cards-issue-variant").value, expected);
+    assert.equal(
+      page.requests.find((request) => request.method === "POST").body
+        .variant_id,
+      expected,
+    );
+  }
+});
+
+test("全规格停用时禁止制卡，仍可筛选旧卡密并读取规格历史", async () => {
+  const page = fixture(({ url }) => {
+    if (url.includes("card-stats")) return Promise.resolve({ summary: {} });
+    const card = {
+      id: "old-card",
+      variant_id: "annual-pro",
+      variant_name: "停售年卡",
+      status: "unused",
+    };
+    if (url.includes("card-inventory"))
+      return Promise.resolve({ items: [card], total: 1 });
+    return Promise.resolve({ card, timeline: [] });
+  });
+  page.options.products = [
+    variantProduct([{ ...premiumVariant, name: "停售年卡", enabled: false }]),
+  ];
+  await page.module.render(page.options);
+  assert.equal(page.nodes.get("#cards-issue-submit").disabled, true);
+  assert.equal(page.nodes.get("#cards-variant").disabled, false);
+  assert.match(selectMarkup(page, "cards-variant"), /annual-pro/);
+  const visible =
+    page.workspace.innerHTML +
+    [...page.nodes.values()].map((node) => node.textContent).join(" ");
+  assert.match(
+    visible,
+    /无可用规格|没有可用规格|暂无启用规格|没有启用.*规格|请先.*规格/,
+  );
+  page.nodes.get("#cards-issue").fire("submit");
+  await settle();
+  assert.equal(
+    page.requests.filter((request) => request.method === "POST").length,
+    0,
+  );
+  page.nodes.get("#cards-variant").value = "annual-pro";
+  page.nodes.get("#cards-filter").fire("submit");
+  await settle();
+  assert.equal(latestInventoryQuery(page).get("variant_id"), "annual-pro");
+  page.nodes
+    .get("#cards-inventory")
+    .querySelectorAll("[data-card-history]")[0]
+    .click();
+  await settle();
+  assert.match(page.nodes.get("#cards-history").innerHTML, /停售年卡/);
+});
+
+test("规格概览保留商品总数，安全呈现各规格剩余与发行量及库存历史", async () => {
+  const unsafeName = '<标准 & "特别"版>';
+  const escapedName = "&lt;标准 &amp; &quot;特别&quot;版&gt;";
+  const card = {
+    id: "variant-card",
+    status: "unused",
+    variant_id: "default",
+    variant_name: unsafeName,
+  };
+  const page = fixture(({ url }) => {
+    if (url.includes("card-stats"))
+      return Promise.resolve({
+        summary: { total: 14, remaining: 9 },
+        variants: [
+          {
+            variant_id: "default",
+            name: unsafeName,
+            price: "9.90",
+            currency: "CNY",
+            enabled: true,
+            summary: { total: 10, remaining: 8 },
+          },
+          {
+            variant_id: "annual-pro",
+            name: "年卡 Deluxe",
+            price: "49.90",
+            currency: "CNY",
+            enabled: false,
+            summary: { total: 4, remaining: 1 },
+          },
+        ],
+      });
+    if (url.includes("card-inventory"))
+      return Promise.resolve({ items: [card], total: 1 });
+    return Promise.resolve({ card, timeline: [] });
+  });
+  page.options.products = [
+    variantProduct([
+      { ...standardVariant, name: unsafeName },
+      { ...premiumVariant, enabled: false },
+    ]),
+  ];
+  await page.module.render(page.options);
+  const overview = page.nodes.get("#cards-stats").innerHTML;
+  assert.match(overview, /<h2>14<\/h2>/);
+  assert.match(overview, /<h2>9<\/h2>/);
+  assert.ok(overview.includes(escapedName));
+  assert.match(overview, /年卡 Deluxe/);
+  const text = overview.replace(/<[^>]+>/g, " ");
+  assert.match(text, /\b10\b/);
+  assert.match(text, /\b8\b/);
+  assert.match(text, /\b4\b/);
+  assert.match(text, /\b1\b/);
+  const inventory = page.nodes.get("#cards-inventory").innerHTML;
+  assert.ok(inventory.includes(escapedName));
+  assert.doesNotMatch(inventory + overview, /<标准/);
+  page.nodes
+    .get("#cards-inventory")
+    .querySelectorAll("[data-card-history]")[0]
+    .click();
+  await settle();
+  assert.ok(page.nodes.get("#cards-history").innerHTML.includes(escapedName));
+});
+
+test("库存规格筛选跨分页保留，清空后回到所有规格且不影响制卡选择", async () => {
+  const page = fixture(({ url }) =>
+    Promise.resolve(
+      url.includes("card-stats")
+        ? { summary: {} }
+        : { items: [{ id: "card", status: "unused" }], total: 120 },
+    ),
+  );
+  page.options.products = [variantProduct([standardVariant, premiumVariant])];
+  await page.module.render(page.options);
+  assert.equal(page.nodes.get("#cards-variant").value, "");
+  assert.equal(latestInventoryQuery(page).has("variant_id"), false);
+  page.nodes.get("#cards-variant").value = "annual-pro";
+  page.nodes.get("#cards-filter").fire("submit");
+  await settle();
+  assert.equal(latestInventoryQuery(page).get("variant_id"), "annual-pro");
+  assert.equal(latestInventoryQuery(page).get("offset"), "0");
+  page.nodes.get("#cards-next").click();
+  await settle();
+  assert.equal(latestInventoryQuery(page).get("variant_id"), "annual-pro");
+  assert.equal(latestInventoryQuery(page).get("offset"), "50");
+  assert.equal(latestInventoryQuery(page).get("product_id"), "product-a");
+  page.nodes.get("#cards-reset").click();
+  await settle();
+  assert.equal(page.nodes.get("#cards-variant").value, "");
+  assert.equal(latestInventoryQuery(page).has("variant_id"), false);
+  assert.equal(latestInventoryQuery(page).get("offset"), "0");
+  assert.equal(page.nodes.get("#cards-issue-variant").value, "default");
+});
+
+test("发行原文标题与下载文件名携带本次规格，下载不重新调用制卡接口", async () => {
+  const page = fixture(issueResponse);
+  page.options.products = [variantProduct([premiumVariant])];
+  await issue(page);
+  assert.match(page.nodes.get("#cards-codes").innerHTML, /年卡 Deluxe/);
+  page.nodes.get("#cards-download").click();
+  await settle();
+  const download = page.created.find((element) => element.tagName === "a");
+  assert.ok(download);
+  assert.match(download.download, /annual-pro/);
+  assert.match(download.download, /年卡[ _-]?Deluxe/);
+  assert.match(download.download, /\.txt$/);
+  assert.match(download.href, /^blob:/);
+  assert.equal(
+    page.requests.filter((request) => request.method === "POST").length,
+    1,
+  );
+});
+
+test("切制卡规格清除上次原文，迟到复制结果不能覆盖下一规格提示", async () => {
+  const page = fixture(issueResponse);
+  page.options.products = [variantProduct([standardVariant, premiumVariant])];
+  await issue(page);
+  const clipboard = deferred();
+  page.clipboard.writeText = () => clipboard.promise;
+  page.nodes.get("#cards-copy-all").click();
+  const oldFeedback = page.nodes.get("#cards-copy-feedback");
+  page.nodes.get("#cards-issue-variant").value = "annual-pro";
+  page.nodes.get("#cards-issue-variant").fire("change");
+  await settle();
+  assert.equal(page.nodes.get("#cards-codes").innerHTML, "");
+  oldFeedback.textContent = "下一规格的提示";
+  clipboard.resolve();
+  await settle();
+  assert.equal(oldFeedback.textContent, "下一规格的提示");
+  page.nodes.get("#cards-issue").fire("submit");
+  await settle();
+  assert.equal(
+    page.requests.findLast((request) => request.method === "POST").body
+      .variant_id,
+    "annual-pro",
+  );
+  assert.match(page.nodes.get("#cards-codes").innerHTML, /年卡 Deluxe/);
 });

@@ -21,6 +21,7 @@ from webauthn.helpers.structs import (
 
 from .config import COOKIE_SECURE, DATA, ORIGIN, RP_ID
 from .db import audit, db, set_setting, setting
+from .link_access import revoke_all_sessions, revoke_session
 from .security import create_session, digest, fail, rate_limit, session, token
 
 router = APIRouter(prefix="/api/auth")
@@ -64,6 +65,9 @@ def status(request: Request):
             link_name=s["name"],
             link_expires=s["link_expires"],
             parent_id=s["parent_id"],
+            max_uses=s["max_uses"],
+            uses=s["uses"],
+            remaining_uses=s["remaining_uses"],
         )
     return result
 
@@ -80,16 +84,17 @@ def password(body: PasswordInput, request: Request, response: Response):
                 fail("密码错误", 401)
         except VerificationError:
             fail("密码错误", 401)
-        create_session(c, response, "bootstrap")
+        create_session(c, response, "bootstrap", request=request)
     return {"role": "bootstrap"}
 
 
 @router.post("/logout")
 def logout(request: Request, response: Response):
     with db() as c:
-        c.execute(
-            "DELETE FROM sessions WHERE digest=?",
-            (digest(request.cookies.get("extore_session", "")),),
+        revoke_session(
+            c,
+            digest(request.cookies.get("extore_session", "")),
+            action="session.logout",
         )
     response.delete_cookie("extore_session", path="/")
     return {"ok": True}
@@ -193,9 +198,9 @@ def register_verify(body: CredentialInput, request: Request, response: Response)
         )
         set_setting(c, "bootstrap_password", "")
         if s["role"] == "bootstrap":
-            c.execute("DELETE FROM sessions")
+            revoke_all_sessions(c, "owner", "session.bootstrap_complete")
             c.execute("DELETE FROM challenges")
-            create_session(c, response, "admin")
+            create_session(c, response, "admin", request=request)
         audit(c, "owner", "passkey.add", cid)
     (DATA / "bootstrap-password.txt").unlink(missing_ok=True)
     return {"ok": True}
@@ -234,11 +239,7 @@ def login_verify(body: CredentialInput, request: Request, response: Response):
             "UPDATE credentials SET sign_count=? WHERE id=?",
             (v.new_sign_count, row["id"]),
         )
-        c.execute(
-            "DELETE FROM sessions WHERE digest=?",
-            (digest(request.cookies.get("extore_session", "")),),
-        )
-        create_session(c, response, "admin")
+        create_session(c, response, "admin", request=request)
     return {"role": "admin"}
 
 

@@ -56,7 +56,7 @@ def test_legacy_staff_links_migrate_without_escalating_permissions(
         database.init()
         database.init()
         with database.db() as c:
-            assert c.execute("PRAGMA user_version").fetchone()[0] == 4
+            assert c.execute("PRAGMA user_version").fetchone()[0] == 7
             assert "result_json" in {
                 row["name"] for row in c.execute("PRAGMA table_info(jobs)")
             }
@@ -77,12 +77,25 @@ def test_legacy_staff_links_migrate_without_escalating_permissions(
                 "permissions": '["queue.view","queue.process"]',
                 "parent_id": None,
                 "created": 0,
+                "max_uses": 1,
+                "uses": 1,
             }
             assert staff_authorization(c, "legacy")["permissions"] == [
                 "queue.view",
                 "queue.process",
             ]
-            assert dict(c.execute("SELECT * FROM sessions").fetchone()) == {
+            migrated = dict(c.execute("SELECT * FROM sessions").fetchone())
+            assert migrated["id"]
+            assert (
+                migrated["revoked"],
+                migrated["last_seen"],
+                migrated["ip"],
+                migrated["ua"],
+            ) == (0, now, "", "")
+            assert {
+                key: migrated[key]
+                for key in ("digest", "role", "staff_id", "expires", "created")
+            } == {
                 "digest": "session-digest",
                 "role": "staff",
                 "staff_id": "legacy",

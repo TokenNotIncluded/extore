@@ -47,6 +47,7 @@ class Client:
         content=None,
         output=None,
         retryable=False,
+        completed_steps=None,
     ):
         body = json.dumps(
             dict(
@@ -57,6 +58,7 @@ class Client:
                 content=content,
                 output=output,
                 retryable=retryable,
+                completed_steps=completed_steps,
             ),
             ensure_ascii=False,
             separators=(",", ":"),

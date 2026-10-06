@@ -64,6 +64,9 @@ def assert_config_link(result, started, finished):
     product = result["product"]
     link = result["management_link"]
     assert set(link) == {
+        "max_uses",
+        "uses",
+        "remaining_uses",
         "id",
         "url",
         "permissions",
@@ -76,6 +79,7 @@ def assert_config_link(result, started, finished):
     }
     assert uuid.UUID(product["id"]).version == 4
     assert uuid.UUID(link["id"]).version == 4
+    assert (link["max_uses"], link["uses"], link["remaining_uses"]) == (1, 0, 1)
     assert link["product_id"] == product["id"]
     assert link["permissions"] == CONFIG_PERMISSIONS
     assert link["name"] == ("AI 配置 · " + product["name"])[:100]

@@ -11,7 +11,7 @@ CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS products (id TEXT PRIMARY KEY, config TEXT NOT NULL, created REAL NOT NULL);
 CREATE TABLE IF NOT EXISTS cards (id TEXT PRIMARY KEY, digest TEXT UNIQUE NOT NULL, product_id TEXT NOT NULL REFERENCES products(id), state TEXT NOT NULL DEFAULT 'ready', created REAL NOT NULL);
 CREATE TABLE IF NOT EXISTS grants (digest TEXT PRIMARY KEY, card_id TEXT NOT NULL REFERENCES cards(id), expires REAL NOT NULL);
-CREATE TABLE IF NOT EXISTS jobs (id TEXT PRIMARY KEY, card_id TEXT UNIQUE NOT NULL REFERENCES cards(id), product_id TEXT NOT NULL REFERENCES products(id), state TEXT NOT NULL, params TEXT NOT NULL, content TEXT, message TEXT NOT NULL DEFAULT '', progress INTEGER NOT NULL DEFAULT 0, attempt INTEGER NOT NULL DEFAULT 1, retryable INTEGER NOT NULL DEFAULT 0, claimed_by TEXT, lease REAL, created REAL NOT NULL, updated REAL NOT NULL, revealed INTEGER NOT NULL DEFAULT 0, result_json TEXT);
+CREATE TABLE IF NOT EXISTS jobs (id TEXT PRIMARY KEY, card_id TEXT UNIQUE NOT NULL REFERENCES cards(id), product_id TEXT NOT NULL REFERENCES products(id), state TEXT NOT NULL, params TEXT NOT NULL, content TEXT, message TEXT NOT NULL DEFAULT '', progress INTEGER NOT NULL DEFAULT 0, attempt INTEGER NOT NULL DEFAULT 1, retryable INTEGER NOT NULL DEFAULT 0, claimed_by TEXT, lease REAL, created REAL NOT NULL, updated REAL NOT NULL, revealed INTEGER NOT NULL DEFAULT 0, result_json TEXT, progress_plan TEXT, completed_steps TEXT NOT NULL DEFAULT '[]', schema_snapshot TEXT);
 CREATE TABLE IF NOT EXISTS staff (id TEXT PRIMARY KEY, digest TEXT UNIQUE NOT NULL, product_id TEXT NOT NULL REFERENCES products(id), name TEXT NOT NULL, expires REAL NOT NULL, revoked INTEGER NOT NULL DEFAULT 0, permissions TEXT NOT NULL DEFAULT '["queue.view","queue.process"]', parent_id TEXT REFERENCES staff(id), created REAL NOT NULL DEFAULT 0);
 CREATE TABLE IF NOT EXISTS sessions (digest TEXT PRIMARY KEY, role TEXT NOT NULL, staff_id TEXT REFERENCES staff(id), expires REAL NOT NULL, created REAL NOT NULL);
 CREATE TABLE IF NOT EXISTS credentials (id TEXT PRIMARY KEY, public_key BLOB NOT NULL, sign_count INTEGER NOT NULL, name TEXT NOT NULL, created REAL NOT NULL);
@@ -68,11 +68,25 @@ def init():
         job_columns = {r["name"] for r in c.execute("PRAGMA table_info(jobs)")}
         if "result_json" not in job_columns:
             c.execute("ALTER TABLE jobs ADD COLUMN result_json TEXT")
+        if "progress_plan" not in job_columns:
+            c.execute("ALTER TABLE jobs ADD COLUMN progress_plan TEXT")
+        if "completed_steps" not in job_columns:
+            c.execute(
+                "ALTER TABLE jobs ADD COLUMN completed_steps TEXT NOT NULL DEFAULT '[]'"
+            )
+        if "schema_snapshot" not in job_columns:
+            c.execute("ALTER TABLE jobs ADD COLUMN schema_snapshot TEXT")
         from .card_tracking import init_schema
 
         init_schema(c)
-        if c.execute("PRAGMA user_version").fetchone()[0] < 4:
-            c.execute("PRAGMA user_version=4")
+        from .files import init_schema as init_files_schema
+
+        init_files_schema(c)
+        from .link_access import init_schema as init_link_access
+
+        init_link_access(c)
+        if c.execute("PRAGMA user_version").fetchone()[0] < 7:
+            c.execute("PRAGMA user_version=7")
     # WAL is set outside a transaction.
     with sqlite3.connect(DATA / "extore.sqlite3") as c:
         c.execute("PRAGMA journal_mode=WAL")
@@ -116,9 +130,16 @@ def event(c, kind, product_id, job=None):
         "product_id": product_id,
     }
     if job:
+        from .service import progress_view
+        from .variants import card_variant
+
         payload["data"] = {
             k: job[k] for k in ("id", "state", "attempt", "progress", "message")
         }
+        payload["data"]["variant"] = card_variant(c, job)
+        payload["data"]["steps"], payload["data"]["completed_steps"] = progress_view(
+            c, job
+        )
         if kind == "redemption.requested":
             payload["data"]["params"] = json.loads(job["params"])
     else:

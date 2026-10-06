@@ -46,12 +46,37 @@
     required: true,
     collapsed: true,
   });
+  const defaultVariant = () => ({
+    id: "default",
+    name: "默认规格",
+    description: "",
+    price: null,
+    currency: "CNY",
+    attributes: {},
+    enabled: true,
+  });
+  const productVariants = (product) =>
+    Array.isArray(product.variants) && product.variants.length
+      ? product.variants
+      : [defaultVariant()];
+  let generatedId = 0;
+  const newItemId = (prefix) => {
+    const random = globalThis.crypto?.randomUUID
+      ? globalThis.crypto.randomUUID().replaceAll("-", "").slice(0, 12)
+      : Date.now().toString(36) + Math.random().toString(36).slice(2, 10);
+    return prefix + "_" + random + "_" + (++generatedId).toString(36);
+  };
+  const priceLabel = (variant) =>
+    variant.price === null || variant.price === undefined
+      ? "未设置售价"
+      : `${variant.price} ${variant.currency || "CNY"}`;
   const inputTypes = [
     ["text", "文本"],
     ["email", "邮箱"],
     ["url", "链接"],
     ["textarea", "多行文本"],
     ["number", "数字"],
+    ["file", "文件（单个文件，最多 20 MiB）"],
   ];
   const field = (id, label, value = "", type = "text", attributes = "") =>
     `<div class="field"><label for="${id}">${escape(label)}</label><input id="${id}" type="${type}" value="${escape(value)}" ${attributes}></div>`;
@@ -95,15 +120,61 @@
     return { active, $, all, perform, on, report };
   }
 
+  function exportHandler(ctx, view) {
+    const { active, $, on } = view;
+    let revision = 0;
+    return async (productId) => {
+      const loadId = ++revision;
+      const current = () => active() && revision === loadId;
+      const exporter = window.ExtoreProductExport;
+      if (!exporter) throw new Error("商品导出模块未加载，请刷新页面");
+      const canInspectCards = ctx.role === "admin" || ctx.canManageCards === true;
+      const productRequest = ctx.role === "staff"
+        ? ctx.api("/manage/product")
+        : ctx.api("/admin/products").then((values) =>
+            values.find((product) => product.id === productId),
+          );
+      const statsRequest = canInspectCards
+        ? ctx.api((ctx.role === "staff" ? "/manage" : "/admin") +
+            "/card-stats?" + new URLSearchParams({ product_id: productId }))
+            .catch(() => null)
+        : Promise.resolve(null);
+      let saved, stats;
+      try {
+        [saved, stats] = await Promise.all([productRequest, statsRequest]);
+      } catch (error) {
+        if (current()) throw error;
+        return;
+      }
+      if (!current()) return;
+      if (!saved || saved.id !== productId)
+        throw new Error("这个商品已不存在，无法复制资料");
+      const options = {
+        lang: ctx.lang,
+        inventory: stats?.variants,
+        isCurrent: current,
+        notify: ctx.notify,
+      };
+      const panel = $("#product-export-panel");
+      panel.innerHTML = `<details class="product-export-panel" open><summary>${ctx.lang === "en" ? "Saved product information for AI" : "已保存的商品资料 · AI 提示词"}</summary><p class="caption">${ctx.lang === "en" ? "This contains saved product information. Fulfillment secrets, private processor configuration, full codes and management links are excluded." : "资料来自已保存的商品。不包含发货密钥、处理器私密配置、完整卡密或管理链接。"}</p><p class="caption">${stats?.variants ? (ctx.lang === "en" ? "Counts refer to unredeemed codes, not unsold units; previously sold codes can still be unredeemed." : "统计的是未兑换卡密数量，不是未售库存；在其他平台已售出但未兑换的卡密仍会计入。") : (ctx.lang === "en" ? "Code counts were not provided. No inventory quantity is assumed." : "未提供卡密统计，不会假定库存数量。")}</p>${textarea("product-export-text", ctx.lang === "en" ? "Product prompt" : "商品 AI 提示词", exporter.prompt(saved, options), 'readonly spellcheck="false" class="product-export-text"')}<button type="button" id="copy-product-prompt" class="secondary">${ctx.lang === "en" ? "Copy prompt" : "复制提示词"}</button></details>`;
+      options.textarea = $("#product-export-text");
+      on("#copy-product-prompt", "click", () => exporter.copy(saved, options));
+      await exporter.copy(saved, options);
+    };
+  }
+
   async function render(ctx, createdLink = null) {
     if (!ctx.isCurrent()) return;
-    const { active, $, all, on, report } = begin(ctx, "list");
+    const view = begin(ctx, "list");
+    const { active, $, all, on, report, perform } = view;
+    const exportProduct = exportHandler(ctx, view);
     const owner = ctx.role === "admin";
     const products = ctx.products;
     ctx.workspace.innerHTML = `<div class="section-head"><h2>商品</h2>${owner ? '<button id="new-product">新建商品</button>' : ""}</div>
       ${owner ? `<div class="form-divider"><div class="grid">${select("quick-template", "快速新建模板", [["random", "随机选择模板"]], "random")}<div class="field"><label for="quick-product">生成私有草稿与 AI 配置链接</label><button id="quick-product" class="secondary" disabled>随机快速新建</button></div></div><p class="caption">先创建一个私有商品，再把仅能配置这个商品的链接交给 AI 完善。配置链接有效期为 7 天。复制已有商品后，需重新填写私密发货配置。</p></div>` : ""}
       ${createdLink ? `<div class="parameter" id="quick-created"><h3>商品已创建 · ${escape(createdLink.productName)}</h3><p class="caption">这个链接只允许编辑当前商品与发货配置。请复制保存；离开后完整链接不再显示。</p>${field("quick-management-link", "AI 商品配置链接", createdLink.url, "text", "readonly")}<div class="toolbar"><button id="copy-quick-link" class="secondary">${ctx.lang === "en" ? "Copy link" : "复制链接"}</button><button id="edit-quick-product" class="secondary">继续配置商品</button></div></div>` : ""}
-      ${products.length ? `<div class="product-list">${products.map((product) => `<article class="product-row">${product.logo ? `<img src="${escape(product.logo)}" alt="" loading="lazy" referrerpolicy="no-referrer">` : `<div class="product-icon">${icon}</div>`}<div class="product-info"><h3>${escape(product.name)}</h3><p>${product.public ? "公开展示" : "仅持卡可见"} · ${escape({ manual: "队列", webhook: "外部 Webhook", script: "官方处理器" }[product.mode] || product.mode)} · ${product.delivery === "service" ? "服务状态" : "内容交付"}</p><div class="mono muted">${escape(product.id)}</div></div><button class="secondary" data-edit="${escape(product.id)}">配置</button></article>`).join("")}</div>` : '<div class="empty">还没有商品。先创建商品，再生成卡密。</div>'}
+      ${products.length ? `<div class="product-list">${products.map((product) => `<article class="product-row">${product.logo ? `<img src="${escape(product.logo)}" alt="" loading="lazy" referrerpolicy="no-referrer">` : `<div class="product-icon">${icon}</div>`}<div class="product-info"><h3>${escape(product.name)}</h3><p>${product.public ? "公开展示" : "仅持卡可见"} · ${escape({ manual: "队列", webhook: "外部 Webhook", script: "官方处理器" }[product.mode] || product.mode)} · ${product.delivery === "service" ? "服务状态" : "内容交付"}</p><div class="variant-summary">${productVariants(product).map((variant) => `<span>${escape(variant.name)} · ${escape(priceLabel(variant))}${variant.enabled === false ? " · 已停用" : ""}</span>`).join("")}</div><div class="mono muted">${escape(product.id)}</div></div><div class="product-actions"><button class="secondary" data-edit="${escape(product.id)}">配置</button><button type="button" class="secondary" data-export="${escape(product.id)}">${ctx.lang === "en" ? "Copy product info" : "复制商品资料"}</button></div></article>`).join("")}</div>` : '<div class="empty">还没有商品。先创建商品，再生成卡密。</div>'}
+      <div id="product-export-panel"></div>
       <div id="error" class="error" role="alert"></div>`;
     on("#new-product", "click", () => edit(ctx));
     all("[data-edit]").forEach((node) =>
@@ -114,6 +185,11 @@
             products.find((product) => product.id === node.dataset.edit),
           );
       }),
+    );
+    all("[data-export]").forEach((node) =>
+      node.addEventListener("click", () =>
+        perform(() => exportProduct(node.dataset.export), node),
+      ),
     );
     if (createdLink) {
       on("#copy-quick-link", "click", async () => {
@@ -193,7 +269,9 @@
 
   async function edit(ctx, source) {
     if (!ctx.isCurrent()) return;
-    const { active, $, all, perform, on, report } = begin(ctx, "editor");
+    const view = begin(ctx, "editor");
+    const { active, $, all, perform, on, report } = view;
+    const exportProduct = exportHandler(ctx, view);
     const product = structuredClone(
       source || {
         name: "",
@@ -223,8 +301,10 @@
     let previousDelivery = product.delivery;
     let customParameters = structuredClone(parameters);
     let customOutputs = structuredClone(outputs);
+    let variants = structuredClone(productVariants(product));
+    let progressSteps = structuredClone(product.progress_steps || []);
     const disabled = ctx.canConfigure ? "" : "disabled";
-    ctx.workspace.innerHTML = `<div class="section-head"><h2>${product.id ? "配置商品" : "新建商品"}</h2><button id="cancel" class="secondary">返回商品</button></div><form id="product-form">
+    ctx.workspace.innerHTML = `<div class="section-head"><h2>${product.id ? "配置商品" : "新建商品"}</h2><div class="product-actions">${product.id ? `<button type="button" id="export-saved-product" class="secondary">${ctx.lang === "en" ? "Copy saved product info" : "复制已保存商品资料"}</button>` : ""}<button id="cancel" class="secondary">返回商品</button></div></div><div id="product-export-panel"></div><form id="product-form">
       <div class="grid">${field("p-name", "商品名称", product.name)}${select(
         "p-mode",
         "处理方式",
@@ -255,6 +335,9 @@
         disabled,
       )}</div>
       ${textarea("p-description", "商品描述（Markdown）", product.description)}
+      ${field("p-support-email", "商家催办邮箱（可留空）", product.support_email || "", "email", 'maxlength="254" autocomplete="email"')}
+      <div class="form-divider"><div class="section-head"><h3>处理步骤</h3><button type="button" id="add-progress-step" class="secondary">添加步骤</button></div><p class="caption">按处理顺序配置步骤，顾客可跟踪每一步的状态。修改只用于之后的任务，正在处理的任务会保留原来的步骤。</p><div id="product-progress-steps"></div></div>
+      <div class="form-divider"><div class="section-head"><h3>规格 / 档位</h3><button type="button" id="add-variant" class="secondary">添加规格</button></div><p class="caption">每个规格有独立的卡密库存，数量在卡密页查看。售价用于其他销售平台；这里不处理支付。</p><div id="product-variants"></div><p class="caption">规格标识固定。已有卡密的规格不能删除，可停用，避免继续发行。</p></div>
       <div class="checks"><label><input id="p-public" type="checkbox" ${product.public ? "checked" : ""}>公开展示商品</label><label><input id="p-retry" type="checkbox" ${product.allow_retry ? "checked" : ""} ${disabled}>允许明确失败后重试</label></div>
       ${field("p-attempts", "最多尝试次数", product.max_attempts, "number", `${disabled} min="1" max="20"`)}
       <div class="form-divider" id="delivery-connection"><h3>发货对接</h3>
@@ -264,7 +347,7 @@
       </div>
       <div class="form-divider"><div class="section-head"><h3>顾客填写的信息</h3><button type="button" id="add-param" class="secondary">添加参数</button></div><div id="parameters"></div></div>
       <div class="form-divider" id="outputs-section"><div class="section-head"><h3>任务完成时提交的结果</h3><button type="button" id="add-output" class="secondary" ${disabled}>添加输出字段</button></div><p class="caption">结果只在顾客主动领取时显示。人员、AI 或外部平台提交完成结果时，都须符合这些定义。</p><div id="outputs"></div></div>
-      <p class="caption">发行卡密后，处理方式与输入输出结构不能更换。需要更换时，请创建另一个商品。</p><button type="submit" id="save-product" class="full">保存商品</button><div id="error" class="error" role="alert"></div>
+      <p class="caption">队列商品调整输入输出后，新任务采用新定义，已提交任务保留原定义。自动处理商品发行卡密后，处理方式与输入输出结构不能更换。</p><button type="submit" id="save-product" class="full">保存商品</button><div id="error" class="error" role="alert"></div>
     </form>`;
 
     const parseObject = (id, label) => {
@@ -279,6 +362,93 @@
         throw new Error(`${label}需要填写“语言 → 文本”的 JSON 对象`);
       }
     };
+    const captureVariants = () => {
+      variants = variants.map((variant, index) => {
+        const price = $("#v-price-" + index).value.trim();
+        const currency = $("#v-currency-" + index).value.trim().toUpperCase() || "CNY";
+        if (!/^[A-Z]{3,5}$/.test(currency))
+          throw new Error(`规格 ${index + 1} 的币种须为 3 至 5 位字母，例如 CNY 或 USDT`);
+        if (price && (price.length > 100 || !/^[0-9]+(?:\.\d{1,6})?$/.test(price) ||
+          (price.split(".")[0].replace(/^0+/, "") || "0").length > 12))
+          throw new Error(`规格 ${index + 1} 的价格必须是非负金额，最多 12 位整数、6 位小数`);
+        let attributes;
+        try {
+          attributes = JSON.parse($("#v-attributes-" + index).value);
+          if (!attributes || typeof attributes !== "object" || Array.isArray(attributes) ||
+              Object.keys(attributes).length > 20 ||
+              Object.keys(attributes).some((key) => !key.trim() || key.length > 100) ||
+              Object.values(attributes).some((value) => value !== null &&
+                !(typeof value === "string" && value.length <= 1000) && typeof value !== "boolean" &&
+                !(typeof value === "number" && Number.isFinite(value) &&
+                  (!Number.isInteger(value) || Number.isSafeInteger(value)))))
+            throw new Error("invalid attributes");
+        } catch {
+          throw new Error(`规格 ${index + 1} 的属性需要 JSON 对象，最多 20 项；值可用文字、数字、布尔值或 null，大整数请用字符串`);
+        }
+        return {
+          ...variant,
+          id: variant.id,
+          name: $("#v-name-" + index).value,
+          description: $("#v-description-" + index).value,
+          price: price || null,
+          currency,
+          attributes,
+          enabled: $("#v-enabled-" + index).checked,
+        };
+      });
+    };
+    const drawVariants = () => {
+      $("#product-variants").innerHTML = variants.map((variant, index) =>
+        `<section class="variant-editor"><div class="section-head"><h4>规格 ${index + 1}</h4>${variant.id === "default" || variants.length === 1 ? "" : `<button type="button" class="danger" data-remove-variant="${index}">删除规格</button>`}</div><div class="variant-fields">${field("v-name-" + index, "规格名称", variant.name, "text", 'maxlength="120"')}${field("v-id-" + index, "固定规格标识", variant.id, "text", "readonly")}${field("v-price-" + index, "售价（可留空）", variant.price ?? "", "text", 'inputmode="decimal" placeholder="例如 19.90"')}${field("v-currency-" + index, "币种", variant.currency || "CNY", "text", 'maxlength="5" autocapitalize="characters"')}</div>${textarea("v-description-" + index, "规格说明", variant.description || "")}${textarea("v-attributes-" + index, "规格属性（JSON）", JSON.stringify(variant.attributes || {}, null, 2))}<p class="caption">例如：{"duration_months": 1, "tier": "basic"}，处理任务时会带上这些属性。</p><label class="variant-enabled"><input id="v-enabled-${index}" type="checkbox" ${variant.enabled !== false ? "checked" : ""}>启用此规格</label></section>`,
+      ).join("");
+      all("[data-remove-variant]").forEach((node) =>
+        node.addEventListener("click", () => perform(() => {
+          captureVariants();
+          variants.splice(Number(node.dataset.removeVariant), 1);
+          drawVariants();
+        }, node)),
+      );
+    };
+    drawVariants();
+    const captureProgressSteps = (validate = true) => {
+      progressSteps = progressSteps.map((step, index) => {
+        const label = { ...step.label };
+        for (const [locale, suffix] of [["zh-CN", "zh"], ["en", "en"]]) {
+          const value = $("#ps-label-" + suffix + "-" + index).value.trim();
+          if (validate && value.length > 200)
+            throw new Error(`步骤 ${index + 1} 的名称最多 200 个字符`);
+          if (value) label[locale] = value;
+          else delete label[locale];
+        }
+        if (validate && !Object.keys(label).length)
+          throw new Error(`请填写步骤 ${index + 1} 的中文或英文名称`);
+        if (validate && Object.keys(label).length > 20)
+          throw new Error(`步骤 ${index + 1} 的名称最多支持 20 种语言`);
+        return { id: step.id, label };
+      });
+    };
+    const drawProgressSteps = () => {
+      $("#product-progress-steps").innerHTML = progressSteps.length
+        ? `<ol class="progress-step-editor">${progressSteps.map((step, index) => `<li class="parameter"><div class="section-head"><h4>步骤 ${index + 1}</h4><div class="product-actions"><button type="button" class="secondary" data-step-up="${index}" ${index === 0 ? "disabled" : ""}>上移</button><button type="button" class="secondary" data-step-down="${index}" ${index === progressSteps.length - 1 ? "disabled" : ""}>下移</button><button type="button" class="danger" data-step-remove="${index}">删除</button></div></div><div class="variant-fields">${field("ps-label-zh-" + index, "中文名称", step.label?.["zh-CN"] || "", "text", 'maxlength="200"')}${field("ps-label-en-" + index, "English name", step.label?.en || "", "text", 'maxlength="200"')}</div>${field("ps-id-" + index, "固定步骤标识", step.id, "text", "readonly")}</li>`).join("")}</ol>`
+        : '<p class="caption">未配置处理步骤，顾客仍可查看任务状态与进度。</p>';
+      for (const [attribute, action] of [["step-up", "up"], ["step-down", "down"], ["step-remove", "remove"]]) {
+        all(`[data-${attribute}]`).forEach((node) =>
+          node.addEventListener("click", () => perform(() => {
+            if (node.disabled) return;
+            captureProgressSteps(false);
+            const index = Number(node.getAttribute("data-" + attribute));
+            if (action === "remove") progressSteps.splice(index, 1);
+            else {
+              const target = index + (action === "up" ? -1 : 1);
+              if (target < 0 || target >= progressSteps.length) return;
+              [progressSteps[index], progressSteps[target]] = [progressSteps[target], progressSteps[index]];
+            }
+            drawProgressSteps();
+          })),
+        );
+      }
+    };
+    drawProgressSteps();
     const captureFields = (prefix, fields) =>
       fields.map((definition, index) => ({
         ...definition,
@@ -403,6 +573,29 @@
       drawSchemas();
     }
     on("#cancel", "click", () => render(ctx));
+    on("#export-saved-product", "click", () => exportProduct(product.id));
+    on("#add-progress-step", "click", () => {
+      captureProgressSteps(false);
+      if (progressSteps.length >= 30)
+        throw new Error("每个商品最多支持 30 个处理步骤");
+      const number = progressSteps.length + 1;
+      progressSteps.push({
+        id: newItemId("step"),
+        label: { "zh-CN": "步骤 " + number, en: "Step " + number },
+      });
+      drawProgressSteps();
+    });
+    on("#add-variant", "click", () => {
+      captureVariants();
+      if (variants.length >= 100)
+        throw new Error("每个商品最多支持 100 个规格");
+      variants.push({
+        ...defaultVariant(),
+        id: newItemId("sku"),
+        name: "基础版",
+      });
+      drawVariants();
+    });
     on("#add-param", "click", () => {
       captureCustom();
       parameters.push({
@@ -464,6 +657,8 @@
       if (button.disabled) return;
       button.disabled = true;
       try {
+        captureVariants();
+        captureProgressSteps();
         captureCustom();
         captureConfiguration();
         const mode = $("#p-mode").value;
@@ -489,6 +684,9 @@
           webhook_secret: $("#p-secret").value,
           script: "",
           processor_id: mode === "script" ? processorId : "",
+          variants,
+          progress_steps: progressSteps,
+          support_email: $("#p-support-email").value.trim(),
         };
         if (ctx.canConfigure)
           body.processor_config = mode === "script" ? processorConfig : {};

@@ -59,7 +59,7 @@ def login_link(client, link):
 
 
 def create_link(client, product_id, permissions=None, **kwargs):
-    body = {"product_id": product_id, "name": "商品管理人员", **kwargs}
+    body = {"product_id": product_id, "name": "商品管理人员", "max_uses": 100, **kwargs}
     if permissions is not None:
         body["permissions"] = permissions
     response = client.post("/api/admin/staff", json=body)
@@ -73,6 +73,7 @@ def delegate(client, permissions, **kwargs):
         json={
             "name": "下级商品管理人员",
             "days": 1,
+            "max_uses": 100,
             "permissions": permissions,
             **kwargs,
         },
@@ -165,7 +166,14 @@ def test_permissions_are_normalized_and_work_on_automated_products(
         {
             key: value
             for key, value in row.items()
-            if key not in ("parameters", "outputs")
+            if key
+            not in (
+                "parameters",
+                "outputs",
+                "variants",
+                "progress_steps",
+                "support_email",
+            )
         }
         for row in rows
     ] == [
@@ -497,7 +505,7 @@ def test_admin_revocation_invalidates_descendant_sessions_and_requeues_claims(
     )
     with db() as c:
         assert not c.execute(
-            "SELECT 1 FROM sessions WHERE staff_id IN (?,?,?)",
+            "SELECT 1 FROM sessions WHERE revoked=0 AND staff_id IN (?,?,?)",
             (parent["id"], child["id"], grandchild["id"]),
         ).fetchone()
         task_row = c.execute("SELECT * FROM jobs WHERE id=?", (task["id"],)).fetchone()
@@ -595,6 +603,7 @@ def test_invalid_link_lifetimes_do_not_create_links(owner, setup_product, days):
     assert response.status_code == 422, response.text
     assert snapshot("staff", "audit") == before
     login_link(owner, parent)
+    before = snapshot("staff", "audit")
     response = owner.post(
         "/api/manage/links",
         json={"name": "错误期限", "permissions": ["queue.view"], "days": days},
@@ -1089,7 +1098,8 @@ def test_full_manager_selects_approved_processor_and_cannot_change_it_after_issu
     config = {
         key: value
         for key, value in config.items()
-        if key not in ("parameters", "outputs")
+        if key
+        not in ("parameters", "outputs", "variants", "progress_steps", "support_email")
     }
     response = owner.put(
         "/api/manage/product",
@@ -1173,18 +1183,25 @@ def test_official_processor_catalog_requires_product_edit_permission(
 @pytest.mark.parametrize(
     "attribute,value", (("key", "replacement"), ("type", "text"), ("required", False))
 )
-def test_issued_manual_product_input_and_output_schema_cannot_change(
+def test_issued_queue_can_change_future_schema_without_changing_existing_task(
     owner, setup_product, field, attribute, value
 ):
-    pid, _ = setup_product()
+    pid, code = setup_product()
+    _, task = redeem(owner, code)
     manager = create_link(owner, pid, ["product.edit", "fulfillment.configure"])
     login_link(owner, manager)
     config = owner.get("/api/manage/product").json()
     changed = [{**item, attribute: value} for item in config[field]]
     before = snapshot("products", "audit")
     response = owner.put("/api/manage/product", json={**config, field: changed})
-    assert response.status_code == 409, response.text
-    assert snapshot("products", "audit") == before
+    assert response.status_code == 200, response.text
+    assert response.json()[field] == changed
+    with db() as c:
+        raw = c.execute(
+            "SELECT schema_snapshot FROM jobs WHERE id=?", (task["id"],)
+        ).fetchone()[0]
+    assert json.loads(raw)[field] == config[field]
+    assert snapshot("products", "audit") != before
 
 
 def test_issued_manual_product_field_labels_and_tutorials_remain_editable(

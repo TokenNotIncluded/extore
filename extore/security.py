@@ -4,6 +4,7 @@ import json
 import math
 import secrets
 import time
+import uuid
 
 from fastapi import HTTPException, Request, Response
 
@@ -50,20 +51,45 @@ def rate_limit(request, bucket, limit=30, window=60):
         )
 
 
-def create_session(c, response: Response, role, staff_id=None):
+def create_session(c, response: Response, role, staff_id=None, request=None):
+    from .db import audit
+    from .link_access import cleanup_sessions, request_metadata, revoke_session
+
     value = token()
     now = time.time()
-    c.execute("DELETE FROM sessions WHERE expires<?", (now,))
+    if role not in ("admin", "bootstrap", "staff"):
+        raise ValueError("Unknown login role")
+    if role == "staff":
+        staff_authorization(c, staff_id)
+    actor = (
+        staff_id if role == "staff" else ("owner" if role == "admin" else "bootstrap")
+    )
+    if request is not None:
+        revoke_session(
+            c,
+            digest(request.cookies.get("extore_session", "")),
+            actor,
+            "session.replace",
+        )
+    cleanup_sessions(c, now)
+    sid = str(uuid.uuid4())
+    ip, ua = request_metadata(request)
     c.execute(
-        "INSERT INTO sessions VALUES (?,?,?,?,?)",
+        "INSERT INTO sessions(digest,role,staff_id,expires,created,id,last_seen,ip,ua,revoked) "
+        "VALUES (?,?,?,?,?,?,?,?,?,0)",
         (
             digest(value),
             role,
             staff_id,
             now + (600 if role == "bootstrap" else 28800),
             now,
+            sid,
+            now,
+            ip,
+            ua,
         ),
     )
+    audit(c, actor, "session.create", sid)
     response.set_cookie(
         "extore_session",
         value,
@@ -79,12 +105,19 @@ def create_session(c, response: Response, role, staff_id=None):
 def session(request: Request, roles=("admin",)):
     with db() as c:
         row = c.execute(
-            "SELECT * FROM sessions WHERE digest=? AND expires>?",
+            "SELECT * FROM sessions WHERE digest=? AND expires>? AND revoked=0",
             (digest(request.cookies.get("extore_session", "")), time.time()),
         ).fetchone()
         if not row or row["role"] not in roles:
             fail("请先登录", 401)
         result = dict(row)
+        now = time.time()
+        if now - result["last_seen"] >= 30:
+            c.execute(
+                "UPDATE sessions SET last_seen=? WHERE digest=? AND revoked=0",
+                (now, row["digest"]),
+            )
+            result["last_seen"] = now
         if row["role"] == "staff":
             authorize_management(c, result)
         return result
@@ -158,6 +191,16 @@ def authorize_management(c, s, permission=None):
     """Refresh authorization before accessing or changing management data."""
     from .models import LINK_PERMISSIONS
 
+    current = c.execute(
+        "SELECT role,staff_id FROM sessions WHERE digest=? AND revoked=0 AND expires>?",
+        (s.get("digest", ""), time.time()),
+    ).fetchone()
+    if (
+        current is None
+        or current["role"] != s["role"]
+        or current["staff_id"] != s.get("staff_id")
+    ):
+        fail("请先登录", 401)
     if s["role"] == "admin":
         s["permissions"] = list(LINK_PERMISSIONS)
     elif s["role"] == "staff":
@@ -168,6 +211,9 @@ def authorize_management(c, s, permission=None):
             name=staff["name"],
             link_expires=staff["expires"],
             parent_id=staff["parent_id"],
+            max_uses=staff["max_uses"],
+            uses=staff["uses"],
+            remaining_uses=max(0, staff["max_uses"] - staff["uses"]),
         )
     else:
         fail("请先登录", 401)

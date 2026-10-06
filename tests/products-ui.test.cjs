@@ -147,6 +147,7 @@ function page(options = {}) {
     JSON,
     console,
     URL,
+    URLSearchParams,
     setTimeout,
     clearTimeout,
     DOMPurify: { sanitize: (value) => value },
@@ -154,12 +155,15 @@ function page(options = {}) {
     navigator: options.navigator || {},
   });
   const source = fs.readFileSync(path.join(__dirname, "../extore/static/products.js"), "utf8");
+  vm.runInContext(fs.readFileSync(path.join(__dirname, "../extore/static/product-export.js"), "utf8"), context);
+  browser.ExtoreClipboard = options.clipboard || { async writeText() { return false; } };
   vm.runInContext(source, context);
   const ctx = {
     workspace,
     products: options.products || [],
     role: options.role || "admin",
     canConfigure: options.canConfigure ?? true,
+    canManageCards: options.canManageCards ?? false,
     lang: "zh-CN",
     isCurrent: () => active,
     api(url, body, method) {
@@ -446,4 +450,187 @@ test("a description editor has no fulfillment controls or editable output defini
   assert.equal(processorPage.node("#pc-value-0"), null);
   assert.doesNotMatch(processorPage.workspace.innerHTML, /hidden secret/);
   assert.match(processorPage.node("#processor-configuration").innerHTML, /配置已隐藏/);
+});
+
+test("legacy products keep a stable default specification and submit prices as exact text", async () => {
+  const p = page({ products: [product()] });
+  await editProduct(p);
+  assert.equal(p.node("#v-id-0").value, "default");
+  assert.equal(p.node("#v-id-0").readOnly, true);
+  p.node("#v-id-0").value = "changed-in-dom";
+  p.node("#v-name-0").value = "两个月 · 加强版";
+  p.node("#v-price-0").value = "999999999999.123456";
+  p.node("#v-currency-0").value = "usdt";
+  p.node("#v-attributes-0").value = '{"duration_months":2,"tier":"advanced","enabled_feature":true}';
+  p.node("#product-form").emit("submit");
+  const variant = JSON.parse(JSON.stringify(p.requests[1].body.variants[0]));
+  assert.equal(variant.id, "default");
+  assert.equal(variant.name, "两个月 · 加强版");
+  assert.equal(variant.price, "999999999999.123456");
+  assert.equal(variant.currency, "USDT");
+  assert.deepEqual(variant.attributes, { duration_months: 2, tier: "advanced", enabled_feature: true });
+  assert.equal(Object.hasOwn(variant, "stock"), false);
+});
+
+test("adding and deleting specifications retains earlier edits and keeps a default SKU", async () => {
+  const p = page();
+  await editProduct(p);
+  p.node("#v-name-0").value = "基础版";
+  p.node("#v-price-0").value = "19.90";
+  await p.node("#add-variant").emit("click");
+  assert.equal(p.node("#v-name-0").value, "基础版");
+  assert.equal(p.node("#v-price-0").value, "19.90");
+  assert.match(p.node("#v-id-1").value, /^sku_[a-z0-9_]+$/);
+  assert.equal(p.node("#v-id-1").readOnly, true);
+  assert.equal(p.node("#v-name-1").value, "基础版");
+  assert.equal(p.node('[data-remove-variant="0"]'), null);
+  await p.node('[data-remove-variant="1"]').emit("click");
+  assert.equal(p.node("#v-id-1"), null);
+  assert.equal(p.node("#v-name-0").value, "基础版");
+});
+
+test("invalid specification prices and nested or unsafe attributes block saving without losing the draft", async () => {
+  for (const [selector, invalid] of [
+    ["#v-price-0", "-1"],
+    ["#v-price-0", "1e10"],
+    ["#v-price-0", "1.1234567"],
+    ["#v-price-0", "1000000000000"],
+    ["#v-attributes-0", '{"nested":{"value":1}}'],
+    ["#v-attributes-0", '{"account_id":9007199254740993}'],
+  ]) {
+    const p = page();
+    await editProduct(p);
+    p.node("#p-name").value = "保留这个名称";
+    p.node(selector).value = invalid;
+    await p.node("#product-form").emit("submit");
+    await flush();
+    assert.equal(p.requests.length, 1);
+    assert.match(p.node("#error").textContent, /规格 1/);
+    assert.equal(p.node("#p-name").value, "保留这个名称");
+    assert.equal(p.node(selector).value, invalid);
+    assert.equal(p.node("#save-product").disabled, false);
+  }
+});
+
+test("an issued-SKU removal error preserves the editor and its specification draft", async () => {
+  const value = product({ variants: [
+    { id: "default", name: "默认规格", price: null, currency: "CNY", attributes: {}, enabled: true },
+    { id: "advanced", name: "加强版", price: "29.9", currency: "CNY", attributes: { tier: "advanced" }, enabled: true },
+  ] });
+  const p = page({ products: [value] });
+  await editProduct(p, value);
+  await p.node('[data-remove-variant="1"]').emit("click");
+  p.node("#product-form").emit("submit");
+  p.requests[1].reject(new Error("已发行卡密的规格不能删除；请停用该规格：advanced"));
+  await flush();
+  assert.match(p.node("#error").textContent, /已发行卡密的规格不能删除/);
+  assert.equal(p.node("#v-id-0").value, "default");
+  assert.equal(p.node("#save-product").disabled, false);
+});
+
+test("copying saved metadata ignores unsaved editor changes and does not fetch unauthorized inventory", async () => {
+  const written = [];
+  const p = page({ role: "staff", clipboard: { async writeText(value) { written.push(value); return true; } } });
+  await editProduct(p);
+  p.node("#p-name").value = "尚未保存的名称";
+  await p.node("#export-saved-product").emit("click");
+  assert.equal(p.requests[1].url, "/manage/product");
+  assert.equal(p.requests.length, 2);
+  p.requests[1].resolve(product({ name: "已经保存的名称", webhook_secret: "secret-never-export", processor_config: { template: "delivery-never-export" } }));
+  await flush();
+  assert.equal(written.length, 1);
+  assert.match(written[0], /已经保存的名称/);
+  assert.doesNotMatch(written[0], /尚未保存的名称|secret-never-export|delivery-never-export/);
+  assert.equal(p.node("#p-name").value, "尚未保存的名称");
+  assert.equal(p.node("#product-export-text").readOnly, true);
+  assert.equal(p.node("#product-export-text").value, written[0]);
+  assert.match(p.node("#product-export-panel").innerHTML, /未提供卡密统计/);
+});
+
+test("scoped product copying includes only unredeemed-code counts and stops after navigation", async () => {
+  for (const leaving of [false, true]) {
+    const written = [];
+    const p = page({ role: "staff", canManageCards: true, products: [product()], clipboard: { async writeText(value) { written.push(value); return false; } } });
+    await p.ui.render(p.ctx);
+    const copying = p.node('[data-export="product-one"]').emit("click");
+    assert.equal(p.requests[0].url, "/manage/product");
+    assert.equal(p.requests[1].url, "/manage/card-stats?product_id=product-one");
+    if (leaving) {
+      p.leave();
+      p.workspace.innerHTML = "Different page";
+    }
+    p.requests[0].resolve(product());
+    p.requests[1].resolve({ variants: [{ variant_id: "default", summary: { total: 12, remaining: 7, available: 8 }, cards: ["private-code"] }] });
+    await copying;
+    if (leaving) {
+      assert.equal(written.length, 0);
+      assert.equal(p.workspace.innerHTML, "Different page");
+      assert.equal(p.notifications.length, 0);
+    } else {
+      assert.equal(written.length, 1);
+      assert.match(written[0], /"remaining": 7/);
+      assert.match(written[0], /未兑换卡密数量/);
+      assert.doesNotMatch(written[0], /private-code/);
+      assert.equal(p.node("#product-export-text").selected, true);
+      assert.match(p.node("#product-export-panel").innerHTML, /不是未售库存/);
+    }
+  }
+});
+
+test("ordered processing steps keep stable identifiers, translated labels and the support mailbox", async () => {
+  const value = product({ progress_steps: [
+    { id: "verify", label: { "zh-CN": "核实信息", en: "Verify", fr: "Vérifier" } },
+    { id: "deliver", label: { "zh-CN": "交付商品", en: "Deliver" } },
+  ], support_email: "merchant@example.test" });
+  const p = page({ products: [value] });
+  await editProduct(p, value);
+  assert.equal(p.node("#ps-id-0").readOnly, true);
+  p.node("#ps-id-0").value = "tampered-id";
+  p.node("#ps-label-zh-0").value = "核实账户";
+  await p.node('[data-step-down="0"]').emit("click");
+  assert.equal(p.node("#ps-id-0").value, "deliver");
+  assert.equal(p.node("#ps-id-1").value, "verify");
+  assert.equal(p.node("#ps-label-zh-1").value, "核实账户");
+  await p.node("#add-progress-step").emit("click");
+  const firstAdded = p.node("#ps-id-2").value;
+  await p.node("#add-progress-step").emit("click");
+  const lastAdded = p.node("#ps-id-3").value;
+  assert.match(firstAdded, /^step_[a-z0-9_]+$/);
+  assert.notEqual(firstAdded, lastAdded);
+  await p.node('[data-step-remove="2"]').emit("click");
+  assert.equal(p.node("#ps-id-2").value, lastAdded);
+  p.node("#p-support-email").value = "followup@example.test";
+  p.node("#product-form").emit("submit");
+  const body = JSON.parse(JSON.stringify(p.requests[1].body));
+  assert.equal(body.progress_steps.length, 3);
+  assert.equal(body.progress_steps[1].id, "verify");
+  assert.deepEqual(body.progress_steps[1].label, { "zh-CN": "核实账户", en: "Verify", fr: "Vérifier" });
+  assert.equal(body.support_email, "followup@example.test");
+});
+
+test("a blank processing-step label prevents saving while keeping the other draft fields", async () => {
+  const p = page();
+  await editProduct(p, product({ progress_steps: [{ id: "prepare", label: { "zh-CN": "准备", en: "Prepare" } }] }));
+  p.node("#ps-label-zh-0").value = "";
+  p.node("#ps-label-en-0").value = "";
+  p.node("#p-name").value = "仍保留这个商品名称";
+  await p.node("#product-form").emit("submit");
+  await flush();
+  assert.equal(p.requests.length, 1);
+  assert.match(p.node("#error").textContent, /步骤 1/);
+  assert.equal(p.node("#p-name").value, "仍保留这个商品名称");
+  assert.equal(p.node("#save-product").disabled, false);
+});
+
+test("products cannot add a thirty-first processing step", async () => {
+  const value = product({ progress_steps: Array.from({ length: 30 }, (_, index) => ({
+    id: "phase_" + index,
+    label: { "zh-CN": "步骤 " + index, en: "Step " + index },
+  })) });
+  const p = page();
+  await editProduct(p, value);
+  await p.node("#add-progress-step").emit("click");
+  await flush();
+  assert.equal(p.node("#ps-id-30"), null);
+  assert.match(p.node("#error").textContent, /最多支持 30 个处理步骤/);
 });

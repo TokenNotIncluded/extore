@@ -157,13 +157,14 @@ def test_first_passkey_disables_password_and_invalidates_bootstrap_sessions(clie
         assert setting(c, "bootstrap_password") == ""
         assert (
             c.execute(
-                "SELECT count(*) FROM sessions WHERE role='bootstrap'"
+                "SELECT count(*) FROM sessions WHERE role='bootstrap' AND revoked=0"
             ).fetchone()[0]
             == 0
         )
         assert (
             c.execute(
-                "SELECT 1 FROM sessions WHERE digest=?", (digest(other_bootstrap),)
+                "SELECT 1 FROM sessions WHERE digest=? AND revoked=0",
+                (digest(other_bootstrap),),
             ).fetchone()
             is None
         )

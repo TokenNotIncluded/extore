@@ -1,7 +1,10 @@
-from typing import Literal
+import re
+from typing import Any, Literal
 from urllib.parse import urlsplit
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+
+from .variants import default_variant, normalize_price, validate_attributes
 
 LINK_PERMISSIONS = (
     "queue.view",
@@ -20,6 +23,7 @@ class ProductLinkInput(BaseModel):
     product_id: str = Field(default="", max_length=100)
     name: str = Field(min_length=1, max_length=100)
     days: float | None = Field(default=None, gt=0, le=90)
+    max_uses: int = Field(default=1, strict=True, ge=1, le=1000)
     permissions: list[str] = Field(
         default_factory=lambda: list(DEFAULT_LINK_PERMISSIONS),
         min_length=1,
@@ -82,7 +86,7 @@ class Parameter(BaseModel):
     description: dict[str, str] = Field(default_factory=dict)
     collapsed: bool = True
     required: bool = True
-    type: Literal["text", "email", "url", "textarea", "number"] = "text"
+    type: Literal["text", "email", "url", "textarea", "number", "file"] = "text"
 
     @model_validator(mode="after")
     def labels(self):
@@ -96,7 +100,58 @@ class Parameter(BaseModel):
 
 
 class OutputField(Parameter):
-    type: Literal["text", "email", "url", "textarea", "number"] = "text"
+    type: Literal["text", "email", "url", "textarea", "number", "file"] = "text"
+
+
+class ProgressStep(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    id: str = Field(pattern=r"^[a-z0-9][a-z0-9_-]{0,39}$")
+    label: dict[str, str] = Field(min_length=1, max_length=20)
+
+    @model_validator(mode="after")
+    def labels(self):
+        if any(not key.strip() or len(key) > 40 for key in self.label):
+            raise ValueError("步骤语言代码必须是非空文本，最多四十字符")
+        if any(not value.strip() or len(value) > 200 for value in self.label.values()):
+            raise ValueError("请输入步骤显示名称，最多二百字符")
+        return self
+
+
+def validate_completed_steps(value):
+    if value is not None and (
+        len(set(value)) != len(value)
+        or any(not re.fullmatch(r"[a-z0-9][a-z0-9_-]{0,39}", step) for step in value)
+    ):
+        raise ValueError("已完成步骤代码必须有效且不能重复")
+    return value
+
+
+class ProductVariant(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    id: str = Field(pattern=r"^[a-z0-9][a-z0-9_-]{0,39}$")
+    name: str = Field(min_length=1, max_length=120)
+    description: str = Field(default="", max_length=10000)
+    price: str | None = None
+    currency: str = Field(default="CNY", pattern=r"^[A-Z]{3,5}$")
+    attributes: dict[str, Any] = Field(default_factory=dict)
+    enabled: bool = Field(default=True, strict=True)
+
+    @field_validator("name", mode="before")
+    @classmethod
+    def trim_name(cls, value):
+        return value.strip() if isinstance(value, str) else value
+
+    @field_validator("price", mode="before")
+    @classmethod
+    def price_text(cls, value):
+        return normalize_price(value)
+
+    @field_validator("attributes", mode="before")
+    @classmethod
+    def scalar_attributes(cls, value):
+        return validate_attributes(value)
 
 
 class Product(BaseModel):
@@ -105,6 +160,13 @@ class Product(BaseModel):
     logo: str = Field(default="", max_length=2000)
     image: str = Field(default="", max_length=2000)
     public: bool = False
+    support_email: str = Field(default="", max_length=254)
+    progress_steps: list[ProgressStep] = Field(default_factory=list, max_length=30)
+    variants: list[ProductVariant] = Field(
+        default_factory=lambda: [ProductVariant(**default_variant())],
+        min_length=1,
+        max_length=100,
+    )
     mode: Literal["manual", "webhook", "script"] = "manual"
     delivery: Literal["content", "service"] = "content"
     view_policy: Literal["repeat", "once"] = "repeat"
@@ -127,11 +189,38 @@ class Product(BaseModel):
     processor_id: str = Field(default="", max_length=100, pattern=r"^[a-zA-Z0-9_-]*$")
     processor_config: dict[str, str] = Field(default_factory=dict, max_length=30)
 
+    @field_validator("support_email")
+    @classmethod
+    def contact_email(cls, value):
+        value = value.strip()
+        if not value:
+            return value
+        local, separator, domain = value.rpartition("@")
+        if (
+            not separator
+            or len(local) > 64
+            or local.startswith(".")
+            or local.endswith(".")
+            or ".." in local
+            or not re.fullmatch(r"[A-Za-z0-9.!#$%&'*+/=?^_`{|}~-]+", local)
+            or not re.fullmatch(
+                r"(?:[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?\.)+"
+                r"[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?",
+                domain,
+            )
+        ):
+            raise ValueError("联系邮箱格式不正确")
+        return value
+
     @model_validator(mode="after")
     def validate_config(self):
         return self._validate_config()
 
     def _validate_config(self, allow_blank_secret=False):
+        if len({step.id for step in self.progress_steps}) != len(self.progress_steps):
+            raise ValueError("处理步骤代码不能重复")
+        if len({variant.id for variant in self.variants}) != len(self.variants):
+            raise ValueError("规格代码不能重复")
         if self.script:
             raise ValueError("不能指定或执行任意脚本；请选择官方处理器")
         if self.mode == "script":
@@ -210,6 +299,7 @@ class TokenInput(BaseModel):
 
 class IssueCards(BaseModel):
     product_id: str
+    variant_id: str = Field(default="default", pattern=r"^[a-z0-9][a-z0-9_-]{0,39}$")
     count: int = Field(default=1, ge=1, le=1000)
     label: str = Field(default="", max_length=100)
     expires: float | None = Field(default=None, allow_inf_nan=False)
@@ -218,19 +308,46 @@ class IssueCards(BaseModel):
 class JobUpdate(BaseModel):
     state: Literal["processing", "succeeded", "failed"]
     progress: int = Field(default=0, ge=0, le=100)
+    completed_steps: list[str] | None = Field(default=None, max_length=30)
     message: str = Field(default="", max_length=1000)
     content: str | None = Field(default=None, max_length=100000)
     output: dict[str, str] | None = None
     retryable: bool = False
     attempt: int = Field(ge=1)
 
+    @field_validator("completed_steps")
+    @classmethod
+    def completed_ids(cls, value):
+        return validate_completed_steps(value)
+
 
 class BatchUpdate(BaseModel):
     product_id: str = Field(min_length=1, max_length=100)
     progress: int = Field(default=0, ge=0, le=99)
+    completed_steps: list[str] | None = Field(default=None, max_length=30)
+    progress_steps: list[ProgressStep] | None = Field(
+        default=None, min_length=1, max_length=30
+    )
     ids: list[str] = Field(min_length=1, max_length=100)
     action: Literal["claim", "progress", "succeed", "fail", "retry"]
     message: str = Field(default="", max_length=1000)
     content: str | None = Field(default=None, max_length=100000)
     output: dict[str, str] | None = None
     retryable: bool = False
+
+    @field_validator("completed_steps")
+    @classmethod
+    def completed_ids(cls, value):
+        return validate_completed_steps(value)
+
+    @model_validator(mode="after")
+    def unique_steps(self):
+        if self.action == "retry" and (
+            self.completed_steps is not None or self.progress_steps is not None
+        ):
+            raise ValueError("放行重试不修改步骤；重新提交时会保留计划并重置完成状态")
+        if self.progress_steps is not None and len(
+            {step.id for step in self.progress_steps}
+        ) != len(self.progress_steps):
+            raise ValueError("处理步骤代码不能重复")
+        return self

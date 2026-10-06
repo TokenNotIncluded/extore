@@ -50,7 +50,9 @@ def main():
                 raise SystemExit("Password too short or does not match")
         with db() as c:
             c.execute("DELETE FROM credentials")
-            c.execute("DELETE FROM sessions")
+            from .link_access import revoke_all_sessions
+
+            revoke_all_sessions(c, "ssh", "session.auth_reset")
             c.execute("DELETE FROM challenges")
             set_setting(c, "bootstrap_password", PasswordHasher().hash(password))
             audit(c, "ssh", "auth." + args.command, "owner")

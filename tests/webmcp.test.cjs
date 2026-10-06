@@ -28,6 +28,10 @@ const product = (overrides = {}) => ({
 const outputField = (key, overrides = {}) => ({
   key, label: { en: key }, description: {}, required: true, collapsed: false, type: "text", ...overrides,
 });
+const productVariant = (id, overrides = {}) => ({
+  id, name: "Variant " + id, description: "Variant description", price: "9.900000", currency: "CNY",
+  attributes: { duration: "30 days", automatic: true, quantity: 1, note: null }, enabled: true, ...overrides,
+});
 const processorCatalog = [
   {
     id: "resource_link", schema_version: 1, name: { en: "Resource link" }, description: { en: "Deliver a configured resource" }, delivery: "content",
@@ -75,6 +79,7 @@ async function harness(t, options = {}) {
   if (options.native !== false && options.surface !== "legacy") document.modelContext = primary;
   if (options.surface === "legacy" || options.both) navigator.modelContext = legacy;
   const root = { document, navigator, AbortController, URL, setTimeout };
+  if (options.productExport) root.ExtoreProductExport = options.productExport;
   root.window = root;
   vm.runInNewContext(source, root, { filename: "webmcp.js" });
   const integration = root.ExtoreWebMCP;
@@ -1613,4 +1618,656 @@ test("UI navigation uses a bounded route list and refreshes tools after code ver
   assert.equal((await h.call("ui_navigate", { page: "admin", tab: "security" })).ok, true);
   await h.settle();
   assert.deepEqual(h.names().sort(), ["extore_context", "extore_ui_navigate"]);
+});
+
+test("product variants validate strict SKU definitions and preserve decimal prices and primitive attributes", async (t) => {
+  const h = await harness(t, { context: { page: "admin", role: "admin", tab: "products" } });
+  const variant = productVariant("monthly");
+  const malformed = [
+    [], Array.from({ length: 101 }, (_, i) => productVariant("v" + i)), [variant, variant],
+    [{ ...variant, id: "" }], [{ ...variant, id: "UPPER" }], [{ ...variant, id: "../monthly" }], [{ ...variant, id: "x".repeat(41) }],
+    [{ ...variant, name: " " }], [{ ...variant, name: "x".repeat(121) }], [{ ...variant, description: "x".repeat(10001) }],
+    ...[-1, 0, true, "-1", "1e2", "1.", ".5", "1.1234567", "1000000000000", "0".repeat(101)].map((price) => [{ ...variant, price }]),
+    ...["cny", "CN", "CNYABC", 123].map((currency) => [{ ...variant, currency }]),
+    [{ ...variant, enabled: "true" }], [{ ...variant, extra: true }], [{ ...variant, attrs: {} }], [{ ...variant, attributes: [] }],
+    [{ ...variant, attributes: { "": "empty" } }], [{ ...variant, attributes: { ["x".repeat(101)]: "long" } }],
+    [{ ...variant, attributes: Object.fromEntries(Array.from({ length: 21 }, (_, i) => ["k" + i, "value"])) }],
+    [{ ...variant, attributes: { nested: {} } }], [{ ...variant, attributes: { list: [] } }], [{ ...variant, attributes: { number: NaN } }],
+    [{ ...variant, attributes: { number: Infinity } }], [{ ...variant, attributes: { value: "x".repeat(1001) } }],
+    [{ ...variant, attributes: JSON.parse('{"__proto__":"bad"}') }],
+  ];
+  for (const variants of malformed) rejected(await h.call("product_create", { product: { name: "Variants", variants }, confirm: true }));
+  assert.equal(mutations(h).length, 0);
+  const variants = [variant, productVariant("1_year", { price: "000000000001.000001", currency: "USDT" }), productVariant("free", { price: null })];
+  assert.equal((await h.call("product_create", { product: { name: "Variants", variants }, confirm: true })).ok, true);
+  assert.deepEqual(mutations(h)[0].body.variants, variants);
+  assert.equal(mutations(h)[0].body.variants[1].price, "000000000001.000001", "Exact decimal strings must not be converted to floating point");
+});
+
+test("product editors can change variants without fulfillment permission and cannot cross product scope", async (t) => {
+  const variants = [productVariant("monthly")];
+  const h = await harness(t, { context: staffContext({ tab: "products", permissions: ["product.edit"] }), products: [product({ variants })] });
+  const changes = { variants: [productVariant("annual", { price: "99", attributes: { duration: "1 year" } })] };
+  assert.equal((await h.call("product_update", { product_id: "p1", changes, confirm: true })).ok, true);
+  assert.deepEqual(mutations(h)[0].body.variants, changes.variants);
+  assert.equal(mutations(h)[0].url, "/manage/product");
+  rejected(await h.call("product_update", { product_id: "p2", changes, confirm: true }), "forbidden");
+  assert.equal(mutations(h).length, 1);
+});
+
+test("SKU metadata changes do not churn native receipt or queue registrations", async (t) => {
+  const variants = [productVariant("monthly")];
+  const p = product({ variants });
+  const receipt = await harness(t, { context: { page: "receipt", currentToken: "private", product: p }, receipt: { product: p, job: null } });
+  const savedParameters = receipt.tool("product_parameters");
+  const receiptRegistrations = receipt.native.signals.length;
+  receipt.state.product = { ...p, variants: [productVariant("annual")] };
+  await receipt.refresh();
+  assert.equal(receipt.native.signals.length, receiptRegistrations);
+  assert.equal((await savedParameters.execute({})).ok, true);
+  const queue = await harness(t, { context: staffContext({ queueProduct: p }) });
+  const savedJobs = queue.tool("jobs_list");
+  const queueRegistrations = queue.native.signals.length;
+  queue.state.queueProduct = { ...p, variants: [productVariant("annual")] };
+  await queue.refresh();
+  assert.equal(queue.native.signals.length, queueRegistrations);
+  assert.equal((await savedJobs.execute({ product_id: "p1" })).ok, true);
+  rejected(await queue.call("jobs_claim", { product_id: "p1", variant_id: "monthly", ids: ["j1"], confirm: true }));
+  rejected(await queue.call("jobs_claim", { product_id: "p2", ids: ["j1"], confirm: true }), "forbidden");
+});
+
+test("SKU issuance and inventory keep generic schemas, preserve omitted defaults and bind employee product scope", async (t) => {
+  const h = await harness(t, { context: staffContext({ tab: "cards", permissions: ["cards.manage"] }) });
+  const issue = { product_id: "p1", count: 1, confirm: true };
+  for (const variant_id of ["", "UPPER", "../monthly", "x".repeat(41), 1, null]) rejected(await h.call("cards_issue", { ...issue, variant_id }));
+  assert.equal(mutations(h).length, 0);
+  assert.equal((await h.call("cards_issue", issue)).ok, true);
+  assert.equal((await h.call("cards_issue", { ...issue, variant_id: "1_year" })).ok, true);
+  assert.deepEqual(mutations(h).map((call) => call.body), [{ product_id: "p1", count: 1 }, { product_id: "p1", count: 1, variant_id: "1_year" }]);
+  assert.equal((await h.call("card_inventory", { variant_id: "1_year" })).ok, true);
+  const read = h.calls.find((call) => call.url?.startsWith("/manage/card-inventory"));
+  const query = new URL("https://extore.test" + read.url).searchParams;
+  assert.equal(query.get("variant_id"), "1_year");
+  assert.equal(query.get("product_id"), "p1");
+  assert.equal((await h.call("card_inventory", { variant_id: "" })).ok, true);
+  for (const variant_id of ["UPPER", "../monthly", "x".repeat(41), 1, null]) rejected(await h.call("card_inventory", { variant_id }));
+  rejected(await h.call("cards_issue", { ...issue, product_id: "p2", variant_id: "monthly" }), "forbidden");
+  rejected(await h.call("card_inventory", { product_id: "p2", variant_id: "monthly" }), "forbidden");
+  assert.equal(h.calls.some((call) => call.url?.startsWith("/admin/")), false);
+  assert.equal(Object.hasOwn(h.tool("cards_issue").inputSchema.properties.variant_id, "enum"), false);
+});
+
+test("card tracking retains safe SKU metadata and strips variant payloads and credentials", async (t) => {
+  const summary = { total: 5, remaining: 3, used: 2, states: { unused: 3, succeeded: 2 } };
+  const sensitive = { token: "VARIANT-TOKEN", code: "VARIANT-CODE", output: { account: "VARIANT-OUTPUT" }, processor_config: { resource_url: "VARIANT-CONFIG" } };
+  const variant = { variant_id: "monthly", name: "Monthly", description: "30 days", price: "9.900000", currency: "CNY", enabled: true, summary, ...sensitive };
+  const card = { id: "c1", product_id: "p1", variant_id: "monthly", variant_name: "Monthly", code_suffix: "ABCD", ...sensitive };
+  const h = await harness(t, {
+    context: { page: "admin", role: "admin", tab: "cards" },
+    api: async (url) => {
+      if (url === "/auth/status") return { role: "admin" };
+      if (url.startsWith("/admin/card-stats")) return { summary, variants: [variant], products: [{ product_id: "p1", product_name: "Example", ...summary, variants: [variant] }] };
+      if (url.startsWith("/admin/card-inventory")) return { items: [card], summary, total: 1, offset: 0, limit: 100 };
+      return { card, timeline: [] };
+    },
+  });
+  const stats = await h.call("card_stats", { product_id: "p1" });
+  const expected = { variant_id: "monthly", name: "Monthly", description: "30 days", price: "9.900000", currency: "CNY", enabled: true, summary };
+  assert.deepEqual(plain(stats.data.variants), [expected]);
+  assert.deepEqual(plain(stats.data.products[0].variants), [expected]);
+  const inventory = await h.call("card_inventory", {});
+  const history = await h.call("card_history", { card_id: "c1" });
+  for (const safeCard of [inventory.data.items[0], history.data.card]) {
+    assert.equal(safeCard.variant_id, "monthly");
+    assert.equal(safeCard.variant_name, "Monthly");
+  }
+  for (const result of [stats, inventory, history]) for (const secret of ["VARIANT-TOKEN", "VARIANT-CODE", "VARIANT-OUTPUT", "VARIANT-CONFIG"]) assert.equal(JSON.stringify(result).includes(secret), false, secret);
+});
+
+test("native product prompt export is a read-only scoped product tool and safely reports a missing helper", async (t) => {
+  const owner = await harness(t, { context: { page: "admin", role: "admin", tab: "products" } });
+  const delegated = await harness(t, { context: staffContext({ tab: "products", permissions: ["product.edit"] }) });
+  for (const h of [owner, delegated]) {
+    const tool = h.tool("product_export_prompt");
+    assert.equal(tool.annotations.readOnlyHint, true);
+    rejected(await h.call("product_export_prompt", { product_id: "p1" }), "unavailable");
+    assert.equal(mutations(h).length, 0);
+    h.state.tab = "cards";
+    await h.refresh();
+    assert.equal(h.names().includes("extore_product_export_prompt"), false);
+  }
+  const noPermission = await harness(t, { context: staffContext({ tab: "products", permissions: ["cards.manage"] }) });
+  assert.equal(noPermission.names().includes("extore_product_export_prompt"), false);
+});
+
+test("product prompt export validates its arguments and forwards only safe product definitions to the plain-string helper", async (t) => {
+  const helperCalls = [];
+  const p = product({
+    variants: [productVariant("monthly")], outputs: [outputField("content", { type: "textarea" })],
+    webhook_secret: "EXPORT-WEBHOOK-SECRET", processor_config: { resource_url: "EXPORT-PROCESSOR-SECRET" },
+    token: "EXPORT-TOKEN", output: { account: "EXPORT-DELIVERY" }, result_json: "EXPORT-RESULT",
+    description: "Public instructions https://extore.test/receipt#export-receipt-private",
+    extra: { secret: "EXPORT-NESTED-SECRET", note: "https://extore.test/staff#export-staff-private" },
+  });
+  const h = await harness(t, {
+    context: { page: "admin", role: "admin", tab: "products" }, products: [p],
+    productExport: { prompt: (value, options) => { helperCalls.push({ product: plain(value), options: plain(options) }); return "EXPORTED-PLAIN-PROMPT"; } },
+  });
+  for (const input of [{}, { product_id: "../p1" }, { product_id: "p1", lang: "fr" }, { product_id: "p1", include_inventory: "true" }, { product_id: "p1", confirm: true }]) rejected(await h.call("product_export_prompt", input));
+  assert.equal(h.calls.length, 0);
+  const result = await h.call("product_export_prompt", { product_id: "p1", lang: "en" });
+  assert.equal(result.ok, true);
+  assert.equal(result.data, "EXPORTED-PLAIN-PROMPT");
+  assert.equal(result.untrustedData, true);
+  assert.equal(helperCalls.length, 1);
+  assert.deepEqual(helperCalls[0].product.parameters, p.parameters);
+  assert.deepEqual(helperCalls[0].product.outputs, p.outputs);
+  assert.deepEqual(helperCalls[0].product.variants, p.variants);
+  assert.equal(helperCalls[0].options.lang, "en");
+  assert.equal(Object.hasOwn(helperCalls[0].options, "inventory"), false);
+  for (const secret of ["EXPORT-WEBHOOK-SECRET", "EXPORT-PROCESSOR-SECRET", "EXPORT-TOKEN", "EXPORT-DELIVERY", "EXPORT-RESULT", "EXPORT-NESTED-SECRET", "export-receipt-private", "export-staff-private"]) assert.equal(JSON.stringify(helperCalls[0]).includes(secret), false, secret);
+  assert.equal(h.calls.some((call) => call.url?.includes("card-stats")), false);
+  assert.equal(h.calls.some((call) => call.type === "action"), false, "Export does not navigate, write clipboard, or refresh UI");
+  assert.equal(mutations(h).length, 0);
+});
+
+test("authorized product prompt export reads only the selected product inventory", async (t) => {
+  for (const role of ["admin", "staff"]) {
+    const helperCalls = [];
+    const inventory = { summary: { total: 5, remaining: 3 }, variants: [{ variant_id: "monthly", name: "Monthly", summary: { total: 5, remaining: 3 } }] };
+    const h = await harness(t, {
+      context: role === "admin" ? { page: "admin", role, tab: "products" } : staffContext({ tab: "products", permissions: ["product.edit", "cards.manage"] }),
+      productExport: { prompt: (value, options) => { helperCalls.push({ product: plain(value), options: plain(options) }); return "inventory prompt"; } },
+      api: async (url) => {
+        if (url === "/auth/status") return { role, product_id: "p1", permissions: ["product.edit", "cards.manage"] };
+        if (url === "/admin/products") return [product()];
+        if (url === "/manage/product") return product();
+        const expected = (role === "admin" ? "/admin" : "/manage") + "/card-stats?product_id=p1";
+        assert.equal(url, expected, "No global inventory read is needed for one product export");
+        return inventory;
+      },
+    });
+    assert.equal((await h.call("product_export_prompt", { product_id: "p1", include_inventory: true })).ok, true);
+    assert.deepEqual(helperCalls[0].options.inventory, inventory.variants);
+    assert.equal(h.calls.filter((call) => call.url?.includes("card-stats")).length, 1);
+    assert.equal(mutations(h).length, 0);
+  }
+});
+
+test("export inventory is omitted when fresh staff card permission is absent and product authority remains required", async (t) => {
+  for (const advertisedCardPermission of [false, true]) {
+    const helperCalls = [];
+    const h = await harness(t, {
+      context: staffContext({ tab: "products", permissions: ["product.edit", ...(advertisedCardPermission ? ["cards.manage"] : [])] }),
+      productExport: { prompt: (value, options) => { helperCalls.push(plain(options)); return "product without inventory"; } },
+      api: async (url) => {
+        if (url === "/auth/status") return { role: "staff", product_id: "p1", permissions: ["product.edit"] };
+        if (url === "/manage/product") return product();
+        assert.fail("Staff without fresh cards.manage must not query inventory: " + url);
+      },
+    });
+    assert.equal((await h.call("product_export_prompt", { product_id: "p1", include_inventory: true })).ok, true);
+    assert.equal(Object.hasOwn(helperCalls[0], "inventory"), false, "Unknown inventory must not be presented as zero");
+    rejected(await h.call("product_export_prompt", { product_id: "p2", include_inventory: true }), "forbidden");
+    assert.equal(helperCalls.length, 1);
+  }
+  const revoked = await harness(t, {
+    context: staffContext({ tab: "products", permissions: ["product.edit", "cards.manage"] }),
+    productExport: { prompt: () => assert.fail("Revoked editor reached export helper") },
+    api: async (url) => url === "/auth/status" ? { role: "staff", product_id: "p1", permissions: ["cards.manage"] } : assert.fail("Revoked product authority reached lookup: " + url),
+  });
+  rejected(await revoked.call("product_export_prompt", { product_id: "p1" }), "forbidden");
+});
+
+test("prompt export omits unknown SKU inventory and guards synchronous helper context changes", async (t) => {
+  const helperCalls = [];
+  const unknown = await harness(t, {
+    context: { page: "admin", role: "admin", tab: "products" },
+    productExport: { prompt: (value, options) => { helperCalls.push(plain(options)); return "unknown inventory prompt"; } },
+    api: async (url) => {
+      if (url === "/auth/status") return { role: "admin" };
+      if (url === "/admin/products") return [product()];
+      assert.equal(url, "/admin/card-stats?product_id=p1");
+      return { summary: { remaining: 3 }, products: [] };
+    },
+  });
+  assert.equal((await unknown.call("product_export_prompt", { product_id: "p1", include_inventory: true })).ok, true);
+  assert.equal(Object.hasOwn(helperCalls[0], "inventory"), false, "A missing SKU snapshot must not become a fabricated empty inventory");
+  const stale = await harness(t, {
+    context: { page: "admin", role: "admin", tab: "products" },
+    productExport: { prompt: () => { stale.state.tab = "cards"; return "stale result"; } },
+  });
+  rejected(await stale.call("product_export_prompt", { product_id: "p1" }), "stale_context");
+});
+
+test("cancelled or stale product prompt exports stop after an awaited read before invoking the helper", async (t) => {
+  for (const stale of [false, true]) {
+    let release;
+    let started;
+    const waiting = new Promise((resolve) => { release = resolve; });
+    const readStarted = new Promise((resolve) => { started = resolve; });
+    const helperCalls = [];
+    const h = await harness(t, {
+      context: { page: "admin", role: "admin", tab: "products" },
+      productExport: { prompt: (...args) => { helperCalls.push(args); return "stale prompt"; } },
+      api: async (url) => {
+        if (url === "/auth/status") return { role: "admin" };
+        if (url === "/admin/products") { started(); return waiting; }
+        assert.fail("Cancelled or stale export reached another API: " + url);
+      },
+    });
+    const controller = new AbortController();
+    const operation = h.call("product_export_prompt", { product_id: "p1", include_inventory: true }, { signal: controller.signal });
+    await readStarted;
+    if (stale) { h.state.tab = "cards"; await h.refresh(); } else controller.abort();
+    release([product()]);
+    rejected(await operation, stale ? "stale_context" : "cancelled");
+    assert.equal(helperCalls.length, 0);
+    assert.equal(h.calls.some((call) => call.url?.includes("card-stats")), false);
+    assert.equal(mutations(h).length, 0);
+  }
+});
+
+test("product processing plans and support email validate strict public metadata", async (t) => {
+  const h = await harness(t, { context: { page: "admin", role: "admin", tab: "products" } });
+  const step = { id: "verify", label: { "zh-CN": "核实信息", en: "Verify details" } };
+  for (const patch of [
+    { progress_steps: [step, step] }, { progress_steps: Array.from({ length: 31 }, (_, i) => ({ ...step, id: "s" + i })) },
+    { progress_steps: [{ ...step, id: "../verify" }] }, { progress_steps: [{ ...step, id: "UPPER" }] },
+    { progress_steps: [{ ...step, id: "x".repeat(41) }] }, { progress_steps: [{ ...step, extra: true }] },
+    { progress_steps: [{ ...step, label: {} }] }, { progress_steps: [{ ...step, label: { en: " " } }] },
+    { progress_steps: [{ ...step, label: { ["x".repeat(41)]: "Text" } }] },
+    { progress_steps: [{ ...step, label: { en: "x".repeat(201) } }] },
+    { progress_steps: [{ ...step, label: Object.fromEntries(Array.from({ length: 21 }, (_, i) => ["lang" + i, "Text"])) }] },
+    { progress_steps: null }, { support_email: null }, { support_email: 123 },
+    { support_email: "wrong-address" }, { support_email: "x".repeat(255) },
+    { variants: [productVariant("large", { attributes: { number: Number.MAX_SAFE_INTEGER + 1 } })] },
+  ]) rejected(await h.call("product_create", { product: { name: "Planned", ...patch }, confirm: true }));
+  assert.equal(mutations(h).length, 0);
+  const metadata = { name: "Planned", progress_steps: [step], support_email: " help@example.test " };
+  assert.equal((await h.call("product_create", { product: metadata, confirm: true })).ok, true);
+  assert.deepEqual(mutations(h)[0].body.progress_steps, metadata.progress_steps);
+  assert.equal(mutations(h)[0].body.support_email, metadata.support_email);
+  assert.equal((await h.call("product_create", { product: { name: "No plan", progress_steps: [], support_email: "" }, confirm: true })).ok, true);
+});
+
+test("product editors may change future processing plans and contact metadata without fulfillment authority", async (t) => {
+  const h = await harness(t, { context: staffContext({ tab: "products", permissions: ["product.edit"] }) });
+  const changes = { progress_steps: [{ id: "prepare", label: { en: "Prepare" } }], support_email: "help@example.test" };
+  assert.equal((await h.call("product_update", { product_id: "p1", changes, confirm: true })).ok, true);
+  assert.equal(mutations(h)[0].url, "/manage/product");
+  assert.deepEqual(mutations(h)[0].body.progress_steps, changes.progress_steps);
+  assert.equal(mutations(h)[0].body.support_email, changes.support_email);
+  rejected(await h.call("product_update", { product_id: "p2", changes, confirm: true }), "forbidden");
+});
+
+test("queue progress forwards completed snapshot IDs and one-time plans while percentage stays optional", async (t) => {
+  const h = await harness(t, { context: staffContext({ queueProduct: product({ progress_steps: [{ id: "future", label: { en: "Future plan" } }] }) }) });
+  const base = { product_id: "p1", ids: ["j1"], confirm: true };
+  for (const patch of [
+    { completed_steps: ["old_snapshot", "old_snapshot"] }, { completed_steps: ["../step"] },
+    { completed_steps: [123] }, { completed_steps: Array.from({ length: 31 }, (_, i) => "s" + i) },
+    { completed_steps: null }, { progress_steps: [] },
+    { progress_steps: [{ id: "prepare", label: { en: "Prepare" } }, { id: "prepare", label: { en: "Duplicate" } }] },
+    { progress: 100 }, { completed_steps: [], unknown: true },
+  ]) rejected(await h.call("jobs_progress", { ...base, ...patch }));
+  assert.equal(mutations(h).length, 0);
+  assert.equal((await h.call("jobs_progress", { ...base, completed_steps: ["old_snapshot"], message: "Checked" })).ok, true);
+  assert.deepEqual(mutations(h)[0].body.completed_steps, ["old_snapshot"], "Existing job IDs are not restricted to the product's current default plan");
+  assert.equal(Object.hasOwn(mutations(h)[0].body, "progress"), false);
+  const plan = [{ id: "prepare", label: { en: "Prepare" } }];
+  assert.equal((await h.call("jobs_progress", { ...base, progress_steps: plan, completed_steps: [] })).ok, true);
+  assert.deepEqual(mutations(h)[1].body.progress_steps, plan);
+  assert.equal((await h.call("jobs_progress", { ...base, progress: 20 })).ok, true);
+  assert.equal(mutations(h)[2].body.progress, 20);
+  assert.equal(Object.hasOwn(mutations(h)[2].body, "completed_steps"), false);
+});
+
+test("queue processing can bind a nonempty plan while succeeding marks completion on the server", async (t) => {
+  const h = await harness(t, { context: staffContext({ permissions: ["queue.view", "queue.process", "queue.retry"] }) });
+  const base = { product_id: "p1", ids: ["j1"], confirm: true };
+  const plan = [{ id: "prepare", label: { en: "Prepare" } }];
+  for (const [name, extra] of [["jobs_claim", {}], ["jobs_complete", { content: "Delivered" }], ["jobs_fail", {}]]) {
+    rejected(await h.call(name, { ...base, ...extra, progress_steps: [] }));
+    assert.equal((await h.call(name, { ...base, ...extra, progress_steps: plan })).ok, true);
+    const body = mutations(h).at(-1).body;
+    assert.deepEqual(body.progress_steps, plan);
+    assert.equal(Object.hasOwn(body, "completed_steps"), false);
+  }
+  rejected(await h.call("jobs_allow_retry", { ...base, progress_steps: plan }));
+});
+
+test("receipt status exposes processing steps, queue position and support email through a result-free whitelist", async (t) => {
+  const p = product({ progress_steps: [{ id: "verify", label: { en: "Verify" }, result: "HIDDEN-PLAN-RESULT" }], support_email: "help@example.test" });
+  const h = await harness(t, {
+    context: { page: "receipt", currentToken: "receipt-private", product: p },
+    receipt: { product: p, token: "receipt-private", result: "HIDDEN-TOP-RESULT", job: {
+      id: "j1", state: "processing", progress: 50, queue_position: 2, queue_ahead: 1,
+      support_email: "help@example.test", completed_steps: ["verify"],
+      steps: [{ id: "verify", label: { en: "Verify" }, done: true, credentials: "HIDDEN-STEP-CREDENTIAL" }, { id: "deliver", label: { en: "Deliver" }, done: false }],
+      result: "HIDDEN-JOB-RESULT", payload: "HIDDEN-PAYLOAD", output: { content: "HIDDEN-GOODS" },
+    } },
+  });
+  const result = await h.call("receipt_status", {});
+  assert.equal(result.ok, true);
+  assert.equal(result.data.job.queue_position, 2);
+  assert.equal(result.data.job.support_email, "help@example.test");
+  assert.deepEqual(plain(result.data.job.completed_steps), ["verify"]);
+  assert.deepEqual(plain(result.data.job.steps).map((step) => step.done), [true, false]);
+  for (const secret of ["receipt-private", "HIDDEN-TOP-RESULT", "HIDDEN-JOB-RESULT", "HIDDEN-PAYLOAD", "HIDDEN-GOODS", "HIDDEN-STEP-CREDENTIAL", "HIDDEN-PLAN-RESULT"])
+    assert.equal(JSON.stringify(result).includes(secret), false, secret);
+});
+
+test("receipt status suppresses a result when the active receipt changes during its read", async (t) => {
+  let release;
+  let started;
+  const waiting = new Promise((resolve) => { release = resolve; });
+  const readStarted = new Promise((resolve) => { started = resolve; });
+  const p = product();
+  const h = await harness(t, {
+    context: { page: "receipt", currentToken: "receipt-private", product: p },
+    actions: { receipt: async () => { started(); return waiting; } },
+  });
+  const operation = h.call("receipt_status", {});
+  await readStarted;
+  h.state.currentToken = "new-receipt";
+  release({ product: p, job: { id: "j1", state: "queued", queue_position: 1 } });
+  rejected(await operation, "stale_context");
+});
+
+const attachmentId = "11111111-1111-4111-8111-111111111111";
+const attachment = (overrides = {}) => ({
+  id: attachmentId, job_id: "j1", field_key: "document", kind: "input", filename: "hello.txt",
+  content_type: "text/plain", size: 5, created: 123, consumed: 0, ...overrides,
+});
+const attachmentAPI = (job, files, auth = { role: "admin" }) => async (url) => {
+  if (url === "/auth/status") return auth;
+  if (url.startsWith("/manage/jobs?")) {
+    const filters = new URL("https://extore.test" + url).searchParams;
+    assert.equal(filters.get("product_id"), "p1");
+    assert.equal(filters.get("job_id"), "j1");
+    assert.equal(filters.get("limit"), "1");
+    return [job];
+  }
+  if (url === "/manage/files?job_id=j1") return files;
+  assert.fail("Unexpected attachment request: " + url);
+};
+
+test("file tools follow verified input schemas and separately delegated queue permissions", async (t) => {
+  const p = product({ parameters: [outputField("document", { type: "file" })], outputs: [outputField("document", { type: "file" })] });
+  const customer = await harness(t, { context: { page: "receipt", currentToken: "receipt-private", product: p } });
+  assert.ok(customer.names().includes("extore_redemption_file_upload"));
+  assert.equal(customer.tool("redemption_file_upload").annotations.consequentialHint, true);
+  assert.equal(customer.tool("redemption_file_upload").inputSchema.properties.base64.maxLength, Math.ceil(20 * 1024 * 1024 / 3) * 4);
+  customer.state.product = product();
+  await customer.refresh();
+  assert.equal(customer.names().includes("extore_redemption_file_upload"), false);
+  const viewer = await harness(t, { context: staffContext({ permissions: ["queue.view"], queueProduct: p }) });
+  for (const name of ["jobs_files_list", "jobs_file_read"]) {
+    assert.ok(viewer.names().includes("extore_" + name));
+    assert.equal(viewer.tool(name).annotations.readOnlyHint, true);
+  }
+  assert.equal(viewer.names().includes("extore_jobs_file_upload"), false);
+  viewer.state.permissions = ["queue.view", "queue.process"];
+  await viewer.refresh();
+  assert.ok(viewer.names().includes("extore_jobs_file_upload"));
+  viewer.state.queueProduct = product({ mode: "webhook" });
+  await viewer.refresh();
+  assert.equal(viewer.names().includes("extore_jobs_file_upload"), false);
+});
+
+test("file upload arguments reject paths, unsafe MIME, malformed base64 and missing confirmation", async (t) => {
+  const p = product({ parameters: [outputField("document", { type: "file" })] });
+  const h = await harness(t, { context: { page: "receipt", currentToken: "receipt-private", product: p } });
+  const base = { field_key: "document", filename: "hello.txt", base64: "aGVsbG8=", confirm: true };
+  for (const patch of [
+    { confirm: false }, { confirm: "true" }, { filename: "../hello.txt" }, { filename: "dir\\hello.txt" },
+    { filename: "hello\n.txt" }, { filename: "" }, { filename: " " }, { filename: ".." },
+    { content_type: "text/plain; charset=utf-8" }, { content_type: "text/plain\r\nX-Header: yes" },
+    { base64: "data:text/plain;base64,aGVsbG8=" }, { base64: "aGVs bG8=" }, { base64: "hello" },
+    { base64: "AB==" }, { base64: 123 }, { field_key: "../document" }, { token: "replacement-token" },
+  ]) rejected(await h.call("redemption_file_upload", { ...base, ...patch }));
+  assert.equal(h.calls.some((call) => call.name === "uploadFile"), false);
+});
+
+test("customer file uploads keep the receipt token private and return only bound input descriptors", async (t) => {
+  const p = product({ parameters: [outputField("document", { type: "file" })] });
+  const h = await harness(t, {
+    context: { page: "receipt", currentToken: "receipt-private", product: p },
+    receipt: { product: p, job: null },
+    actions: { uploadFile: async (definition) => {
+      assert.equal(definition.scope, "customer");
+      assert.equal(Object.hasOwn(definition, "token"), false);
+      assert.equal(Object.hasOwn(definition, "confirm"), false);
+      return attachment({ job_id: null, token: "receipt-private", base64: "aGVsbG8=", payload: "PRIVATE-PAYLOAD" });
+    } },
+  });
+  const input = { field_key: "document", filename: "hello.txt", base64: "aGVsbG8=", confirm: true };
+  const result = await h.call("redemption_file_upload", input);
+  assert.equal(result.ok, true);
+  assert.equal(result.data.id, attachmentId);
+  assert.equal(result.data.job_id, null);
+  for (const secret of ["receipt-private", "aGVsbG8=", "PRIVATE-PAYLOAD"]) assert.equal(JSON.stringify(result).includes(secret), false);
+  rejected(await h.call("redemption_submit", { params: { document: "/api/manage/files/" + attachmentId + "/download" }, confirm: true }));
+  assert.equal((await h.call("redemption_submit", { params: { document: attachmentId }, confirm: true })).ok, true);
+  h.setReceipt({ product: p, job: { state: "processing", can_retry: false } });
+  rejected(await h.call("redemption_file_upload", input), "invalid_state");
+});
+
+test("file listings preflight the exact selected product job and redact byte and credential fields", async (t) => {
+  const h = await harness(t, {
+    context: { page: "admin", role: "admin", tab: "jobs", queueProductId: "p1" },
+    api: attachmentAPI({ id: "j1", product_id: "p1", state: "queued" }, [
+      attachment({ token: "FILE-TOKEN", base64: "aGVsbG8=", content: "FILE-CONTENT", payload: "FILE-PAYLOAD" }),
+      attachment({ id: "22222222-2222-4222-8222-222222222222", job_id: "other-job" }),
+    ]),
+  });
+  const result = await h.call("jobs_files_list", { product_id: "p1", job_id: "j1" });
+  assert.equal(result.ok, true);
+  assert.equal(result.data.length, 1);
+  assert.equal(result.data[0].filename, "hello.txt");
+  for (const secret of ["FILE-TOKEN", "aGVsbG8=", "FILE-CONTENT", "FILE-PAYLOAD"]) assert.equal(JSON.stringify(result).includes(secret), false);
+  rejected(await h.call("jobs_files_list", { product_id: "p2", job_id: "j1" }), "queue_scope");
+  const wrongJob = await harness(t, {
+    context: { page: "admin", role: "admin", tab: "jobs", queueProductId: "p1" },
+    api: attachmentAPI({ id: "j1", product_id: "p2", state: "queued" }, [attachment()]),
+  });
+  rejected(await wrongJob.call("jobs_files_list", { product_id: "p1", job_id: "j1" }), "not_found");
+  assert.equal(wrongJob.calls.some((call) => call.url?.startsWith("/manage/files")), false);
+});
+
+test("authorized small file reads deliberately reveal base64 while large files return cookie-protected download paths", async (t) => {
+  let reads = 0;
+  const auth = { role: "staff", product_id: "p1", permissions: ["queue.view"] };
+  const h = await harness(t, {
+    context: staffContext({ permissions: ["queue.view"] }),
+    api: attachmentAPI({ id: "j1", product_id: "p1", state: "queued" }, [attachment()], auth),
+    actions: { readFile: async (definition) => {
+      reads += 1;
+      assert.deepEqual(plain(definition), { product_id: "p1", job_id: "j1", file_id: attachmentId, max_bytes: 1048576 });
+      return { file_id: attachmentId, filename: "hello.txt", content_type: "text/plain", size: 5, base64: "aGVsbG8=", token: "PRIVATE-TOKEN" };
+    } },
+  });
+  const input = { product_id: "p1", job_id: "j1", file_id: attachmentId };
+  const small = await h.call("jobs_file_read", input);
+  assert.equal(small.ok, true);
+  assert.equal(small.data.base64, "aGVsbG8=");
+  assert.equal(JSON.stringify(small).includes("PRIVATE-TOKEN"), false);
+  assert.equal(reads, 1);
+  const large = await harness(t, {
+    context: staffContext({ permissions: ["queue.view"] }),
+    api: attachmentAPI({ id: "j1", product_id: "p1", state: "queued" }, [attachment({ size: 1048577 })], auth),
+    actions: { readFile: async () => assert.fail("Large files must not be read into the AI context") },
+  });
+  const result = await large.call("jobs_file_read", input);
+  assert.equal(result.ok, true);
+  assert.equal(result.data.download_href, "/api/manage/files/" + attachmentId + "/download");
+  assert.equal(result.data.requires_authenticated_session, true);
+  assert.equal(Object.hasOwn(result.data, "base64"), false);
+});
+
+test("file reads reject mismatched attachments and downloaded byte counts before returning content", async (t) => {
+  const input = { product_id: "p1", job_id: "j1", file_id: attachmentId };
+  const h = await harness(t, {
+    context: { page: "admin", role: "admin", tab: "jobs", queueProductId: "p1" },
+    api: attachmentAPI({ id: "j1", product_id: "p1", state: "queued" }, [attachment()]),
+    actions: { readFile: async () => ({ file_id: attachmentId, size: 5, base64: "AA==" }) },
+  });
+  rejected(await h.call("jobs_file_read", input), "unavailable");
+  rejected(await h.call("jobs_file_read", { ...input, file_id: "33333333-3333-4333-8333-333333333333" }), "not_found");
+  rejected(await h.call("jobs_file_read", { ...input, file_id: "../file" }));
+});
+
+test("output file uploads require fresh processing authority, a claimed job and a declared file field", async (t) => {
+  const p = product({ outputs: [outputField("document", { type: "file" })] });
+  const auth = { role: "staff", product_id: "p1", link_id: "s1", permissions: ["queue.view", "queue.process"] };
+  const h = await harness(t, {
+    context: staffContext({ queueProduct: p }),
+    api: attachmentAPI({ id: "j1", product_id: "p1", state: "processing", claimed_by: "s1" }, [], auth),
+    actions: { uploadFile: async (definition) => {
+      assert.equal(definition.scope, "job");
+      assert.equal(definition.product_id, "p1");
+      assert.equal(definition.job_id, "j1");
+      return attachment({ kind: "output", secret: "UPLOAD-SECRET" });
+    } },
+  });
+  const input = { product_id: "p1", job_id: "j1", field_key: "document", filename: "hello.txt", base64: "aGVsbG8=", content_type: "text/plain", confirm: true };
+  assert.equal((await h.call("jobs_file_upload", input)).ok, true);
+  const result = await h.call("jobs_file_upload", input);
+  assert.equal(JSON.stringify(result).includes("UPLOAD-SECRET"), false);
+  rejected(await h.call("jobs_file_upload", { ...input, field_key: "unknown" }));
+  rejected(await h.call("jobs_file_upload", { ...input, product_id: "p2" }), "forbidden");
+  const denied = await harness(t, {
+    context: staffContext({ queueProduct: p }),
+    api: async (url) => url === "/auth/status" ? { ...auth, permissions: ["queue.view"] } : assert.fail("Revoked file upload reached another API"),
+  });
+  rejected(await denied.call("jobs_file_upload", input), "forbidden");
+});
+
+test("changing file context while awaiting attachment metadata prevents the dependent binary read", async (t) => {
+  let release;
+  let started;
+  const waiting = new Promise((resolve) => { release = resolve; });
+  const readStarted = new Promise((resolve) => { started = resolve; });
+  const h = await harness(t, {
+    context: { page: "admin", role: "admin", tab: "jobs", queueProductId: "p1" },
+    api: async (url) => {
+      if (url === "/auth/status") return { role: "admin" };
+      if (url.startsWith("/manage/jobs?")) return [{ id: "j1", product_id: "p1", state: "queued" }];
+      if (url === "/manage/files?job_id=j1") { started(); return waiting; }
+      assert.fail("Unexpected pending file request");
+    },
+    actions: { readFile: async () => assert.fail("Stale file metadata reached binary download") },
+  });
+  const operation = h.call("jobs_file_read", { product_id: "p1", job_id: "j1", file_id: attachmentId });
+  await readStarted;
+  h.state.queueProductId = "p2";
+  release([attachment()]);
+  rejected(await operation, "stale_context");
+});
+
+test("file output IDs stay bound to one completed job while optional empty file fields keep batch compatibility", async (t) => {
+  const p = product({ outputs: [outputField("document", { type: "file", required: false }), outputField("message", { required: false })] });
+  const h = await harness(t, { context: staffContext({ queueProduct: p }) });
+  const base = { product_id: "p1", ids: ["j1", "j2"], confirm: true };
+  rejected(await h.call("jobs_complete", { ...base, output: { document: attachmentId } }));
+  assert.equal(mutations(h).length, 0);
+  assert.equal((await h.call("jobs_complete", { ...base, output: { document: "", message: "Complete" } })).ok, true);
+  assert.equal((await h.call("jobs_complete", { ...base, ids: ["j1"], output: { document: attachmentId } })).ok, true);
+});
+
+test("management link login limits use bounded defaults and fresh parent ceilings", async (t) => {
+  const owner = await harness(t, { context: { page: "admin", role: "admin", tab: "staff" } });
+  const base = { product_id: "p1", name: "Helper", days: 1, permissions: ["product.edit"], confirm: true };
+  assert.equal(owner.tool("staff_authorize").inputSchema.properties.max_uses.default, 1);
+  for (const max_uses of [0, 1001, -1, 1.5, NaN, "1", false])
+    rejected(await owner.call("staff_authorize", { ...base, max_uses }));
+  assert.equal((await owner.call("staff_authorize", { ...base, max_uses: 1000 })).ok, true);
+  assert.equal(mutations(owner)[0].body.max_uses, 1000);
+  assert.equal((await owner.call("staff_authorize", base)).ok, true);
+  assert.equal(Object.hasOwn(mutations(owner)[1].body, "max_uses"), false, "Omitted login limits preserve the server's default-one semantics");
+  const delegated = await harness(t, {
+    context: staffContext({ tab: "staff", permissions: permissionCodes }),
+    api: async (url, body, method) => {
+      if (url === "/auth/status") return { role: "staff", product_id: "p1", permissions: permissionCodes, max_uses: 2, link_expires: Date.now() / 1000 + 86400 * 2 };
+      if (url === "/manage/links" && method === "POST") return { id: "s2", max_uses: body.max_uses, url: "https://extore.test/staff#private" };
+      assert.fail("Unexpected login-limit request: " + url);
+    },
+  });
+  rejected(await delegated.call("staff_authorize", { ...base, max_uses: 3 }), "forbidden");
+  assert.equal(mutations(delegated).length, 0);
+  assert.equal((await delegated.call("staff_authorize", { ...base, max_uses: 2 })).ok, true);
+});
+
+test("session tools are available to authenticated product links on their own sessions tab", async (t) => {
+  const h = await harness(t, { context: staffContext({ tab: "sessions", permissions: ["product.edit"] }) });
+  for (const name of ["sessions_list", "session_revoke", "audit_list"]) assert.ok(h.names().includes("extore_" + name));
+  assert.equal(h.tool("sessions_list").annotations.readOnlyHint, true);
+  assert.equal(h.tool("audit_list").annotations.readOnlyHint, true);
+  assert.equal(h.tool("session_revoke").annotations.consequentialHint, true);
+  assert.equal((await h.call("ui_navigate", { page: "staff", tab: "sessions" })).ok, true);
+  h.state.tab = "products";
+  await h.refresh();
+  assert.equal(h.names().includes("extore_sessions_list"), false);
+});
+
+test("product session metadata stays self-scoped unless fresh delegation authority expands the server scope", async (t) => {
+  const row = { id: attachmentId, role: "staff", link_id: "s1", link_name: "Self", product_id: "p1", product_name: "Product", current: true, active: true, revoked: false, created: 1, last_seen: 2, expires: 3, ip: "127.0.0.1", ua: "Browser", digest: "SESSION-DIGEST", token: "SESSION-TOKEN" };
+  let permissions = ["product.edit"];
+  const h = await harness(t, {
+    context: staffContext({ tab: "sessions", permissions: ["product.edit", "links.delegate"] }),
+    api: async (url) => {
+      if (url === "/auth/status") return { role: "staff", product_id: "p1", link_id: "s1", permissions };
+      if (url === "/manage/sessions") return [row, { ...row, id: "22222222-2222-4222-8222-222222222222", link_id: "s2", current: false }, { ...row, product_id: "p2" }, { ...row, role: "admin" }];
+      assert.fail("Unexpected session metadata request: " + url);
+    },
+  });
+  const own = await h.call("sessions_list", {});
+  assert.equal(own.ok, true);
+  assert.equal(own.data.length, 1);
+  assert.equal(own.data[0].ua, "Browser");
+  assert.equal(JSON.stringify(own).includes("SESSION-DIGEST"), false);
+  assert.equal(JSON.stringify(own).includes("SESSION-TOKEN"), false);
+  permissions = ["product.edit", "links.delegate"];
+  assert.equal((await h.call("sessions_list", {})).data.length, 2);
+  assert.equal(h.calls.some((call) => call.url?.startsWith("/admin/")), false);
+});
+
+test("audit reads validate limits and only return whitelisted security metadata", async (t) => {
+  const h = await harness(t, {
+    context: { page: "admin", role: "admin", tab: "sessions" },
+    api: async (url) => {
+      if (url === "/auth/status") return { role: "admin" };
+      if (url === "/admin/audit?limit=200") return [{ id: "a1", actor: "owner", action: "session.revoke", target: attachmentId, created: 123, payload: "AUDIT-PAYLOAD", digest: "AUDIT-DIGEST", code: "CARD-CODE", content: "GOODS" }];
+      assert.fail("Unexpected audit request: " + url);
+    },
+  });
+  for (const input of [{ limit: 0 }, { limit: 201 }, { limit: 1.5 }, { limit: NaN }, { product_id: "p1" }]) rejected(await h.call("audit_list", input));
+  assert.equal(h.calls.length, 0);
+  const result = await h.call("audit_list", { limit: 200 });
+  assert.equal(result.ok, true);
+  assert.deepEqual(plain(result.data), [{ id: "a1", actor: "owner", action: "session.revoke", target: attachmentId, created: 123 }]);
+});
+
+test("revoking the current session remains successful when the subsequent UI requires authentication", async (t) => {
+  const h = await harness(t, {
+    context: { page: "admin", role: "admin", tab: "sessions" },
+    api: async (url, body, method) => {
+      if (url === "/auth/status") return { role: "admin" };
+      if (url === "/admin/sessions/" + attachmentId && method === "DELETE") return { ok: true, id: attachmentId, current: true };
+      assert.fail("Unexpected session revocation request: " + url);
+    },
+    actions: { navigate: async () => { throw new Error("401 authentication required"); } },
+  });
+  rejected(await h.call("session_revoke", { session_id: attachmentId }));
+  rejected(await h.call("session_revoke", { session_id: "../session", confirm: true }));
+  const saved = h.tool("sessions_list");
+  const result = await h.call("session_revoke", { session_id: attachmentId, confirm: true });
+  assert.equal(result.ok, true);
+  assert.equal(result.data.revoked, true);
+  assert.equal(result.data.current, true);
+  assert.equal(mutations(h).length, 1);
+  await nextTurn();
+  assert.equal(h.names().includes("extore_sessions_list"), false);
+  rejected(await saved.execute({}), "stale_context");
 });

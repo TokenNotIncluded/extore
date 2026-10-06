@@ -18,7 +18,8 @@ from .db import db, init
 from .models import JobUpdate
 from .processors import normalize_product
 from .security import sign, token
-from .service import apply_update, job, product
+from .service import apply_update, job, product, progress_view
+from .variants import card_variant, default_variant
 
 
 async def deliver_event(row):
@@ -113,6 +114,22 @@ async def execute_script(row, p):
     import extore_processors
 
     p = normalize_product(p, allow_incomplete=False)
+    row = dict(row)
+    # Freeze trusted issuance metadata separately from all customer parameters.
+    if "variant" not in row:
+        if row.get("card_id"):
+            with db() as c:
+                row["variant"] = card_variant(c, row)
+        else:
+            row["variant"] = default_variant()
+    if "steps" not in row:
+        if row.get("card_id"):
+            with db() as c:
+                row["steps"], row["completed_steps"] = progress_view(
+                    c, job(c, row["id"])
+                )
+        else:
+            row["steps"], row["completed_steps"] = [], []
     with tempfile.TemporaryDirectory(prefix="extore-processor-") as scratch:
         return await _execute_processor(row, p, scratch, extore_processors)
 
@@ -143,6 +160,9 @@ async def _execute_processor(row, p, scratch, processor_package):
     payload = {
         "params": json.loads(row["params"]),
         "configuration": p["processor_config"],
+        "variant": row["variant"],
+        "steps": row["steps"],
+        "completed_steps": row.get("completed_steps", []),
     }
     result = None
     total = 0
@@ -169,7 +189,8 @@ async def _execute_processor(row, p, scratch, processor_package):
                         row["id"],
                         JobUpdate(
                             state="processing",
-                            progress=value["progress"],
+                            progress=value.get("progress", 0),
+                            completed_steps=value.get("completed_steps"),
                             message=value.get("message", ""),
                             attempt=row["attempt"],
                         ),
@@ -213,13 +234,15 @@ async def job_once():
                 ),
             )
         rows = c.execute(
-            "SELECT jobs.* FROM jobs JOIN products ON products.id=jobs.product_id WHERE jobs.state='queued' AND json_extract(products.config,'$.mode') IN ('script','webhook') ORDER BY jobs.created LIMIT 100"
+            "SELECT jobs.* FROM jobs JOIN products ON products.id=jobs.product_id WHERE jobs.state='queued' AND json_extract(products.config,'$.mode') IN ('script','webhook') ORDER BY jobs.created,jobs.id LIMIT 100"
         ).fetchall()
         selected = None
         for r in rows:
             p = product(c, r["product_id"])
             if p["mode"] == "script":
                 selected = dict(r)
+                selected["variant"] = card_variant(c, r)
+                selected["steps"], selected["completed_steps"] = progress_view(c, r)
                 apply_update(
                     c,
                     r["id"],

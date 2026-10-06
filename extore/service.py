@@ -9,6 +9,7 @@ from .db import event
 from .models import JobUpdate, OutputField
 from .processors import normalize_product
 from .security import card_digest, fail, new_card
+from .variants import card_variant, resolve_product_variants
 
 
 def product(c, pid):
@@ -16,6 +17,9 @@ def product(c, pid):
     if not row:
         fail("商品不存在", 404)
     config = json.loads(row["config"])
+    config.setdefault("progress_steps", [])
+    config.setdefault("support_email", "")
+    config["variants"] = resolve_product_variants(config)
     config.setdefault("processor_id", "")
     config.setdefault("processor_config", {})
     # Old products predate explicit result schemas. Keep their existing receipts
@@ -45,8 +49,13 @@ def public_product(p):
     }
 
 
-def issue_cards(c, pid, count, label="", expires=None):
+def issue_cards(c, pid, count, label="", expires=None, variant_id="default"):
     p = product(c, pid)
+    variant = next((v for v in p["variants"] if v["id"] == variant_id), None)
+    if variant is None:
+        fail("商品规格不存在", 400)
+    if not variant["enabled"]:
+        fail("商品规格已停用，不能发行新卡密", 409)
     if p["mode"] == "script":
         try:
             normalize_product(p, allow_incomplete=False)
@@ -60,7 +69,15 @@ def issue_cards(c, pid, count, label="", expires=None):
             (str(uuid.uuid4()), card_digest(code), pid, time.time()),
         )
         codes.append(code)
-    record_issue(c, pid, codes, label=label, expires=expires)
+    record_issue(
+        c,
+        pid,
+        codes,
+        label=label,
+        expires=expires,
+        variant_id=variant_id,
+        variant_snapshot=variant,
+    )
     return codes
 
 
@@ -177,8 +194,78 @@ def job(c, jid):
     return row
 
 
-def job_view(c, row, staff=False):
+def freeze_product_schemas(c, pid, p):
+    snapshot = json.dumps(
+        {key: p[key] for key in ("parameters", "outputs")}, ensure_ascii=False
+    )
+    c.execute(
+        "UPDATE jobs SET schema_snapshot=? WHERE product_id=? AND schema_snapshot IS NULL",
+        (snapshot, pid),
+    )
+
+
+def job_product(c, row):
     p = product(c, row["product_id"])
+    raw = row["schema_snapshot"]
+    if raw is None:
+        raw = c.execute(
+            "SELECT schema_snapshot FROM jobs WHERE id=?", (row["id"],)
+        ).fetchone()[0]
+    if raw is None:
+        raw = json.dumps(
+            {key: p[key] for key in ("parameters", "outputs")}, ensure_ascii=False
+        )
+        c.execute(
+            "UPDATE jobs SET schema_snapshot=? WHERE id=? AND schema_snapshot IS NULL",
+            (raw, row["id"]),
+        )
+    return {**p, **json.loads(raw)}
+
+
+def progress_snapshot(c, row):
+    """Bind a legacy job once; future product edits never replace its plan."""
+    raw_plan = row["progress_plan"]
+    if raw_plan is None:
+        # A caller may still hold a row read before a product edit froze it.
+        raw_plan = c.execute(
+            "SELECT progress_plan FROM jobs WHERE id=?", (row["id"],)
+        ).fetchone()["progress_plan"]
+    if raw_plan is None:
+        steps = product(c, row["product_id"])["progress_steps"]
+        c.execute(
+            "UPDATE jobs SET progress_plan=? WHERE id=? AND progress_plan IS NULL",
+            (json.dumps(steps, ensure_ascii=False), row["id"]),
+        )
+    else:
+        steps = json.loads(raw_plan)
+    return steps, json.loads(row["completed_steps"] or "[]")
+
+
+def progress_view(c, row):
+    steps, completed = progress_snapshot(c, row)
+    done = set(completed)
+    return [{**step, "done": step["id"] in done} for step in steps], completed
+
+
+def freeze_product_plans(c, pid, steps):
+    c.execute(
+        "UPDATE jobs SET progress_plan=? WHERE product_id=? AND progress_plan IS NULL",
+        (json.dumps(steps, ensure_ascii=False), pid),
+    )
+
+
+def bootstrap_progress_plan(c, row, steps):
+    plan, completed = progress_snapshot(c, row)
+    if row["state"] not in ("queued", "processing") or plan or completed:
+        fail("只有尚未定义步骤的待处理任务可以设置处理步骤", 409)
+    c.execute(
+        "UPDATE jobs SET progress_plan=?,completed_steps='[]',progress=0 WHERE id=?",
+        (json.dumps(steps, ensure_ascii=False), row["id"]),
+    )
+
+
+def job_view(c, row, staff=False):
+    p = job_product(c, row)
     result = {
         k: row[k]
         for k in (
@@ -194,6 +281,15 @@ def job_view(c, row, staff=False):
         )
     }
     result["product_name"] = p["name"]
+    result["variant"] = card_variant(c, row)
+    result["steps"], result["completed_steps"] = progress_view(c, row)
+    if result["steps"]:
+        result["progress"] = (
+            100
+            if row["state"] in ("succeeded", "destroyed")
+            else min(99, len(result["completed_steps"]) * 100 // len(result["steps"]))
+        )
+    result["support_email"] = p["support_email"]
     result["delivery"] = p["delivery"]
     result["view_policy"] = p["view_policy"]
     result["can_retry"] = bool(
@@ -205,24 +301,36 @@ def job_view(c, row, staff=False):
     )
     result["queue_ahead"] = (
         c.execute(
-            "SELECT count(*) FROM jobs WHERE product_id=? AND state='queued' AND created<?",
-            (row["product_id"], row["created"]),
+            "SELECT count(*) FROM jobs WHERE product_id=? AND state IN ('queued','processing') "
+            "AND (created<? OR (created=? AND id<?))",
+            (row["product_id"], row["created"], row["created"], row["id"]),
         ).fetchone()[0]
-        if row["state"] == "queued"
+        if row["state"] in ("queued", "processing")
         else 0
+    )
+    result["queue_position"] = (
+        result["queue_ahead"] + 1 if row["state"] in ("queued", "processing") else 0
     )
     if staff:
         result["params"] = json.loads(row["params"])
         result["claimed_by"] = row["claimed_by"]
         result["mode"] = p["mode"]
+        result["parameters"] = p["parameters"]
+        result["outputs"] = p["outputs"]
+        from .files import listfiles
+
+        result["files"] = listfiles(c, row)
     return result
 
 
 def submit(c, card, params):
+    from .files import bind_inputs, purge_job_outputs, validate_input_files
+
     ensure_card_usable(c, card)
-    p = product(c, card["product_id"])
-    clean = validate_params(p, params)
     row = c.execute("SELECT * FROM jobs WHERE card_id=?", (card["id"],)).fetchone()
+    p = job_product(c, row) if row else product(c, card["product_id"])
+    clean = validate_params(p, params)
+    validate_input_files(c, card, p, clean)
     if row:
         if row["state"] != "failed":
             return row
@@ -232,8 +340,10 @@ def submit(c, card, params):
             or row["attempt"] >= p["max_attempts"]
         ):
             fail("此任务不能自动重试，请联系商家", 409)
+        progress_snapshot(c, row)
+        purge_job_outputs(c, row["id"])
         c.execute(
-            "UPDATE jobs SET state='queued',params=?,content=NULL,result_json=NULL,message='',progress=0,attempt=attempt+1,retryable=0,claimed_by=NULL,lease=NULL,updated=? WHERE id=?",
+            "UPDATE jobs SET state='queued',params=?,content=NULL,result_json=NULL,message='',progress=0,completed_steps='[]',attempt=attempt+1,retryable=0,claimed_by=NULL,lease=NULL,updated=? WHERE id=?",
             (json.dumps(clean), time.time(), row["id"]),
         )
         c.execute("UPDATE cards SET state='reserved' WHERE id=?", (card["id"],))
@@ -244,16 +354,31 @@ def submit(c, card, params):
         jid = str(uuid.uuid4())
         now = time.time()
         c.execute(
-            "INSERT INTO jobs(id,card_id,product_id,state,params,created,updated) VALUES (?,?,?,'queued',?,?,?)",
-            (jid, card["id"], p["id"], json.dumps(clean), now, now),
+            "INSERT INTO jobs(id,card_id,product_id,state,params,created,updated,progress_plan,schema_snapshot) VALUES (?,?,?,'queued',?,?,?,?,?)",
+            (
+                jid,
+                card["id"],
+                p["id"],
+                json.dumps(clean),
+                now,
+                now,
+                json.dumps(p["progress_steps"], ensure_ascii=False),
+                json.dumps(
+                    {key: p[key] for key in ("parameters", "outputs")},
+                    ensure_ascii=False,
+                ),
+            ),
         )
         c.execute("UPDATE cards SET state='reserved' WHERE id=?", (card["id"],))
     row = job(c, jid)
+    bind_inputs(c, row, clean)
     event(c, "redemption.requested", p["id"], row)
     return row
 
 
 def apply_update(c, jid, update: JobUpdate):
+    from .files import bind_outputs, validate_output_files
+
     row = job(c, jid)
     if row["attempt"] != update.attempt:
         fail("回调对应的尝试已失效", 409)
@@ -261,7 +386,18 @@ def apply_update(c, jid, update: JobUpdate):
         return row  # idempotent completion, never overwrite a result
     if row["state"] not in ("queued", "processing"):
         fail("任务已经结束，不能覆盖结果", 409)
-    p = product(c, row["product_id"])
+    p = job_product(c, row)
+    plan, previous = progress_snapshot(c, row)
+    step_ids = [step["id"] for step in plan]
+    completed = previous if update.completed_steps is None else update.completed_steps
+    if set(completed) - set(step_ids):
+        fail("提交了任务计划中未定义的处理步骤")
+    if set(previous) - set(completed):
+        fail("已完成步骤不能撤回", 409)
+    if update.state == "succeeded":
+        completed = step_ids
+    else:
+        completed = [step_id for step_id in step_ids if step_id in completed]
     output = None
     if update.state != "succeeded" and update.output:
         fail("只有成功状态可以包含交付结果")
@@ -275,20 +411,23 @@ def apply_update(c, jid, update: JobUpdate):
                     fail("content 与输出字段不一致")
                 supplied = {"content": update.content} if supplied is None else supplied
             output = validate_output(p, supplied or {})
+            validate_output_files(c, row, p, output)
         elif update.output:
             fail("服务型商品只返回状态，不包含交付结果")
-    if update.state == "processing" and update.progress < row["progress"]:
+    progress = min(99, len(completed) * 100 // len(plan)) if plan else update.progress
+    if not plan and update.state == "processing" and progress < row["progress"]:
         fail("进度不能倒退", 409)
     content = output_content(p, output) if output is not None else None
-    progress = 100 if update.state == "succeeded" else update.progress
+    progress = 100 if update.state == "succeeded" else progress
     c.execute(
-        "UPDATE jobs SET state=?,progress=?,message=?,content=?,result_json=?,retryable=?,updated=?,lease=? WHERE id=?",
+        "UPDATE jobs SET state=?,progress=?,message=?,content=?,result_json=?,completed_steps=?,retryable=?,updated=?,lease=? WHERE id=?",
         (
             update.state,
             progress,
             update.message,
             content,
             json.dumps(output, ensure_ascii=False) if output is not None else None,
+            json.dumps(completed),
             int(update.retryable and update.state == "failed"),
             time.time(),
             time.time() + 3600 if update.state == "processing" else None,
@@ -298,6 +437,8 @@ def apply_update(c, jid, update: JobUpdate):
     if update.state == "succeeded":
         c.execute("UPDATE cards SET state='used' WHERE id=?", (row["card_id"],))
     row = job(c, jid)
+    if output is not None:
+        bind_outputs(c, row, output)
     event(
         c,
         {

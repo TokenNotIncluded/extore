@@ -13,6 +13,16 @@ from . import auth
 from .card_tracking import router as card_tracking_router
 from .config import ORIGIN, check_config
 from .db import audit, db, event, init, setting
+from .files import (
+    MAX_MULTIPART_BYTES,
+    purge_job_files,
+    release_output_files,
+)
+from .files import (
+    router as files_router,
+)
+from .link_access import augment_link_view, consume_link, revoke_staff_sessions
+from .link_access import router as link_access_router
 from .models import (
     BatchUpdate,
     CodeInput,
@@ -43,13 +53,19 @@ from .security import (
 )
 from .service import (
     apply_update,
+    bootstrap_progress_plan,
+    freeze_product_plans,
+    freeze_product_schemas,
     issue_cards,
     job,
+    job_product,
     job_view,
     product,
     public_product,
     submit,
 )
+from .source import router as source_router
+from .variants import card_variant, issued_variant_ids
 
 
 @asynccontextmanager
@@ -59,9 +75,12 @@ async def lifespan(app):
     yield
 
 
-app = FastAPI(title="Extore API", version="0.3.0", lifespan=lifespan)
+app = FastAPI(title="Extore API", version="0.4.0", lifespan=lifespan)
 app.include_router(auth.router)
 app.include_router(card_tracking_router)
+app.include_router(files_router)
+app.include_router(source_router)
+app.include_router(link_access_router)
 
 
 @app.middleware("http")
@@ -75,7 +94,14 @@ async def guard(request: Request, call_next):
         if request.headers.get("origin") != ORIGIN:
             return JSONResponse({"detail": "请求来源不匹配"}, status_code=403)
     # Streaming bounded read prevents unbounded webhook / JSON memory usage.
-    if request.method not in ("GET", "HEAD"):
+    upload = request.url.path in ("/api/files/upload", "/api/manage/files/upload")
+    if (
+        upload
+        and request.headers.get("content-length", "").isdigit()
+        and int(request.headers["content-length"]) > MAX_MULTIPART_BYTES
+    ):
+        return JSONResponse({"detail": "上传文件超过 20 MiB 限制"}, status_code=413)
+    if request.method not in ("GET", "HEAD") and not upload:
         body = bytearray()
         async for chunk in request.stream():
             body.extend(chunk)
@@ -87,8 +113,11 @@ async def guard(request: Request, call_next):
     response.headers["Referrer-Policy"] = "no-referrer"
     response.headers["X-Content-Type-Options"] = "nosniff"
     response.headers["X-Frame-Options"] = "DENY"
-    response.headers["Content-Security-Policy"] = (
-        "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' https:; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'"
+    response.headers.setdefault(
+        "Content-Security-Policy",
+        (
+            "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' https:; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'"
+        ),
     )
     if ORIGIN.startswith("https:"):
         response.headers["Strict-Transport-Security"] = "max-age=31536000"
@@ -106,7 +135,7 @@ def health():
 def public_products():
     with db() as c:
         rows = [
-            public_product({"id": r["id"], **json.loads(r["config"])})
+            public_product(product(c, r["id"]))
             for r in c.execute("SELECT * FROM products ORDER BY created")
         ]
     return [p for p in rows if p["public"]]
@@ -125,7 +154,7 @@ def exchange(body: CodeInput, request: Request):
 
         ensure_card_usable(c, card)
         row = c.execute("SELECT * FROM jobs WHERE card_id=?", (card["id"],)).fetchone()
-        p = product(c, card["product_id"])
+        p = job_product(c, row) if row else product(c, card["product_id"])
         if row and (
             row["state"] == "destroyed"
             or (
@@ -144,6 +173,7 @@ def exchange(body: CodeInput, request: Request):
         return {
             "token": value,
             "product": public_product(p),
+            "variant": card_variant(c, card),
             "job": job_view(c, row) if row else None,
         }
 
@@ -162,7 +192,10 @@ def receipt(body: TokenInput):
         card = grant(c, body.token)
         row = c.execute("SELECT * FROM jobs WHERE card_id=?", (card["id"],)).fetchone()
         return {
-            "product": public_product(product(c, card["product_id"])),
+            "product": public_product(
+                job_product(c, row) if row else product(c, card["product_id"])
+            ),
+            "variant": card_variant(c, card),
             "job": job_view(c, row) if row else None,
         }
 
@@ -174,7 +207,7 @@ def reveal(body: TokenInput):
         row = c.execute("SELECT * FROM jobs WHERE card_id=?", (card["id"],)).fetchone()
         if not row or row["state"] != "succeeded":
             fail("尚无可领取内容", 409)
-        p = product(c, card["product_id"])
+        p = job_product(c, row)
         if p["delivery"] == "service":
             return {"content": None, "output": {}}
         if p["view_policy"] == "once" and row["revealed"]:
@@ -187,6 +220,7 @@ def reveal(body: TokenInput):
             if row["result_json"] is not None
             else {"content": content}
         )
+        files = release_output_files(c, row)
         c.execute(
             "UPDATE jobs SET revealed=1,content=?,result_json=?,updated=? WHERE id=?",
             (
@@ -197,7 +231,11 @@ def reveal(body: TokenInput):
             ),
         )
         event(c, "delivery.viewed", row["product_id"], job(c, row["id"]))
-        return {"content": content, "output": output}
+        return {
+            "content": content,
+            "output": output,
+            **({"files": files} if files else {}),
+        }
 
 
 @app.post("/api/receipt/destroy")
@@ -209,6 +247,7 @@ def destroy(body: TokenInput):
             fail("只能销毁已完成的交付", 409)
         if row["state"] == "destroyed":
             return {"ok": True}
+        purge_job_files(c, row["id"])
         c.execute(
             "UPDATE jobs SET state='destroyed',content=NULL,result_json=NULL,params='{}',message='',updated=? WHERE id=?",
             (time.time(), row["id"]),
@@ -232,7 +271,7 @@ def admin_products(request: Request):
     session(request)
     with db() as c:
         return [
-            {"id": r["id"], **json.loads(r["config"])}
+            product(c, r["id"])
             for r in c.execute("SELECT * FROM products ORDER BY created")
         ]
 
@@ -340,6 +379,14 @@ def edit_product(pid: str, body: Product, request: Request):
 
 def save_product(c, pid, body, actor):
     old = product(c, pid)
+    freeze_product_plans(c, pid, old["progress_steps"])
+    freeze_product_schemas(c, pid, old)
+    removed = issued_variant_ids(c, pid) - {v.id for v in body.variants}
+    if removed:
+        fail(
+            "已发行卡密的规格不能删除；请停用该规格：" + "、".join(sorted(removed)),
+            409,
+        )
     # Delivery semantics and automation must not change under outstanding cards.
     if c.execute("SELECT 1 FROM cards WHERE product_id=? LIMIT 1", (pid,)).fetchone():
         for field in (
@@ -357,7 +404,9 @@ def save_product(c, pid, body, actor):
                 )
         values = body.model_dump()
         for field, label in (("parameters", "输入"), ("outputs", "输出")):
-            if field_schema(old[field]) != field_schema(values[field]):
+            if old["mode"] != "manual" and field_schema(old[field]) != field_schema(
+                values[field]
+            ):
                 fail(
                     f"已发行卡密的商品不能修改{label}字段的代码名、类型或必填规则；请新建商品",
                     409,
@@ -375,7 +424,12 @@ def cards(body: IssueCards, request: Request):
     session(request)
     with db() as c:
         codes = issue_cards(
-            c, body.product_id, body.count, label=body.label, expires=body.expires
+            c,
+            body.product_id,
+            body.count,
+            label=body.label,
+            expires=body.expires,
+            variant_id=body.variant_id,
         )
         audit(c, "owner", "cards.issue", f"{body.product_id}:{body.count}")
         return {"codes": codes, "batch_id": card_batch_id(c, codes)}
@@ -419,17 +473,20 @@ def revoke_card(cid: str, request: Request):
 
 def link_view(row):
     return {
-        key: json.loads(row[key]) if key == "permissions" else row[key]
-        for key in (
-            "id",
-            "product_id",
-            "name",
-            "expires",
-            "revoked",
-            "permissions",
-            "parent_id",
-            "created",
-        )
+        **augment_link_view(row),
+        **{
+            key: json.loads(row[key]) if key == "permissions" else row[key]
+            for key in (
+                "id",
+                "product_id",
+                "name",
+                "expires",
+                "revoked",
+                "permissions",
+                "parent_id",
+                "created",
+            )
+        },
     }
 
 
@@ -439,6 +496,11 @@ def create_product_link(c, body, s):
     now = time.time()
     parent_id = s["staff_id"] if s["role"] == "staff" else None
     if parent_id:
+        parent = c.execute(
+            "SELECT max_uses FROM staff WHERE id=?", (parent_id,)
+        ).fetchone()
+        if body.max_uses > parent["max_uses"]:
+            fail("下级链接可用次数不能超过当前链接的上限", 403)
         if not set(body.permissions) < set(s["permissions"]):
             fail("下级权限必须是当前商品管理权限的严格子集", 403)
         parent_expires = s["link_expires"]
@@ -454,7 +516,7 @@ def create_product_link(c, body, s):
     sid = str(uuid.uuid4())
     value = token()
     c.execute(
-        "INSERT INTO staff(id,digest,product_id,name,expires,permissions,parent_id,created) VALUES (?,?,?,?,?,?,?,?)",
+        "INSERT INTO staff(id,digest,product_id,name,expires,permissions,parent_id,created,max_uses) VALUES (?,?,?,?,?,?,?,?,?)",
         (
             sid,
             digest(value),
@@ -464,6 +526,7 @@ def create_product_link(c, body, s):
             json.dumps(body.permissions),
             parent_id,
             now,
+            body.max_uses,
         ),
     )
     audit(c, parent_id or "owner", "staff.create", sid)
@@ -477,10 +540,12 @@ def revoke_product_link(c, sid, actor):
     ids = link_descendant_ids(c, sid)
     for target in ids:
         c.execute("UPDATE staff SET revoked=1 WHERE id=?", (target,))
-        c.execute("DELETE FROM sessions WHERE staff_id=?", (target,))
+        revoke_staff_sessions(c, target, actor)
         # Return unfinished delegated tasks to their product queue.
         c.execute(
-            "UPDATE jobs SET state='queued',claimed_by=NULL,lease=NULL,progress=0 WHERE claimed_by=? AND state='processing'",
+            "UPDATE jobs SET state='queued',claimed_by=NULL,lease=NULL,"
+            "progress=CASE WHEN json_array_length(COALESCE(progress_plan,'[]'))>0 "
+            "THEN progress ELSE 0 END WHERE claimed_by=? AND state='processing'",
             (target,),
         )
     audit(c, actor, "staff.revoke", sid)
@@ -518,11 +583,14 @@ def staff_login(body: TokenInput, request: Request, response: Response):
         if not row:
             fail("商品管理链接无效或已过期", 401)
         staff_authorization(c, row["id"])
-        c.execute(
-            "DELETE FROM sessions WHERE digest=?",
-            (digest(request.cookies.get("extore_session", "")),),
-        )
-        create_session(c, response, "staff", row["id"])
+        current = c.execute(
+            "SELECT * FROM sessions WHERE digest=? AND expires>? AND revoked=0",
+            (digest(request.cookies.get("extore_session", "")), time.time()),
+        ).fetchone()
+        if current and current["role"] == "staff" and current["staff_id"] == row["id"]:
+            return {"role": "staff"}
+        consume_link(c, row, request)
+        create_session(c, response, "staff", row["id"], request=request)
     return {"role": "staff"}
 
 
@@ -550,6 +618,9 @@ def managed_products(request: Request):
                         "view_policy",
                         "parameters",
                         "outputs",
+                        "variants",
+                        "progress_steps",
+                        "support_email",
                     )
                 }
             )
@@ -571,14 +642,20 @@ def queue_product_id(s, product_id):
 
 
 @app.get("/api/manage/jobs")
-def jobs(request: Request, state: str = "", product_id: str = "", limit: int = 100):
+def jobs(
+    request: Request,
+    state: str = "",
+    product_id: str = "",
+    limit: int = 100,
+    job_id: str = "",
+):
     s = session(request, ("admin", "staff"))
     with db() as c:
         authorize_management(c, s, "queue.view")
         product_id = queue_product_id(s, product_id)
         product(c, product_id)
         rows = c.execute(
-            "SELECT * FROM jobs WHERE product_id=? AND (?='' OR state=?) ORDER BY created LIMIT ?",
+            "SELECT * FROM jobs WHERE product_id=? AND (?='' OR state=?) ORDER BY created,id LIMIT ?",
             (product_id, state, state, max(1, min(limit, 500))),
         ).fetchall()
         return [job_view(c, r, True) for r in rows]
@@ -592,6 +669,8 @@ def batch(body: BatchUpdate, request: Request):
         authorize_management(
             c, s, "queue.retry" if body.action == "retry" else "queue.process"
         )
+        if body.progress_steps is not None:
+            authorize_management(c, s, "queue.process")
         product_id = queue_product_id(s, body.product_id)
         p = product(c, product_id)
         rows = [job(c, jid) for jid in dict.fromkeys(body.ids)]
@@ -601,6 +680,11 @@ def batch(body: BatchUpdate, request: Request):
             jid = r["id"]
             if p["mode"] != "manual" and body.action != "retry":
                 fail("自动处理任务不能由队列处理覆盖", 409)
+            if body.progress_steps is not None:
+                bootstrap_progress_plan(
+                    c, r, [step.model_dump() for step in body.progress_steps]
+                )
+                r = job(c, jid)
             if body.action == "claim":
                 if r["state"] != "queued":
                     fail("任务已被领取或完成，请刷新列表", 409)
@@ -609,7 +693,11 @@ def batch(body: BatchUpdate, request: Request):
                     c,
                     jid,
                     JobUpdate(
-                        state="processing", attempt=r["attempt"], message="正在处理"
+                        state="processing",
+                        attempt=r["attempt"],
+                        progress=body.progress,
+                        completed_steps=body.completed_steps,
+                        message=body.message or "正在处理",
                     ),
                 )
             elif body.action in ("progress", "succeed", "fail"):
@@ -625,6 +713,7 @@ def batch(body: BatchUpdate, request: Request):
                             "progress": "processing",
                         }[body.action],
                         progress=body.progress,
+                        completed_steps=body.completed_steps,
                         attempt=r["attempt"],
                         content=body.content,
                         output=body.output,
@@ -730,7 +819,14 @@ def issue_managed_cards(body: IssueCards, request: Request):
     s = session(request, ("admin", "staff"))
     with db() as c:
         pid = management_scope(c, s, body.product_id, "cards.manage")
-        codes = issue_cards(c, pid, body.count, label=body.label, expires=body.expires)
+        codes = issue_cards(
+            c,
+            pid,
+            body.count,
+            label=body.label,
+            expires=body.expires,
+            variant_id=body.variant_id,
+        )
         audit(c, management_actor(s), "cards.issue", f"{pid}:{body.count}")
         return {"codes": codes, "batch_id": card_batch_id(c, codes)}
 
@@ -900,14 +996,12 @@ def platform_cards(body: IssueCards, request: Request):
         key = request.headers.get("idempotency-key", "")
         if not 8 <= len(key) <= 200:
             fail("请提供 8–200 字符的 Idempotency-Key", 400)
-        # Preserve fingerprints for pre-metadata integration requests.
-        fingerprint = digest(
-            body.model_dump_json(
-                exclude={"label", "expires"}
-                if not body.label and body.expires is None
-                else set()
-            )
-        )
+        # Default SKU requests retain the exact pre-SKU fingerprint, including
+        # existing label/expiry metadata, so old idempotency keys remain valid.
+        excluded = {"variant_id"} if body.variant_id == "default" else set()
+        if not body.label and body.expires is None:
+            excluded.update(("label", "expires"))
+        fingerprint = digest(body.model_dump_json(exclude=excluded))
         request_key = digest(key)
         old = c.execute(
             "SELECT * FROM api_requests WHERE key=?", (request_key,)
@@ -923,7 +1017,12 @@ def platform_cards(body: IssueCards, request: Request):
             return json.loads(cipher.decrypt(old["response"]))
         result = {
             "codes": issue_cards(
-                c, body.product_id, body.count, label=body.label, expires=body.expires
+                c,
+                body.product_id,
+                body.count,
+                label=body.label,
+                expires=body.expires,
+                variant_id=body.variant_id,
             )
         }
         c.execute(

@@ -1,5 +1,5 @@
 pkgname=extore
-pkgver=0.3.0
+pkgver=0.4.0
 pkgrel=1
 pkgdesc='Single-merchant redemption and fulfillment service'
 arch=('x86_64')

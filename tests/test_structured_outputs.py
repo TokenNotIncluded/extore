@@ -536,8 +536,13 @@ def test_service_goods_reject_undeclared_output(owner, setup_product):
 
 
 @pytest.mark.parametrize("change", ("key", "type", "required", "remove", "add"))
-def test_issued_cards_freeze_output_schema(owner, setup_product, change):
-    product_id, _ = setup_product(outputs=OUTPUT_FIELDS)
+def test_issued_webhook_cards_freeze_output_schema(owner, setup_product, change):
+    product_id, _ = setup_product(
+        outputs=OUTPUT_FIELDS,
+        mode="webhook",
+        webhook_url="https://example.com/events",
+        webhook_secret="a" * 32,
+    )
     config = next(
         product
         for product in owner.get("/api/admin/products").json()

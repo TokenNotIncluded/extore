@@ -1,12 +1,13 @@
 [project]
 name = "extore"
-version = "0.3.0"
+version = "0.4.0"
 requires-python = ">=3.12"
 dependencies = [
     "argon2-cffi>=25.1.0",
     "cryptography>=50.0.2",
     "fastapi>=0.142.2",
     "httpx>=0.28.1",
+    "python-multipart>=0.0.22",
     "uvicorn[standard]>=0.54.0",
     "webauthn>=3.0.1",
 ]

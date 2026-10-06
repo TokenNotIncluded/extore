@@ -1,0 +1,360 @@
+"""Bounded management-link use and scoped, auditable login sessions."""
+
+import hmac
+import json
+import re
+import time
+import uuid
+
+from fastapi import APIRouter, Query, Request
+
+from .db import audit, db
+from .security import (
+    authorize_management,
+    digest,
+    fail,
+    link_descendant_ids,
+    session,
+    staff_authorization,
+)
+
+router = APIRouter(prefix="/api")
+RETENTION_SECONDS = 90 * 86400
+AUDIT_ACTIONS = (
+    "session.create",
+    "session.replace",
+    "session.logout",
+    "session.revoke",
+    "session.link_revoke",
+    "session.bootstrap_complete",
+    "session.auth_reset",
+    "link.consume",
+    "staff.create",
+    "staff.revoke",
+)
+
+
+def init_schema(c):
+    """Migrate without changing cookies, link tokens, or active authorization."""
+    session_columns = {r["name"] for r in c.execute("PRAGMA table_info(sessions)")}
+    for name, definition in (
+        ("id", "TEXT"),
+        ("last_seen", "REAL NOT NULL DEFAULT 0"),
+        ("ip", "TEXT NOT NULL DEFAULT ''"),
+        ("ua", "TEXT NOT NULL DEFAULT ''"),
+        ("revoked", "INTEGER NOT NULL DEFAULT 0"),
+    ):
+        if name not in session_columns:
+            c.execute(f"ALTER TABLE sessions ADD COLUMN {name} {definition}")
+    for row in c.execute("SELECT digest FROM sessions WHERE id IS NULL OR id=''"):
+        c.execute(
+            "UPDATE sessions SET id=? WHERE digest=?",
+            (str(uuid.uuid4()), row["digest"]),
+        )
+    c.execute("UPDATE sessions SET last_seen=created WHERE last_seen=0")
+    c.execute("CREATE UNIQUE INDEX IF NOT EXISTS sessions_id ON sessions(id)")
+    c.execute(
+        "CREATE INDEX IF NOT EXISTS sessions_link ON sessions(staff_id,revoked,expires)"
+    )
+    staff_columns = {r["name"] for r in c.execute("PRAGMA table_info(staff)")}
+    migrating_links = "max_uses" not in staff_columns or "uses" not in staff_columns
+    if "max_uses" not in staff_columns:
+        c.execute("ALTER TABLE staff ADD COLUMN max_uses INTEGER NOT NULL DEFAULT 1")
+    if "uses" not in staff_columns:
+        c.execute("ALTER TABLE staff ADD COLUMN uses INTEGER NOT NULL DEFAULT 0")
+    if migrating_links:
+        # Existing active logins already consumed their links. Grant no new
+        # admission simply because an older version did not count logins.
+        now = time.time()
+        c.execute(
+            "UPDATE staff SET uses=(SELECT count(*) FROM sessions WHERE "
+            "sessions.staff_id=staff.id AND sessions.role='staff' "
+            "AND sessions.revoked=0 AND sessions.expires>?)",
+            (now,),
+        )
+        c.execute("UPDATE staff SET max_uses=max(1,uses)")
+
+
+def augment_link_view(row):
+    row = dict(row)
+    maximum = row.get("max_uses", 1)
+    used = row.get("uses", 0)
+    return {
+        "max_uses": maximum,
+        "uses": used,
+        "remaining_uses": max(0, maximum - used),
+    }
+
+
+def consume_link(c, row, request=None):
+    """Consume one successful new login inside the caller's IMMEDIATE transaction."""
+    # Resolve the current row under the write transaction. A stale row passed
+    # by a caller must not reset a quota or bypass ancestor revocation.
+    current = staff_authorization(c, row["id"])
+    maximum, used = current["max_uses"], current["uses"]
+    if (
+        not isinstance(maximum, int)
+        or maximum < 1
+        or not isinstance(used, int)
+        or used < 0
+    ):
+        fail("商品管理链接的使用额度无效", 401)
+    if used >= maximum:
+        fail("此商品管理链接已达到使用次数上限，请申请新的链接", 409)
+    result = c.execute(
+        "UPDATE staff SET uses=uses+1 WHERE id=? AND uses=? AND uses<max_uses "
+        "AND revoked=0 AND expires>?",
+        (current["id"], used, time.time()),
+    )
+    if result.rowcount != 1:
+        fail("此商品管理链接已达到使用次数上限，请申请新的链接", 409)
+    audit(c, current["id"], "link.consume", current["id"])
+    current["uses"] = used + 1
+    return current
+
+
+def session_actor(row):
+    if row["role"] == "staff":
+        return row["staff_id"]
+    return "owner" if row["role"] == "admin" else "bootstrap"
+
+
+def revoke_session(c, session_digest, actor=None, action="session.revoke"):
+    """Retain the row and record a single transition; never log cookie digests."""
+    if action not in AUDIT_ACTIONS or not action.startswith("session."):
+        raise ValueError("Unknown session audit action")
+    row = c.execute(
+        "SELECT id,role,staff_id,revoked FROM sessions WHERE digest=?",
+        (session_digest,),
+    ).fetchone()
+    if row is None or row["revoked"]:
+        return None
+    c.execute("UPDATE sessions SET revoked=1 WHERE digest=?", (session_digest,))
+    audit(c, actor or session_actor(row), action, row["id"])
+    if row["role"] == "staff":
+        _release_last_staff_session(c, row["staff_id"])
+    return row["id"]
+
+
+def _release_last_staff_session(c, staff_id):
+    if c.execute(
+        "SELECT 1 FROM sessions WHERE role='staff' AND staff_id=? AND revoked=0 "
+        "AND expires>? LIMIT 1",
+        (staff_id, time.time()),
+    ).fetchone():
+        return
+    jobs = c.execute(
+        "SELECT jobs.id FROM jobs JOIN products ON products.id=jobs.product_id "
+        "WHERE jobs.claimed_by=? AND jobs.state='processing' "
+        "AND COALESCE(json_extract(products.config,'$.mode'),'manual')='manual'",
+        (staff_id,),
+    ).fetchall()
+    for job in jobs:
+        c.execute(
+            "UPDATE jobs SET state='queued',claimed_by=NULL,lease=NULL,updated=? "
+            "WHERE id=? AND state='processing' AND claimed_by=?",
+            (time.time(), job["id"], staff_id),
+        )
+        # Preserve params, result drafts, files and progress so a replacement
+        # processor can continue rather than repeat completed work.
+        audit(c, staff_id, "job.release", job["id"])
+
+
+def revoke_staff_sessions(c, staff_id, actor="owner"):
+    rows = c.execute(
+        "SELECT digest FROM sessions WHERE staff_id=? AND revoked=0", (staff_id,)
+    ).fetchall()
+    for row in rows:
+        revoke_session(c, row["digest"], actor, "session.link_revoke")
+    return len(rows)
+
+
+def revoke_all_sessions(c, actor="owner", action="session.auth_reset"):
+    rows = c.execute("SELECT digest FROM sessions WHERE revoked=0").fetchall()
+    for row in rows:
+        revoke_session(c, row["digest"], actor, action)
+    return len(rows)
+
+
+def cleanup_sessions(c, now=None):
+    now = time.time() if now is None else now
+    # An expired session remains available for ninety days, including its
+    # opaque ID and metadata needed to interpret revocation audit entries.
+    c.execute("DELETE FROM sessions WHERE expires<?", (now - RETENTION_SECONDS,))
+
+
+def request_metadata(request):
+    if request is None:
+        return "", ""
+    ip = request.client.host if request.client else ""
+    ua = request.headers.get("user-agent", "")
+
+    # Forwarded headers are untrusted. Suppress controls so metadata remains
+    # plain one-line text when a manager exports or displays the session list.
+    def clean(value, limit):
+        return re.sub(r"[\x00-\x1f\x7f]", " ", value)[:limit]
+
+    return clean(ip, 100), clean(ua, 300)
+
+
+def _link_scope(c, s):
+    authorize_management(c, s)
+    if s["role"] == "admin":
+        return None
+    ids = [s["staff_id"]]
+    if "links.delegate" in s["permissions"]:
+        ids = link_descendant_ids(c, s["staff_id"])
+    placeholders = ",".join("?" for _ in ids)
+    return {
+        row["id"]
+        for row in c.execute(
+            f"SELECT id FROM staff WHERE product_id=? AND id IN ({placeholders})",
+            (s["product_id"], *ids),
+        )
+    }
+
+
+def _session_rows(c, scope):
+    sql = (
+        "SELECT sessions.*,staff.name AS link_name,staff.product_id AS product_id,"
+        "products.config AS product_config FROM sessions "
+        "LEFT JOIN staff ON staff.id=sessions.staff_id "
+        "LEFT JOIN products ON products.id=staff.product_id"
+    )
+    values = ()
+    if scope is not None:
+        if not scope:
+            return []
+        sql += " WHERE sessions.role='staff' AND sessions.staff_id IN ("
+        sql += ",".join("?" for _ in scope) + ")"
+        values = tuple(sorted(scope))
+    return c.execute(
+        sql + " ORDER BY sessions.created DESC,sessions.id", values
+    ).fetchall()
+
+
+def _session_view(c, row, current_digest):
+    active = not row["revoked"] and row["expires"] > time.time()
+    if active and row["role"] == "staff":
+        from fastapi import HTTPException
+
+        try:
+            staff_authorization(c, row["staff_id"])
+        except HTTPException:
+            active = False
+    name = None
+    if row["product_config"]:
+        try:
+            name = json.loads(row["product_config"]).get("name")
+        except (TypeError, ValueError, AttributeError):
+            pass
+    return {
+        "id": row["id"],
+        "role": row["role"],
+        "link_id": row["staff_id"],
+        "link_name": row["link_name"],
+        "product_id": row["product_id"],
+        "product_name": name,
+        "created": row["created"],
+        "last_seen": row["last_seen"],
+        "expires": row["expires"],
+        "revoked": bool(row["revoked"]),
+        "current": hmac.compare_digest(row["digest"], current_digest),
+        "active": bool(active),
+        "ip": row["ip"][:100],
+        "ua": row["ua"][:300],
+    }
+
+
+def _list_sessions(request, roles):
+    s = session(request, roles)
+    with db() as c:
+        scope = _link_scope(c, s)
+        current_digest = digest(request.cookies.get("extore_session", ""))
+        return [
+            _session_view(c, row, current_digest) for row in _session_rows(c, scope)
+        ]
+
+
+def _revoke_session_by_id(session_id, request, roles):
+    s = session(request, roles)
+    with db() as c:
+        scope = _link_scope(c, s)
+        row = c.execute("SELECT * FROM sessions WHERE id=?", (session_id,)).fetchone()
+        if row is None or (
+            scope is not None
+            and (row["role"] != "staff" or row["staff_id"] not in scope)
+        ):
+            fail("登录会话不存在", 404)
+        current = hmac.compare_digest(
+            row["digest"], digest(request.cookies.get("extore_session", ""))
+        )
+        revoke_session(c, row["digest"], session_actor(s))
+        return {"ok": True, "id": row["id"], "current": current}
+
+
+def _list_audit(request, roles, limit):
+    s = session(request, roles)
+    with db() as c:
+        scope = _link_scope(c, s)
+        # Whitelist only session/link events whose targets are safe opaque IDs.
+        # Existing business audit targets can contain arbitrary identifiers;
+        # this session UI does not serialize those unrelated event types.
+        placeholders = ",".join("?" for _ in AUDIT_ACTIONS)
+        sql = f"SELECT * FROM audit WHERE action IN ({placeholders})"
+        values = list(AUDIT_ACTIONS)
+        if scope is not None:
+            session_ids = {r["id"] for r in _session_rows(c, scope)}
+            targets = scope | session_ids
+            if not targets:
+                return []
+            sql += " AND target IN (" + ",".join("?" for _ in targets) + ")"
+            values.extend(sorted(targets))
+        sql += " ORDER BY created DESC,id DESC LIMIT ?"
+        values.append(limit)
+        rows = c.execute(sql, values).fetchall()
+        # Every emitted target must refer to a retained link/session, not an
+        # arbitrary string inserted into the common audit table by other code.
+        safe_targets = {r["id"] for r in c.execute("SELECT id FROM sessions")}
+        safe_targets |= {r["id"] for r in c.execute("SELECT id FROM staff")}
+        return [
+            {k: row[k] for k in ("id", "actor", "action", "target", "created")}
+            for row in rows
+            if row["target"] in safe_targets
+            and (
+                row["actor"] in ("owner", "bootstrap", "ssh")
+                or c.execute(
+                    "SELECT 1 FROM staff WHERE id=?", (row["actor"],)
+                ).fetchone()
+            )
+        ]
+
+
+@router.get("/admin/sessions")
+def admin_sessions(request: Request):
+    return _list_sessions(request, ("admin",))
+
+
+@router.delete("/admin/sessions/{session_id}")
+def admin_revoke_session(session_id: str, request: Request):
+    return _revoke_session_by_id(session_id, request, ("admin",))
+
+
+@router.get("/manage/sessions")
+def management_sessions(request: Request):
+    return _list_sessions(request, ("staff",))
+
+
+@router.delete("/manage/sessions/{session_id}")
+def management_revoke_session(session_id: str, request: Request):
+    return _revoke_session_by_id(session_id, request, ("staff",))
+
+
+@router.get("/admin/audit")
+def admin_audit(request: Request, limit: int = Query(default=200, ge=1, le=200)):
+    return _list_audit(request, ("admin",), limit)
+
+
+@router.get("/manage/audit")
+def management_audit(request: Request, limit: int = Query(default=200, ge=1, le=200)):
+    return _list_audit(request, ("staff",), limit)

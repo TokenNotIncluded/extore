@@ -78,3 +78,20 @@ ssh -t archczy 'sudo -u extore extore-admin reset-auth'
 - HTTPS 首页、健康检查与 WebMCP 静态资源 200；公网 JS、CSS、虚线 SVG 与提交内容逐字节一致。
 - 开启 WebMCP 的真实 Chromium 在公网确认 `document.modelContext` 与首页 5 个原生工具，实际执行公开商品查询；连续点击 Logo 5 次进入 Passkey 登录页，匿名后台只注册上下文和导航工具。
 - 未启用 WebMCP 的 Chromium 正常显示兑换表单，未伪造浏览器 API。生产未执行 Passkey 注册或重置。
+
+## 0.3.0 代码与生产更新（2026-10-06）
+
+本节记录 0.3.0。前面的首次密码、任意本地脚本、清空测试数据等内容属于当时的历史记录，不代表当前配置或执行方式。
+
+- 运行代码：`03a774cb038db2b7d125db99c162029bccfd5bd5`；Arch 原生包 `extore 0.3.0-1`，目标运行环境 CPython 3.14.7。
+- [主代码 CI](https://github.com/TokenNotIncluded/extore/actions/runs/37464387047) 成功，提交与生产运行代码一致：主项目 Python 261 项、Node 138 项、官方处理器 23 项，共 422 项。官方测试中的 52 个子测例不重复计入总数。Ruff、Python 编译、前端语法与 wheel 构建通过。
+- [主仓库](https://github.com/TokenNotIncluded/extore) 与[官方处理器仓库](https://github.com/TokenNotIncluded/extore-processors) 均已公开。`processors/official` 子模块固定到 `7b4303aeeaf947373cd97e2885a60790218c8257`，仅运行白名单中的 `resource_link` 和 `personalized_text`；商家不能指定任意程序、上传代码或配置其他 Git 地址。
+- 新增商品输入与结构化输出定义、仅状态的服务交付、按商品的人与 AI 共用队列、39 项原生 WebMCP 工具，以及卡密批次、尾号、到期和统计追踪。界面已提供全部／单张卡密复制与三种管理链接操作。
+- 本地隔离环境已验证队列和官方处理器的原生工具交付闭环；领取与销毁期间的页面上下文竞态回归测试通过。这些证据不替代本次真实生产闭环验收。
+- 源码归档 SHA-256：`2e145873275e3f49f19984c9d1e0b085f3014f4be637615ade6e826c77141f7f`，服务器构建前校验一致。
+- 升级前受保护备份：`/var/backups/extore/20261006-0.3.0`。既有核心数据逐字段指纹、发行密钥与原环境配置还原校验一致；保留商家已注册的 1 个 Passkey，未注册或重置生产认证。
+- 升级时保留 1 个商品、10 张卡密、1 个管理链接、0 个任务。这些是商家创建的真实数据，未作为测试数据清理。SQLite 结构版本为 4，`integrity_check=ok`。
+- pacman 升级移除的旧 `EXTORE_SCRIPTS` 配置行已按原字节恢复；环境文件因此与新版默认配置不同，该遗留变量不会恢复任意脚本执行。`pacman -Qkk extore` 检查 1519 个文件、0 被修改。
+- API 与 worker 为 active/running，验收时 `NRestarts=0`；服务器本地 `/health` 返回 200。
+
+本次公网页面与静态资源、浏览器界面及真实生产新闭环尚待补充验收。真实手机／硬件 Passkey、真实外部商品提供商与支付平台往返仍未验收。

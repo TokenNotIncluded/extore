@@ -22,6 +22,9 @@ jobs:
       - run: node --check extore/static/products.js
       - run: node --check extore/static/cards.js
       - run: node --check extore/static/webmcp.js
+      - run: node --check extore/static/product-export.js
+      - run: node --check extore/static/customer-motion.js
+      - run: node --check extore/static/source-link.js
       - run: node --test tests/*.test.cjs
       - run: uv run pytest -q processors/official/tests
       - run: uv build

@@ -39,7 +39,14 @@ def test_queue_product_list_is_minimal_and_requires_login(owner, setup_product):
         {
             key: value
             for key, value in row.items()
-            if key not in ("parameters", "outputs")
+            if key
+            not in (
+                "parameters",
+                "outputs",
+                "variants",
+                "progress_steps",
+                "support_email",
+            )
         }
         for row in rows
     ] == [
@@ -60,10 +67,39 @@ def test_queue_product_list_is_minimal_and_requires_login(owner, setup_product):
     ]
     assert all(
         set(row)
-        == {"id", "name", "mode", "delivery", "view_policy", "parameters", "outputs"}
+        == {
+            "id",
+            "name",
+            "mode",
+            "delivery",
+            "view_policy",
+            "parameters",
+            "outputs",
+            "variants",
+            "progress_steps",
+            "support_email",
+        }
+        for row in rows
+    )
+    assert all(
+        row["variants"]
+        == [
+            {
+                "id": "default",
+                "name": "默认规格",
+                "description": "",
+                "price": None,
+                "currency": "CNY",
+                "attributes": {},
+                "enabled": True,
+            }
+        ]
         for row in rows
     )
     assert all(row["parameters"][0]["key"] == "email" for row in rows)
+    assert all(
+        row["progress_steps"] == [] and row["support_email"] == "" for row in rows
+    )
     assert rows[0]["outputs"] == []
     assert rows[1]["outputs"][0]["key"] == "content"
     assert "secret-hook" not in response.text and "signing-secret" not in response.text
@@ -107,7 +143,7 @@ def test_queue_order_position_state_and_limit_are_product_scoped(owner, setup_pr
     rows = owner.get(
         "/api/manage/jobs", params={"product_id": pid, "state": "queued", "limit": 1}
     ).json()
-    assert [(row["id"], row["queue_ahead"]) for row in rows] == [(second["id"], 0)]
+    assert [(row["id"], row["queue_ahead"]) for row in rows] == [(second["id"], 1)]
     rows = owner.get(
         "/api/manage/jobs", params={"product_id": pid, "state": "processing"}
     ).json()
