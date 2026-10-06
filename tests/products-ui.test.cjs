@@ -401,6 +401,29 @@ test("switching between queue and a processor retains queue drafts without expos
   assert.match(p.node("#outputs").innerHTML, /content · textarea/);
 });
 
+test("instant text mode removes queue work and submits one frozen text result", async () => {
+  const p = page();
+  await editProduct(p);
+  p.node("#p-mode").value = "stock";
+  await p.node("#p-mode").emit("change");
+  assert.equal(p.node("#p-delivery").value, "content");
+  assert.equal(p.node("#p-delivery").disabled, true);
+  assert.equal(p.node("#product-progress-section").hidden, true);
+  assert.equal(p.node("#stock-help").hidden, false);
+  assert.equal(p.node("#add-param").hidden, true);
+  assert.match(p.node("#outputs").innerHTML, /content · textarea/);
+  assert.equal(p.node("#f-key-0"), null);
+  await p.node("#product-form").emit("submit");
+  const saving = p.requests.at(-1);
+  assert.equal(saving.body.mode, "stock");
+  assert.equal(saving.body.parameters.length, 0);
+  assert.equal(saving.body.outputs.length, 1);
+  assert.equal(saving.body.outputs[0].key, "content");
+  assert.equal(saving.body.progress_steps.length, 0);
+  saving.resolve({ id: "product-one", ...saving.body });
+  await flush();
+});
+
 test("clipboard denial still selects the complete scoped management link", async () => {
   const p = page({ navigator: { clipboard: { async writeText() { throw new Error("permission denied"); } } } });
   const rendering = p.ui.render(p.ctx, {

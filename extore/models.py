@@ -171,7 +171,7 @@ class Product(BaseModel):
         min_length=1,
         max_length=100,
     )
-    mode: Literal["manual", "webhook", "script"] = "manual"
+    mode: Literal["manual", "webhook", "script", "stock"] = "manual"
     delivery: Literal["content", "service"] = "content"
     view_policy: Literal["repeat", "once"] = "repeat"
     allow_retry: bool = True
@@ -222,6 +222,17 @@ class Product(BaseModel):
         return self._validate_config()
 
     def _validate_config(self, allow_blank_secret=False):
+        if self.mode == "stock":
+            if self.parameters or self.progress_steps:
+                raise ValueError("一卡一文本商品无需填写参数或配置处理步骤")
+            if self.delivery != "content":
+                raise ValueError("一卡一文本商品必须交付文本内容")
+            if len(self.outputs) != 1 or (
+                self.outputs[0].key != "content"
+                or self.outputs[0].type not in ("text", "textarea")
+                or not self.outputs[0].required
+            ):
+                raise ValueError("一卡一文本商品只支持必填的 content 文本输出")
         if len({step.id for step in self.progress_steps}) != len(self.progress_steps):
             raise ValueError("处理步骤代码不能重复")
         if len({variant.id for variant in self.variants}) != len(self.variants):

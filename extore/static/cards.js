@@ -69,6 +69,7 @@
     let codeGeneration = 0;
     let busy = false;
     let disposed = false;
+    let textImport = null;
     let selected = products.find((product) => product.id === productId)?.id;
     if (!selected) selected = products[0]?.id || "";
     const productVariants = () => {
@@ -106,6 +107,7 @@
         generation++;
         read?.abort();
         lifetime.abort();
+        textImport?.dispose();
       },
     };
     active = instance;
@@ -116,7 +118,7 @@
       ${
         products.length
           ? `<div id="cards-stats" aria-live="polite"></div>
-      <details class="panel"><summary>发行一批卡密</summary><p class="caption">卡密原文只在本次生成时显示。离开页面后不能找回，请立即下载保存。</p>
+      <div id="cards-text-import"></div><details id="cards-regular-issue" class="panel"><summary>发行一批卡密</summary><p class="caption">卡密原文只在本次生成时显示。离开页面后不能找回，请立即下载保存。</p>
         <form id="cards-issue"><div class="grid"><div class="field"><label for="cards-issue-variant">${tr("制卡规格", "Variant to issue")}</label><select id="cards-issue-variant" required></select><p id="cards-issue-help" class="caption"></p></div><div class="field"><label for="cards-count">数量</label><input id="cards-count" type="number" min="1" max="1000" step="1" value="10" required></div><div class="field"><label for="cards-label">批次标签（可选）</label><input id="cards-label" maxlength="100" placeholder="例如：十月活动"></div><div class="field"><label for="cards-expires">兑换截止时间（可选，本地时间）</label><input id="cards-expires" type="datetime-local"></div></div><button id="cards-issue-submit" type="submit" class="full">生成卡密</button></form>
       </details><div id="cards-codes" class="secret-output"></div>
       <div class="form-divider"><h3>卡密库存与使用情况</h3><form id="cards-filter"><div class="grid"><div class="field"><label for="cards-variant">${tr("查看规格", "Filter by variant")}</label><select id="cards-variant"></select></div><div class="field"><label for="cards-status">状态</label><select id="cards-status"><option value="">全部状态</option>${Object.entries(
@@ -200,6 +202,22 @@
       inventorySelect.value = inventoryVariant;
     };
     variantControls();
+    const drawTextImport = () => {
+      textImport?.dispose();
+      textImport = null;
+      const product = products.find((item) => item.id === selected);
+      const stock = product?.mode === "stock";
+      node("#cards-regular-issue").hidden = stock;
+      if (!stock) return;
+      if (!window.ExtoreTextCards) {
+        node("#cards-text-import").textContent = tr("文本导入未加载，请刷新页面。", "Text import did not load. Refresh this page.");
+        return;
+      }
+      textImport = window.ExtoreTextCards.mount({
+        root: node("#cards-text-import"), api, endpoint, product, variants,
+        isCurrent: current, onBusy: setBusy, onIssued: () => load(),
+      });
+    };
     const perform = async (callback, mutation = false) => {
       if (!current() || busy) return;
       clearError();
@@ -389,6 +407,7 @@
       issueVariant = "";
       inventoryVariant = "";
       variantControls();
+      drawTextImport();
       offset = 0;
       node("#cards-status").value = "";
       node("#cards-batch").value = "";
@@ -591,6 +610,7 @@
       },
       true,
     );
+    drawTextImport();
     await perform(load);
     return instance;
   }

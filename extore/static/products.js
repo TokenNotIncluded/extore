@@ -312,6 +312,7 @@
         "处理方式",
         [
           ["manual", "队列"],
+          ["stock", "一卡一文本 · 自动交付"],
           ["webhook", "外部 Webhook"],
           ["script", "商品处理器"],
         ],
@@ -338,13 +339,14 @@
       )}</div>
       ${textarea("p-description", "商品描述（Markdown）", product.description)}
       ${field("p-support-email", "商家催办邮箱（可留空）", product.support_email || "", "email", 'maxlength="254" autocomplete="email"')}
-      <div class="form-divider"><div class="section-head"><h3>处理步骤</h3><button type="button" id="add-progress-step" class="secondary">添加步骤</button></div><p class="caption">按处理顺序配置步骤，顾客可跟踪每一步的状态。修改只用于之后的任务，正在处理的任务会保留原来的步骤。</p><div id="product-progress-steps"></div></div>
+      <div class="form-divider" id="product-progress-section"><div class="section-head"><h3>处理步骤</h3><button type="button" id="add-progress-step" class="secondary">添加步骤</button></div><p class="caption">按处理顺序配置步骤，顾客可跟踪每一步的状态。修改只用于之后的任务，正在处理的任务会保留原来的步骤。</p><div id="product-progress-steps"></div></div>
       <div class="form-divider" id="product-task-flow"></div>
       <div class="form-divider"><div class="section-head"><h3>规格 / 档位</h3><button type="button" id="add-variant" class="secondary">添加规格</button></div><p class="caption">每个规格有独立的卡密库存，数量在卡密页查看。参考价供外部商城配置参考；Extore 只负责兑换与交付，不收款。</p><div id="product-variants"></div><p class="caption">规格标识固定。已有卡密的规格不能删除，可停用，避免继续发行。</p></div>
       <div class="checks"><label><input id="p-public" type="checkbox" ${product.public ? "checked" : ""}>公开展示商品</label><label><input id="p-retry" type="checkbox" ${product.allow_retry ? "checked" : ""} ${disabled}>允许明确失败后重试</label></div>
       ${field("p-attempts", "最多尝试次数", product.max_attempts, "number", `${disabled} min="1" max="20"`)}
       <div class="form-divider" id="delivery-connection"><h3>发货对接</h3>
         <p id="queue-help" class="caption">队列任务可以由人员或 AI 领取处理。下方定义顾客填写的信息，以及完成任务时必须提交的结果。</p>
+        <p id="stock-help" class="caption" hidden>保存商品后，在「卡密」页粘贴文本或导入 UTF-8 文件，一行生成一张卡密。顾客兑换后直接领取对应文本，无需排队。</p>
         <div id="webhook-settings"><p class="caption">将任务交给外部平台处理。接收地址须为 HTTPS 公网地址，使用签名密钥验证任务与回调。</p><div class="grid">${field("p-url", "Webhook 接收地址", product.webhook_url || "", "url", disabled)}${field("p-secret", "Webhook 签名密钥（至少 32 字符）", product.webhook_secret || "", "password", `${disabled} autocomplete="new-password"`)}</div></div>
         <div id="processor-settings">${select("p-processor", "商品处理器", [["", "正在加载处理器…"]], "", owner ? disabled : "disabled")}<p id="processor-description" class="caption"></p><div id="processor-configuration"></div><p class="caption">顾客填写项与交付结果由处理器代码定义。这里只能选择商品处理器预设并填写它声明的配置。</p></div>
       </div>
@@ -484,7 +486,7 @@
         collapsed: $("#" + prefix + "-collapsed-" + index).checked,
       }));
     const captureCustom = () => {
-      if (previousMode !== "script") {
+      if (!["script", "stock"].includes(previousMode)) {
         parameters = captureFields("f", parameters);
         if (previousDelivery === "content")
           outputs = captureFields("o", outputs);
@@ -498,7 +500,8 @@
     const drawFields = (selector, prefix, fields, readonly, codeDefined) => {
       const container = $(selector);
       if (codeDefined) {
-        container.innerHTML = `<p class="caption" data-schema-source="processor">由商品处理器代码定义，只读。</p>${fields.length ? fields.map((definition) => `<div class="parameter"><h3>${escape(localized(definition.label, ctx.lang))}</h3><p class="mono">${escape(definition.key)} · ${escape(definition.type)} · ${definition.required ? "必填" : "选填"}</p>${tutorial(definition, ctx.lang, prefix === "f" ? "填写教程" : "结果说明")}</div>`).join("") : '<p class="caption">无需额外填写信息。</p>'}`;
+        const stock = $("#p-mode").value === "stock";
+        container.innerHTML = `<p class="caption" data-schema-source="${stock ? "stock" : "processor"}">${stock ? "一卡一文本自动交付，无需配置字段。" : "由商品处理器代码定义，只读。"}</p>${fields.length ? fields.map((definition) => `<div class="parameter"><h3>${escape(localized(definition.label, ctx.lang))}</h3><p class="mono">${escape(definition.key)} · ${escape(definition.type)} · ${definition.required ? "必填" : "选填"}</p>${tutorial(definition, ctx.lang, prefix === "f" ? "填写教程" : "结果说明")}</div>`).join("") : '<p class="caption">无需额外填写信息。</p>'}`;
         return;
       }
       container.innerHTML = fields
@@ -525,7 +528,7 @@
       );
     };
     function drawSchemas() {
-      const codeDefined = $("#p-mode").value === "script";
+      const codeDefined = ["script", "stock"].includes($("#p-mode").value);
       const service = $("#p-delivery").value === "service";
       $("#add-param").hidden = codeDefined;
       $("#add-output").hidden = codeDefined || service || !ctx.canConfigure;
@@ -610,10 +613,13 @@
     function syncMode() {
       const mode = $("#p-mode").value;
       const codeDefined = mode === "script";
+      const stock = mode === "stock";
       $("#queue-help").hidden = mode !== "manual";
+      $("#stock-help").hidden = !stock;
+      $("#product-progress-section").hidden = stock;
       $("#webhook-settings").hidden = mode !== "webhook";
       $("#processor-settings").hidden = !codeDefined;
-      $("#p-delivery").disabled = codeDefined || !ctx.canConfigure;
+      $("#p-delivery").disabled = codeDefined || stock || !ctx.canConfigure;
       $("#p-view").disabled = !ctx.canConfigure;
       if (codeDefined) {
         const spec = catalog.find((item) => item.id === processorId);
@@ -622,6 +628,11 @@
           parameters = structuredClone(spec.parameters);
           outputs = structuredClone(spec.outputs);
         }
+      }
+      if (stock) {
+        $("#p-delivery").value = "content";
+        parameters = [];
+        outputs = [defaultOutput()];
       }
       $("#p-view").closest(".field").hidden =
         $("#p-delivery").value === "service";
@@ -742,8 +753,8 @@
           script: "",
           processor_id: mode === "script" ? processorId : "",
           variants,
-          progress_steps: progressSteps,
-          task_flow: taskFlowEditor ? taskFlowEditor.getValue() : product.task_flow || null,
+          progress_steps: mode === "stock" ? [] : progressSteps,
+          task_flow: mode === "stock" ? null : taskFlowEditor ? taskFlowEditor.getValue() : product.task_flow || null,
           support_email: $("#p-support-email").value.trim(),
         };
         // Configuration is not part of generic product editing. The existing
