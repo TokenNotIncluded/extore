@@ -5,7 +5,7 @@
 web
 
 ## Stack
-暂定 Python FastAPI、SQLite、原生 HTML/CSS/JavaScript；根据脚本 SDK 的需求选择，待用户指定的部署环境可调整。
+Python FastAPI、SQLite、原生 HTML/CSS/JavaScript。根据脚本 SDK 需求选择，部署目标为用户指定的 archczy，域名 extore.lmm.best。
 
 ## Users
 单个商家、按商品授权的处理员工，以及持有卡密的顾客。顾客无需注册。
