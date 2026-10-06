@@ -1,0 +1,2 @@
+# Keep the QR encoder byte-for-byte identical to its pinned upstream source.
+extore/static/vendor/qrcodegen.js whitespace=-blank-at-eol
