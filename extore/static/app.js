@@ -40,6 +40,7 @@ let lang = preferences.resolved.language,
   linkLoadId = 0,
   linkView = "active",
   eventLoadId = 0;
+const deliveryBlobs = new Map();
 let uploadLimitPromise = null;
 let maxUploadFileBytes = 20 * 1024 * 1024;
 const esc = (s) =>
@@ -102,7 +103,7 @@ function receiptCardBody(context, extra = {}) {
   return body;
 }
 function selectBatchCard(cardId = "", retryOnly = false) {
-  if (batchSelection !== cardId || batchRetryOnly !== retryOnly) receiptGeneration++;
+  if (batchSelection !== cardId || batchRetryOnly !== retryOnly) { receiptGeneration++; clearDeliveryBlobs(); }
   batchSelection = cardId;
   batchRetryOnly = retryOnly;
 }
@@ -163,14 +164,50 @@ function batchRedemptionOptions() {
     },
   };
 }
+function isAttachmentField(field) { return ["file", "image", "images"].includes(field.type); }
+function fieldAttachmentIds(field, value) {
+  if (!value) return [];
+  if (field.type !== "images") return [value];
+  const ids = JSON.parse(value);
+  if (!Array.isArray(ids) || ids.length > (field.max_items || 10) || ids.some((id) => typeof id !== "string" || !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(id)) || new Set(ids).size !== ids.length)
+    throw new Error(tr("图片集合的附件无效，请重新选择。", "The image attachments are invalid. Select them again."));
+  return ids;
+}
+function richFieldControl(id, field, value = "", { maximum = 10000 } = {}) {
+  if (isAttachmentField(field)) {
+    const retained = fieldAttachmentIds(field, value);
+    return `<input id="${esc(id)}" type="file" ${field.type === "images" ? "multiple" : ""} ${field.type === "file" ? "" : 'accept="image/png,image/jpeg,image/webp"'} ${field.required && !retained.length ? "required" : ""}>${retained.length ? `<input id="${esc(id)}-retained" type="hidden" value="${esc(value)}"><p class="caption">${tr(`已保留 ${retained.length} 个附件，可重新选择替换。`, `${retained.length} attachments retained. Select new files to replace them.`)}</p>` : ""}<p class="caption" data-upload-limit>${uploadLimitCaption()}</p>${field.type === "images" ? `<p class="caption">${tr(`最多 ${field.max_items || 10} 张图片。支持 PNG、JPEG、WebP。`, `Up to ${field.max_items || 10} images. PNG, JPEG and WebP are supported.`)}</p>` : ""}`;
+  }
+  if (field.type === "select" || field.type === "boolean") {
+    const options = field.type === "boolean" ? [{ value: "true", label: { "zh-CN": "是", en: "Yes" } }, { value: "false", label: { "zh-CN": "否", en: "No" } }] : field.options || [];
+    return `<select id="${esc(id)}" ${field.required ? "required" : ""}><option value="">${field.required ? tr("请选择", "Choose an option") : tr("未填写", "Not specified")}</option>${options.map((option) => `<option value="${esc(option.value)}" ${option.value === value ? "selected" : ""}>${esc(localized(option.label))}</option>`).join("")}</select>`;
+  }
+  if (field.type === "textarea") return `<textarea id="${esc(id)}" ${field.required ? "required" : ""} maxlength="${maximum}">${esc(value)}</textarea>`;
+  return `<input id="${esc(id)}" type="${field.sensitive ? "password" : esc(field.type)}" value="${esc(field.sensitive ? "" : value)}" ${field.type === "number" ? 'step="any"' : ""} ${field.sensitive ? 'autocomplete="off"' : ""} ${field.required ? "required" : ""} maxlength="${maximum}">`;
+}
+function selectedFieldFiles(input, field) {
+  const files = Array.from(input.files || []);
+  if (files.length > (field.type === "images" ? field.max_items || 10 : 1))
+    throw new Error(tr("选择的附件数量超过字段限制。", "Too many attachments selected for this field."));
+  return files;
+}
+async function uploadFieldFiles(input, field, retained, url, body, options = {}) {
+  const selected = selectedFieldFiles(input, field);
+  if (!selected.length) return field.type === "images" ? JSON.stringify(fieldAttachmentIds(field, retained)) : retained || "";
+  const ids = [];
+  const { isCurrent = () => true, ...requestOptions } = options;
+  for (const file of selected) {
+    if (!isCurrent()) throw new Error(tr("页面已切换，附件尚未提交。", "The page changed. Attachments were not submitted."));
+    ids.push((await uploadMultipart(url, { ...body, field_key: field.key }, file, { ...requestOptions, isCurrent })).id);
+    if (!isCurrent()) throw new Error(tr("页面已切换，附件尚未提交。", "The page changed. Attachments were not submitted."));
+  }
+  return field.type === "images" ? JSON.stringify(ids) : ids[0];
+}
+window.ExtoreFields = { isAttachment: isAttachmentField, attachmentIds: fieldAttachmentIds, control: richFieldControl, read: (control) => control.value, files: selectedFieldFiles, upload: uploadFieldFiles, imageAccept: "image/png,image/jpeg,image/webp" };
 function parameterFields(idPrefix, field, value = "") {
   const id = idPrefix + field.key;
   const label = `${esc(localized(field.label))}${field.required ? " *" : ""}`;
-  const control = field.type === "file"
-    ? `<input id="${id}" type="file" ${field.required && !value ? "required" : ""}>${value ? `<input id="${id}-retained" type="hidden" value="${esc(value)}"><p class="caption">${tr("已保留上次上传的文件，可重新选择替换。", "Your previous upload is retained. Choose a new file to replace it.")}</p>` : ""}<p class="caption" data-upload-limit>${uploadLimitCaption()}</p>`
-    : field.type === "textarea"
-      ? `<textarea id="${id}" ${field.required ? "required" : ""} maxlength="10000">${esc(value)}</textarea>`
-      : `<input id="${id}" type="${field.type}" value="${esc(value)}" ${field.type === "number" ? 'step="any"' : ""} ${field.required ? "required" : ""} maxlength="10000">`;
+  const control = richFieldControl(id, field, value);
   const help = localized(field.description)
     ? `<details ${field.collapsed ? "" : "open"}><summary>${tr("填写说明", "Instructions")}</summary><div class="markdown">${md(localized(field.description))}</div></details>`
     : "";
@@ -269,8 +306,10 @@ async function fileResponse(path, options = {}) {
   return response;
 }
 async function uploadMultipart(path, fields, file, options = {}) {
-  const requestOptions = managementOptions(options);
+  const { isCurrent = () => true, ...rest } = options;
+  const requestOptions = managementOptions(rest);
   const limit = await uploadFileLimit();
+  if (!isCurrent()) throw new Error(tr("页面已切换，附件尚未提交。", "The page changed. Attachments were not submitted."));
   if (!file || file.size > limit)
     throw new Error(uploadLimitCaption());
   const body = new FormData();
@@ -322,7 +361,7 @@ async function uploadFile(definition, options = {}) {
   const bytes = Uint8Array.from(raw, (character) => character.charCodeAt(0));
   const file = new File([bytes], definition.filename || "attachment", { type: definition.content_type || "application/octet-stream" });
   if (!active()) throw new Error("文件操作上下文已失效。");
-  const result = await uploadMultipart(jobScope ? "/manage/files/upload" : "/files/upload", jobScope ? { job_id: definition.job_id, field_key: definition.field_key } : receiptCardBody(context, { field_key: definition.field_key }), file, options);
+  const result = await uploadMultipart(jobScope ? "/manage/files/upload" : "/files/upload", jobScope ? { job_id: definition.job_id, field_key: definition.field_key } : receiptCardBody(context, { field_key: definition.field_key }), file, { ...options, isCurrent: active });
   if (!active()) throw new Error("页面已切换，文件已上传但尚未提交任务。");
   return result;
 }
@@ -344,17 +383,48 @@ async function readFile(definition, options = {}) {
     raw += String.fromCharCode(...bytes.subarray(offset, offset + 16384));
   return { file_id: file.id, filename: file.filename, content_type: file.content_type, size: bytes.length, base64: btoa(raw) };
 }
+function clearDeliveryBlobs() {
+  for (const entry of deliveryBlobs.values()) if (entry.url) URL.revokeObjectURL(entry.url);
+  deliveryBlobs.clear();
+}
+async function deliveryBlob(file, context) {
+  for (const [key, entry] of deliveryBlobs) {
+    if (!entry.context.active()) {
+      if (entry.url) URL.revokeObjectURL(entry.url);
+      deliveryBlobs.delete(key);
+    }
+  }
+  let entry = deliveryBlobs.get(file.id);
+  if (!entry) {
+    entry = { context, url: null };
+    deliveryBlobs.set(file.id, entry);
+    entry.promise = (async () => {
+      const response = await fileResponse("/files/download", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(receiptCardBody(context, { file_id: file.id })) });
+      const blob = await response.blob();
+      if (!context.active() || deliveryBlobs.get(file.id) !== entry) return null;
+      const canonicalType = ["image/png", "image/jpeg", "image/webp"].includes(file.content_type) ? file.content_type : "application/octet-stream";
+      entry.url = URL.createObjectURL(new Blob([blob], { type: canonicalType }));
+      return entry.url;
+    })().catch((error) => { if (deliveryBlobs.get(file.id) === entry) deliveryBlobs.delete(file.id); throw error; });
+  }
+  return entry.promise;
+}
 async function downloadDeliveryFile(file) {
   const context = receiptRequestContext();
-  const response = await fileResponse("/files/download", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(receiptCardBody(context, { file_id: file.id })) });
-  const blob = await response.blob();
-  if (!context.active()) return;
-  const url = URL.createObjectURL(blob);
+  const url = await deliveryBlob(file, context);
+  if (!url || !context.active()) return;
   const anchor = document.createElement("a");
   anchor.href = url;
   anchor.download = file.filename;
   anchor.click();
-  setTimeout(() => URL.revokeObjectURL(url), 30000);
+}
+async function previewDeliveryImage(file) {
+  if (!["image/png", "image/jpeg", "image/webp"].includes(file.content_type)) throw new Error(tr("图片格式无效，请下载检查。", "Invalid image format. Download to inspect."));
+  const context = receiptRequestContext();
+  const url = await deliveryBlob(file, context);
+  if (!url || !context.active()) return;
+  const target = document.querySelector(`[data-delivery-preview="${file.id}"]`);
+  if (target) target.innerHTML = `<img class="product-cover" src="${esc(url)}" alt="${esc(file.filename)}">`;
 }
 function bindManagementDownloads(files, isCurrent, options) {
   document.querySelectorAll("[data-management-download]").forEach((button) => {
@@ -463,6 +533,7 @@ window.addEventListener("pagehide", () => { window.ExtoreTaskFlow?.dispose(app);
 
 async function home() {
   window.ExtoreTaskFlow?.dispose(app);
+  clearDeliveryBlobs();
   queueLoadId++;
   const generation = queueLoadId;
   const pathname = location.pathname;
@@ -649,13 +720,22 @@ async function revealReceipt(options = {}) {
       content.innerHTML = Object.entries(output)
         .map(([key, value]) => {
           const definition = fields.find((field) => field.key === key);
-          const file = (result.files || []).find((item) => item.id === value);
-          return `<div class="delivery-field"><h3>${esc(localized(definition?.label) || key)}</h3>${file ? `<button class="secondary" data-delivery-file="${esc(file.id)}">${tr("下载文件", "Download")} · ${esc(file.filename)}</button><p class="caption">${Math.ceil(file.size / 1024)} KiB</p>` : `<pre class="result">${esc(value)}</pre>`}</div>`;
+          const attachmentField = isAttachmentField(definition || {}) ? definition : { type: "file" };
+          const ids = fieldAttachmentIds(attachmentField, value);
+          const files = ids.map((id) => (result.files || []).find((item) => item.id === id && (!item.field_key || item.field_key === key))).filter(Boolean);
+          const images = ["image", "images"].includes(definition?.type);
+          const display = definition?.type === "boolean" && ["true", "false"].includes(value)
+            ? value === "true" ? tr("是", "Yes") : tr("否", "No")
+            : definition?.type === "select" ? localized((definition.options || []).find((option) => option.value === value)?.label) || value : value;
+          const contents = files.length ? files.map((file) => `<div>${images ? `<button class="secondary" data-delivery-image="${esc(file.id)}">${tr("查看图片", "View image")} · ${esc(file.filename)}</button><div data-delivery-preview="${esc(file.id)}"></div>` : ""}<button class="secondary" data-delivery-file="${esc(file.id)}">${tr("下载文件", "Download")} · ${esc(file.filename)}</button><p class="caption">${Math.ceil(file.size / 1024)} KiB</p></div>`).join("") : `<pre class="result">${esc(display)}</pre>`;
+          return `<div class="delivery-field"><h3>${esc(localized(definition?.label) || key)}</h3>${contents}</div>`;
         })
         .join("");
     }
-    for (const file of result.files || [])
+    for (const file of result.files || []) {
       on('[data-delivery-file="' + file.id + '"]', () => downloadDeliveryFile(file));
+      on('[data-delivery-image="' + file.id + '"]', () => previewDeliveryImage(file));
+    }
     if (viewPolicy === "once") $("#reveal")?.remove();
   }
   return result;
@@ -671,6 +751,7 @@ async function destroyReceipt(options = {}) {
   if (context.active()) {
     // Invalidate responses issued before deletion, even on this same receipt.
     receiptGeneration++;
+    clearDeliveryBlobs();
     const destroyedContext = receiptRequestContext(options);
     const content = $("#content");
     if (content) content.innerHTML = "";
@@ -762,7 +843,7 @@ function redemptionForm() {
     ? pending.map((item, index) => {
         const itemProduct = batchProduct(item);
         const variant = item.variant?.name ? ` · ${esc(item.variant.name)}` : "";
-        const copy = index === 0 && pending.length > 1 && itemProduct.parameters.some((field) => field.type !== "file")
+        const copy = index === 0 && pending.length > 1 && itemProduct.parameters.some((field) => !isAttachmentField(field))
           ? `<button type="button" class="secondary" id="copy-params">${tr("填到其余卡密", "Copy to the other codes")}</button>`
           : "";
         const saved = item.job?.state === "needs_input" ? item.job.params || {} : {};
@@ -786,11 +867,11 @@ function redemptionForm() {
   on("#copy-params", () => {
     const source = pending[0];
     for (const field of batchProduct(source).parameters) {
-      if (field.type === "file") continue;
+      if (isAttachmentField(field)) continue;
       const from = document.getElementById(`param-${source.card_id}-${field.key}`);
       if (!from) continue;
       for (const item of pending.slice(1)) {
-        if (!batchProduct(item).parameters.some((target) => target.key === field.key && target.type === field.type)) continue;
+        if (!batchProduct(item).parameters.some((target) => target.key === field.key && target.type === field.type && (field.type !== "select" || (target.options || []).some((option) => option.value === from.value)))) continue;
         const target = document.getElementById(`param-${item.card_id}-${field.key}`);
         if (target) target.value = from.value;
       }
@@ -798,16 +879,15 @@ function redemptionForm() {
     toast(tr("已填到其余卡密。文件仍需分别上传。", "Copied to the other codes. Files still need their own upload."));
   });
   bindBatchItems(started);
-  if ((pending ? pending.some((item) => batchProduct(item).parameters.some((field) => field.type === "file")) : p.parameters.some((field) => field.type === "file"))) void uploadFileLimit();
+  if ((pending ? pending.some((item) => batchProduct(item).parameters.some(isAttachmentField)) : p.parameters.some(isAttachmentField))) void uploadFileLimit();
   form(async () => {
     const context = receiptRequestContext();
     if (!pending) {
       const params = {};
       for (const field of p.parameters) {
         const input = document.getElementById("param-" + field.key);
-        if (field.type === "file") {
-          const file = input.files[0];
-          params[field.key] = file ? (await uploadMultipart("/files/upload", { token: context.token, field_key: field.key }, file)).id : document.getElementById("param-" + field.key + "-retained")?.value || "";
+        if (isAttachmentField(field)) {
+          params[field.key] = await uploadFieldFiles(input, field, document.getElementById("param-" + field.key + "-retained")?.value || "", "/files/upload", { token: context.token }, { isCurrent: context.active });
         } else params[field.key] = input.value;
         if (!context.active()) return;
       }
@@ -819,11 +899,8 @@ function redemptionForm() {
       const params = {};
       for (const field of batchProduct(item).parameters) {
         const input = document.getElementById(`param-${item.card_id}-${field.key}`);
-        if (field.type === "file") {
-          const file = input.files[0];
-          params[field.key] = file
-            ? (await uploadMultipart("/files/upload", { token: context.token, field_key: field.key, card_id: item.card_id }, file)).id
-            : document.getElementById(`param-${item.card_id}-${field.key}-retained`)?.value || "";
+        if (isAttachmentField(field)) {
+          params[field.key] = await uploadFieldFiles(input, field, document.getElementById(`param-${item.card_id}-${field.key}-retained`)?.value || "", "/files/upload", { token: context.token, card_id: item.card_id }, { isCurrent: context.active });
         } else params[field.key] = input.value;
         if (!context.active()) return;
       }
@@ -1359,9 +1436,9 @@ async function renderJobs(filter = "", requestedProductId = queueProductId, requ
     if (action === "succeed") {
       if (selectedRows.some((row) => JSON.stringify(row.outputs || selectedProduct.outputs || []) !== JSON.stringify(outputFields)))
         throw new Error("所选任务的交付定义不同，请分别交付。");
-      if (selected.length > 1 && outputFields.some((field) => field.type === "file"))
+      if (selected.length > 1 && outputFields.some(isAttachmentField))
         throw new Error("包含交付文件的任务请逐个完成，文件只属于自己的任务。");
-      if (outputFields.some((field) => field.type === "file")) {
+      if (outputFields.some(isAttachmentField)) {
         const query = new URLSearchParams({ product_id: productId, job_id: selected[0], limit: "1" });
         const fresh = await api("/manage/jobs?" + query);
         if (!dialogCurrent(generation)) return;
@@ -1375,28 +1452,36 @@ async function renderJobs(filter = "", requestedProductId = queueProductId, requ
     const uploadedOutputs = (field) => (selectedRows[0]?.files || []).filter((file) =>
       file.job_id === selected[0] && file.kind === "output" && file.field_key === field.key &&
       !file.consumed && file.available !== false && (file.attempt == null || file.attempt === selectedRows[0].attempt));
+    const existingOutputIds = (field, index) => field.type === "images"
+      ? [...document.querySelectorAll(`[name="batch-uploaded-${index}"]`)].filter((input) => input.checked).map((input) => input.value)
+      : [$("#batch-uploaded-" + index)?.value || ""].filter(Boolean);
     const fileField = (field, index) => {
       const attachments = uploadedOutputs(field);
-      return `${attachments.length ? `<label for="batch-uploaded-${index}">已上传附件</label><select id="batch-uploaded-${index}"><option value="">选择已上传附件，或选择新文件</option>${attachments.map((file) => `<option value="${esc(file.id)}">${esc(file.filename)} · ${Math.ceil(file.size / 1024)} KiB</option>`).join("")}</select><p id="batch-uploaded-id-${index}" class="caption mono"></p>${attachments.map((file) => `<p class="caption"><button type="button" class="secondary" data-management-download="${esc(file.id)}">检查附件：${esc(file.filename)}</button> · ${esc(file.id)}</p>`).join("")}` : ""}<input id="batch-output-${index}" type="file" ${field.required ? "required" : ""}><p class="caption" data-upload-limit>${uploadLimitCaption()}</p><p class="caption">文件只交付给此任务。选择新文件将替代已上传附件。</p>`;
+      const choices = !attachments.length ? "" : field.type === "images"
+        ? `<fieldset class="progress-checks"><legend>已上传图片（最多 ${field.max_items || 10} 张）</legend>${attachments.map((file) => `<label><input type="checkbox" name="batch-uploaded-${index}" value="${esc(file.id)}">${esc(file.filename)} · ${Math.ceil(file.size / 1024)} KiB</label>`).join("")}</fieldset>`
+        : `<label for="batch-uploaded-${index}">已上传附件</label><select id="batch-uploaded-${index}"><option value="">选择已上传附件，或选择新文件</option>${attachments.map((file) => `<option value="${esc(file.id)}">${esc(file.filename)} · ${Math.ceil(file.size / 1024)} KiB</option>`).join("")}</select>`;
+      return `${choices}${attachments.length ? `<p id="batch-uploaded-id-${index}" class="caption mono"></p>${attachments.map((file) => `<p class="caption"><button type="button" class="secondary" data-management-download="${esc(file.id)}">检查附件：${esc(file.filename)}</button> · ${esc(file.id)}</p>`).join("")}` : ""}${richFieldControl("batch-output-" + index, field)}<p class="caption">附件只交付给此任务。选择新附件将替代已勾选的附件。</p>`;
     };
     $("#batch-form").innerHTML =
-      `<div class="panel"><h2>${action === "succeed" ? "批量完成" : "标记失败"} · ${esc(selectedProduct.name)} · ${selected.length} 个任务</h2>${textarea("batch-message", "处理说明")}${action === "succeed" ? outputFields.map((output, i) => `<div class="field"><label for="batch-output-${i}">${esc(localized(output.label))}${output.required ? " *" : ""}</label>${output.type === "file" ? fileField(output, i) : output.type === "textarea" ? `<textarea id="batch-output-${i}" maxlength="100000" ${output.required ? "required" : ""}></textarea>` : `<input id="batch-output-${i}" type="${output.type}" ${output.type === "number" ? 'step="any"' : ""} maxlength="100000" ${output.required ? "required" : ""}>`}</div>${localized(output.description) ? `<details ${output.collapsed ? "" : "open"}><summary>交付说明</summary><div class="markdown">${md(localized(output.description))}</div></details>` : ""}`).join("") || '<p class="caption">此商品只交付服务状态，无需填写内容。</p>' : '<div class="checks"><label><input id="batch-retry" type="checkbox">已确认未交付，允许顾客重试</label></div>'}<div class="actions"><button id="batch-submit">确认提交</button><button id="batch-cancel" class="secondary">取消</button></div></div>`;
+      `<div class="panel"><h2>${action === "succeed" ? "批量完成" : "标记失败"} · ${esc(selectedProduct.name)} · ${selected.length} 个任务</h2>${textarea("batch-message", "处理说明")}${action === "succeed" ? outputFields.map((output, i) => `<div class="field"><label for="batch-output-${i}">${esc(localized(output.label))}${output.required ? " *" : ""}</label>${isAttachmentField(output) ? fileField(output, i) : richFieldControl("batch-output-" + i, output, "", { maximum: 100000 })}</div>${localized(output.description) ? `<details ${output.collapsed ? "" : "open"}><summary>交付说明</summary><div class="markdown">${md(localized(output.description))}</div></details>` : ""}`).join("") || '<p class="caption">此商品只交付服务状态，无需填写内容。</p>' : '<div class="checks"><label><input id="batch-retry" type="checkbox">已确认未交付，允许顾客重试</label></div>'}<div class="actions"><button id="batch-submit">确认提交</button><button id="batch-cancel" class="secondary">取消</button></div></div>`;
     on("#batch-cancel", closeBatchDialog);
     bindManagementDownloads(selectedRows.flatMap((row) => row.files || []), () => dialogCurrent(generation), requestOptions);
     for (const [index, field] of outputFields.entries()) {
-      if (action !== "succeed" || field.type !== "file") continue;
+      if (action !== "succeed" || !isAttachmentField(field)) continue;
       const input = $("#batch-output-" + index);
       const existing = $("#batch-uploaded-" + index);
       const updateSelection = () => {
-        input.required = !!field.required && !existing?.value;
+        const ids = existingOutputIds(field, index);
+        input.required = !!field.required && !ids.length;
         const label = $("#batch-uploaded-id-" + index);
-        if (label) label.textContent = existing?.value ? "已选择附件 ID：" + existing.value : "";
+        if (label) label.textContent = ids.length ? "已选择附件 ID：" + ids.join(", ") : "";
       };
       existing?.addEventListener("change", updateSelection);
+      document.querySelectorAll(`[name="batch-uploaded-${index}"]`).forEach((choice) => choice.addEventListener("change", updateSelection));
       input.addEventListener("change", updateSelection);
       updateSelection();
     }
-    if (action === "succeed" && outputFields.some((field) => field.type === "file")) void uploadFileLimit();
+    if (action === "succeed" && outputFields.some(isAttachmentField)) void uploadFileLimit();
     on("#batch-submit", async () => {
       if (!dialogCurrent(generation)) return;
       const output = {};
@@ -1405,12 +1490,12 @@ async function renderJobs(filter = "", requestedProductId = queueProductId, requ
         for (const [i, definition] of outputFields.entries()) {
           const input = $("#batch-output-" + i);
           if (!input.reportValidity()) return;
-          if (definition.type === "file") {
-            const file = input.files[0];
-            const existing = $("#batch-uploaded-" + i)?.value || "";
-            if (existing && !uploadedOutputs(definition).some((candidate) => candidate.id === existing))
+          if (isAttachmentField(definition)) {
+            const existing = existingOutputIds(definition, i);
+            if (existing.some((id) => !uploadedOutputs(definition).some((candidate) => candidate.id === id)))
               throw new Error("附件不属于此任务、字段或当前尝试，请刷新后重新选择。");
-            output[definition.key] = file ? (await uploadMultipart("/manage/files/upload", { job_id: selected[0], field_key: definition.key }, file, requestOptions)).id : existing;
+            const retained = definition.type === "images" ? JSON.stringify(existing) : existing[0] || "";
+            output[definition.key] = await uploadFieldFiles(input, definition, retained, "/manage/files/upload", { job_id: selected[0] }, { ...requestOptions, isCurrent: () => dialogCurrent(generation) });
           } else output[definition.key] = input.value;
           if (!dialogCurrent(generation)) return;
         }
@@ -1765,6 +1850,7 @@ async function staff() {
 }
 async function start() {
   window.ExtoreTaskFlow?.dispose(app);
+  clearDeliveryBlobs();
   accountView?.dispose();
   accountView = null;
   ownerCliApproval?.dispose();

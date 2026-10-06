@@ -2021,6 +2021,207 @@ test("receipt status suppresses a result when the active receipt changes during 
 });
 
 const attachmentId = "11111111-1111-4111-8111-111111111111";
+const secondAttachmentId = "22222222-2222-4222-8222-222222222222";
+const selectOptions = [
+  { value: "Basic.month-1", label: { en: "Basic month", "zh-CN": "基础版一个月" } },
+  { value: "Pro", label: { en: "Advanced" } },
+];
+const richFields = () => [
+  outputField("tier", { type: "select", options: selectOptions }),
+  outputField("approved", { type: "boolean" }),
+  outputField("photo", { type: "image" }),
+  outputField("photos", { type: "images", max_items: 2 }),
+  outputField("optional_photos", { type: "images", required: false }),
+  outputField("optional_approval", { type: "boolean", required: false }),
+  outputField("optional_tier", { type: "select", options: selectOptions, required: false }),
+];
+const richValues = () => ({
+  tier: "Basic.month-1", approved: "false", photo: attachmentId,
+  photos: JSON.stringify([attachmentId, secondAttachmentId]), optional_photos: "",
+  optional_approval: "", optional_tier: "",
+});
+
+test("rich product field definitions preserve stable option codes, localized labels and image limits", async (t) => {
+  const h = await harness(t, { context: { page: "admin", role: "admin", tab: "products" } });
+  const definition = { name: "Rich product", parameters: richFields(), outputs: richFields() };
+  assert.equal((await h.call("product_create", { product: definition, confirm: true })).ok, true);
+  assert.deepEqual(mutations(h)[0].body.parameters, definition.parameters);
+  assert.deepEqual(mutations(h)[0].body.outputs, definition.outputs);
+  const schema = plain(h.tool("product_create").inputSchema.properties.product.properties.parameters.items);
+  assert.ok(["select", "boolean", "image", "images"].every((type) => schema.properties.type.enum.includes(type)));
+  assert.equal(schema.properties.options.maxItems, 100);
+  assert.equal(schema.properties.options.items.properties.label.maxProperties, 20);
+  assert.equal(schema.properties.max_items.maximum, 20);
+});
+
+test("rich product field definitions reject malformed or ambiguous type-specific metadata before writing", async (t) => {
+  const h = await harness(t, { context: { page: "admin", role: "admin", tab: "products" } });
+  const option = selectOptions[0];
+  for (const field of [
+    outputField("tier", { type: "select" }),
+    outputField("tier", { type: "select", options: [] }),
+    outputField("tier", { type: "select", options: [option, option] }),
+    outputField("tier", { type: "select", options: [{ ...option, value: "Basic month" }] }),
+    outputField("tier", { type: "select", options: [{ ...option, value: "Basic\n" }] }),
+    outputField("tier", { type: "select", options: [{ ...option, value: "x".repeat(101) }] }),
+    outputField("tier", { type: "select", options: [{ ...option, label: {} }] }),
+    outputField("tier", { type: "select", options: [{ ...option, label: { en: " " } }] }),
+    outputField("tier", { type: "select", options: [{ ...option, label: { en: "x".repeat(201) } }] }),
+    outputField("tier", { type: "select", options: [{ ...option, label: { ["x".repeat(41)]: "Long locale" } }] }),
+    outputField("tier", { type: "select", options: [{ ...option, label: Object.fromEntries(Array.from({ length: 21 }, (_, i) => ["lang" + i, "Label"])) }] }),
+    outputField("tier", { type: "select", options: [{ ...option, token: "unknown" }] }),
+    outputField("tier", { type: "select", options: Array.from({ length: 101 }, (_, i) => ({ ...option, value: "v" + i })) }),
+    outputField("plain", { options: [option] }),
+    outputField("plain", { max_items: 2 }),
+    ...[0, 21, 1.5, "2", true, null].map((max_items) => outputField("photos", { type: "images", max_items })),
+  ]) rejected(await h.call("product_create", { product: { name: "Invalid", parameters: [field] }, confirm: true }));
+  assert.equal(mutations(h).length, 0);
+});
+
+test("verified rich redemption params remain strings and normalize complete image ID collections", async (t) => {
+  const p = product({ parameters: richFields() });
+  const h = await harness(t, { context: { page: "receipt", currentToken: "receipt-private", product: p } });
+  const schema = plain(h.tool("redemption_submit").inputSchema.properties.params.properties);
+  assert.deepEqual(schema.approved.enum, ["true", "false"]);
+  assert.deepEqual(schema.optional_approval.enum, ["", "true", "false"]);
+  assert.deepEqual(schema.tier.enum, ["Basic.month-1", "Pro"]);
+  assert.equal(schema.photos.type, "string");
+  assert.equal(schema.photo.maxLength, 36);
+  const values = { ...richValues(), photos: ` [ "${attachmentId}", "${secondAttachmentId}" ] ` };
+  assert.equal((await h.call("redemption_submit", { params: values, confirm: true })).ok, true);
+  assert.deepEqual(plain(h.calls.find((call) => call.name === "redeem").args[0]), {
+    ...richValues(), optional_photos: "[]",
+  });
+  assert.equal(typeof values.approved, "string");
+});
+
+test("rich redemption rejects labels, non-string booleans, URLs and invalid image collections without submitting", async (t) => {
+  const p = product({ parameters: richFields() });
+  const h = await harness(t, { context: { page: "receipt", currentToken: "receipt-private", product: p } });
+  for (const patch of [
+    { tier: "Basic month" }, { tier: "Unknown" }, { approved: false }, { approved: "FALSE" }, { approved: " false " },
+    { photo: "https://files.test/image.png" }, { photo: "data:image/png;base64,aGVsbG8=" },
+    { photos: [attachmentId] }, { photos: attachmentId }, { photos: "{}" }, { photos: "null" },
+    { photos: "[]" }, { photos: "" }, { photos: '["https://files.test/image.png"]' },
+    { photos: JSON.stringify([attachmentId, attachmentId]) },
+    { photos: JSON.stringify([attachmentId, secondAttachmentId, "33333333-3333-4333-8333-333333333333"]) },
+    { photos: JSON.stringify([attachmentId, 1]) },
+    { optional_approval: " " }, { optional_tier: "Not available" },
+  ]) rejected(await h.call("redemption_submit", { params: { ...richValues(), ...patch }, confirm: true }));
+  assert.equal(h.calls.some((call) => call.name === "redeem"), false);
+});
+
+test("image collection parameters enforce default ten and permit an explicit twenty-image limit", async (t) => {
+  const ids = Array.from({ length: 20 }, (_, i) => `${String(i + 1).padStart(8, "0")}-1111-4111-8111-111111111111`);
+  for (const max_items of [undefined, 20]) {
+    const p = product({ parameters: [outputField("photos", { type: "images", ...(max_items ? { max_items } : {}) })] });
+    const h = await harness(t, { context: { page: "receipt", currentToken: "receipt-private", product: p } });
+    const length = max_items || 10;
+    assert.equal((await h.call("redemption_submit", { params: { photos: JSON.stringify(ids.slice(0, length)) }, confirm: true })).ok, true);
+    if (!max_items) rejected(await h.call("redemption_submit", { params: { photos: JSON.stringify(ids.slice(0, 11)) }, confirm: true }));
+  }
+});
+
+test("batch rich redemption validates every card's own option codes and image-count snapshot", async (t) => {
+  const fields = (value, max_items) => [
+    outputField("tier", { type: "select", options: [{ value, label: { en: value } }] }),
+    outputField("photos", { type: "images", max_items }),
+  ];
+  const old = product({ parameters: fields("Old", 2) });
+  const current = product({ parameters: fields("New", 1) });
+  const receipt = { batch: true, product: current, items: [
+    { card_id: "c1", product: old, job: null }, { card_id: "c2", product: current, job: null },
+  ] };
+  const h = await harness(t, { context: { page: "receipt", product: current, currentToken: "BATCH-PRIVATE", batch: true }, receipt });
+  const items = [
+    { card_id: "c1", params: { tier: "Old", photos: ` ["${attachmentId}", "${secondAttachmentId}"] ` } },
+    { card_id: "c2", params: { tier: "New", photos: JSON.stringify([attachmentId]) } },
+  ];
+  assert.equal((await h.call("redemption_submit", { items, confirm: true })).ok, true);
+  assert.deepEqual(plain(h.calls.find((call) => call.name === "redeem").args[0]), [
+    { ...items[0], params: { ...items[0].params, photos: JSON.stringify([attachmentId, secondAttachmentId]) } }, items[1],
+  ]);
+  for (const invalid of [
+    [{ ...items[0], params: { ...items[0].params, tier: "New" } }],
+    [items[0], { ...items[1], params: { ...items[1].params, photos: JSON.stringify([attachmentId, secondAttachmentId]) } }],
+  ]) rejected(await h.call("redemption_submit", { items: invalid, confirm: true }));
+  assert.equal(h.calls.filter((call) => call.name === "redeem").length, 1);
+});
+
+test("rich completion validates the task's original options and image limits and normalizes string output", async (t) => {
+  const current = product({ outputs: [outputField("tier", { type: "select", options: [{ value: "New", label: { en: "New" } }] })] });
+  const h = await harness(t, {
+    context: staffContext({ queueProduct: current }),
+    jobs: [{ id: "j1", product_id: "p1", delivery: "content", outputs: richFields() }],
+  });
+  const base = { product_id: "p1", ids: ["j1"], confirm: true };
+  for (const patch of [
+    { tier: "New" }, { approved: "yes" }, { photo: "aGVsbG8=" },
+    { photos: "[]" }, { photos: JSON.stringify([attachmentId, attachmentId]) },
+    { photos: JSON.stringify([attachmentId, secondAttachmentId, "33333333-3333-4333-8333-333333333333"]) },
+  ]) rejected(await h.call("jobs_complete", { ...base, output: { ...richValues(), ...patch } }));
+  assert.equal(mutations(h).length, 0);
+  assert.equal((await h.call("jobs_complete", { ...base, output: { ...richValues(), photos: ` ["${attachmentId}", "${secondAttachmentId}"] ` } })).ok, true);
+  assert.deepEqual(mutations(h)[0].body.output, { ...richValues(), optional_photos: "[]" });
+});
+
+test("rich output constraint changes require fulfillment permission but option labels remain presentation-only", async (t) => {
+  for (const [before, after] of [
+    [outputField("tier", { type: "select", options: selectOptions }), outputField("tier", { type: "select", options: [selectOptions[0]] })],
+    [outputField("photos", { type: "images", max_items: 2 }), outputField("photos", { type: "images", max_items: 3 })],
+  ]) {
+    const h = await harness(t, { context: staffContext({ tab: "products", permissions: ["product.edit"] }), products: [product({ outputs: [before] })] });
+    rejected(await h.call("product_update", { product_id: "p1", changes: { outputs: [after] }, confirm: true }), "forbidden");
+    assert.equal(mutations(h).length, 0);
+  }
+  const before = outputField("tier", { type: "select", options: selectOptions });
+  const after = { ...before, options: [...selectOptions].reverse().map((option) => ({ ...option, label: { en: "Updated " + option.value } })) };
+  const h = await harness(t, { context: staffContext({ tab: "products", permissions: ["product.edit"] }), products: [product({ outputs: [before] })] });
+  assert.equal((await h.call("product_update", { product_id: "p1", changes: { outputs: [after] }, confirm: true })).ok, true);
+  assert.deepEqual(mutations(h)[0].body.outputs, [after]);
+});
+
+test("batch completion rejects differing rich snapshot constraints before any mutation", async (t) => {
+  for (const [first, second] of [
+    [outputField("tier", { type: "select", options: selectOptions }), outputField("tier", { type: "select", options: [selectOptions[0]] })],
+    [outputField("photos", { type: "images", max_items: 2, required: false }), outputField("photos", { type: "images", max_items: 3, required: false })],
+  ]) {
+    const h = await harness(t, {
+      context: staffContext({ queueProduct: product({ outputs: [first] }) }),
+      jobs: [{ id: "j1", product_id: "p1", delivery: "content", outputs: [first] },
+        { id: "j2", product_id: "p1", delivery: "content", outputs: [second] }],
+    });
+    rejected(await h.call("jobs_complete", { product_id: "p1", ids: ["j1", "j2"], output: { [first.key]: first.type === "select" ? "Basic.month-1" : "[]" }, confirm: true }));
+    assert.equal(mutations(h).length, 0);
+  }
+});
+
+test("image and image collection references stay bound to one task while empty optional collections permit batch status", async (t) => {
+  for (const type of ["image", "images"]) {
+    const p = product({ outputs: [outputField("photo", { type, required: false })] });
+    const h = await harness(t, { context: staffContext({ queueProduct: p }) });
+    const base = { product_id: "p1", ids: ["j1", "j2"], confirm: true };
+    rejected(await h.call("jobs_complete", { ...base, output: { photo: type === "image" ? attachmentId : JSON.stringify([attachmentId]) } }));
+    assert.equal(mutations(h).length, 0);
+    assert.equal((await h.call("jobs_complete", { ...base, output: { photo: "" } })).ok, true);
+    assert.equal(mutations(h)[0].body.output.photo, type === "images" ? "[]" : "");
+  }
+});
+
+test("malformed rich job snapshots fail closed rather than borrowing current product definitions", async (t) => {
+  for (const field of [
+    outputField("tier", { type: "select", options: [] }),
+    outputField("tier", { type: "select", options: [selectOptions[0], selectOptions[0]] }),
+    outputField("photos", { type: "images", max_items: 21 }),
+    outputField("photos", { type: "image", max_items: 2 }),
+  ]) {
+    const h = await harness(t, { context: staffContext({ queueProduct: product({ outputs: richFields() }) }),
+      jobs: [{ id: "j1", product_id: "p1", delivery: "content", outputs: [field] }] });
+    rejected(await h.call("jobs_complete", { product_id: "p1", ids: ["j1"], output: { [field.key]: "Pro" }, confirm: true }), "unavailable");
+    assert.equal(mutations(h).length, 0);
+  }
+});
+
 const attachment = (overrides = {}) => ({
   id: attachmentId, job_id: "j1", field_key: "document", kind: "input", filename: "hello.txt",
   content_type: "text/plain", size: 5, created: 123, consumed: 0, ...overrides,
@@ -2037,6 +2238,59 @@ const attachmentAPI = (job, files, auth = { role: "admin" }) => async (url) => {
   if (url === "/manage/files?job_id=j1") return files;
   assert.fail("Unexpected attachment request: " + url);
 };
+
+test("image upload tools retain private receipt and claimed-task boundaries for single images and collections", async (t) => {
+  const base64 = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVQIHWP4z8DwHwAFgAI/ScLbtAAAAABJRU5ErkJggg==";
+  const size = Buffer.from(base64, "base64").length;
+  for (const type of ["image", "images"]) {
+    const p = product({ parameters: [outputField("photo", { type })], outputs: [outputField("photo", { type })] });
+    const input = { field_key: "photo", filename: "photo.png", content_type: "image/png", base64, confirm: true };
+    const customer = await harness(t, {
+      context: { page: "receipt", currentToken: "receipt-private", product: p },
+      actions: { uploadFile: async (definition) => {
+        assert.equal(definition.scope, "customer");
+        assert.equal(definition.content_type, "image/png");
+        assert.equal(Object.hasOwn(definition, "currentToken"), false);
+        return attachment({ job_id: null, field_key: "photo", filename: "photo.png", content_type: "image/png", size, token: "RECEIPT-TOKEN" });
+      } },
+    });
+    assert.match(customer.tool("redemption_file_upload").description, /unique ID array as a JSON string/);
+    assert.equal((await customer.call("redemption_file_upload", input)).ok, true);
+    rejected(await customer.call("redemption_file_upload", { ...input, field_key: "unknown" }));
+    assert.equal(customer.calls.filter((call) => call.name === "uploadFile").length, 1);
+
+    const manager = await harness(t, {
+      context: { page: "admin", role: "admin", tab: "jobs", queueProductId: "p1", queueProduct: product({ outputs: [outputField("photo")] }) },
+      api: attachmentAPI({ id: "j1", product_id: "p1", state: "processing", claimed_by: "owner", delivery: "content", outputs: p.outputs }, []),
+      actions: { uploadFile: async (definition) => {
+        assert.equal(definition.scope, "job");
+        assert.equal(definition.product_id, "p1");
+        assert.equal(definition.job_id, "j1");
+        return attachment({ kind: "output", field_key: "photo", filename: "photo.png", content_type: "image/png", size });
+      } },
+    });
+    assert.equal((await manager.call("jobs_file_upload", { product_id: "p1", job_id: "j1", ...input })).ok, true);
+    rejected(await manager.call("jobs_file_upload", { product_id: "p1", job_id: "j1", ...input, field_key: "unknown" }));
+    assert.equal(manager.calls.filter((call) => call.name === "uploadFile").length, 1);
+  }
+});
+
+test("processor discovery carries rich input/output constraints as untrusted schema metadata", async (t) => {
+  const fields = richFields();
+  const h = await harness(t, {
+    context: { page: "admin", role: "admin", tab: "products" },
+    api: async (url) => {
+      if (url === "/auth/status") return { role: "admin" };
+      if (url === "/admin/processors") return [{ id: "image_processor", parameters: fields, outputs: fields, configuration: [] }];
+      assert.fail("Unexpected processor discovery: " + url);
+    },
+  });
+  const result = await h.call("processors_list", {});
+  assert.equal(result.ok, true);
+  assert.equal(result.untrustedData, true);
+  assert.deepEqual(plain(result.data[0].parameters[0].options), selectOptions);
+  assert.equal(result.data[0].outputs.find((field) => field.type === "images").max_items, 2);
+});
 
 test("file tools follow verified input schemas and separately delegated queue permissions", async (t) => {
   const p = product({ parameters: [outputField("document", { type: "file" })], outputs: [outputField("document", { type: "file" })] });
@@ -2782,4 +3036,12 @@ test("record cleanup tools preview by default and restrict destructive cleanup t
   rejected(await staff.call("staff_cleanup", { product_id: "p2", confirm: true }), "forbidden");
   assert.equal(mutations(staff).length, 0);
   assert.ok(staff.names().includes("extore_staff_cleanup_preview"));
+});
+
+test("product tools retain stock mode alongside rich field type schemas", async (t) => {
+  const h = await harness(t, { context: { page: "admin", role: "admin", tab: "products" } });
+  const schema = h.tool("product_create").inputSchema.properties.product;
+  assert.equal(schema.properties.mode.enum.includes("stock"), true);
+  const field = schema.properties.parameters.items;
+  for (const kind of ["select", "boolean", "image", "images"]) assert.equal(field.properties.type.enum.includes(kind), true);
 });

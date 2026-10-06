@@ -77,6 +77,10 @@
     ["textarea", "多行文本"],
     ["number", "数字"],
     ["file", "文件（单个文件，最多 20 MiB）"],
+    ["select", "下拉选项"],
+    ["boolean", "是 / 否"],
+    ["image", "单张图片（PNG、JPEG、WebP）"],
+    ["images", "图片集合（最多 20 张）"],
   ];
   const field = (id, label, value = "", type = "text", attributes = "") =>
     `<div class="field"><label for="${id}">${escape(label)}</label><input id="${id}" type="${type}" value="${escape(value)}" ${attributes}></div>`;
@@ -475,8 +479,8 @@
       }
     };
     drawProgressSteps();
-    const captureFields = (prefix, fields) =>
-      fields.map((definition, index) => ({
+    const captureFields = (prefix, fields) => fields.map((definition, index) => {
+      const next = {
         ...definition,
         key: $("#" + prefix + "-key-" + index).value,
         label: parseObject(prefix + "-label-" + index, "显示名称"),
@@ -484,7 +488,26 @@
         type: $("#" + prefix + "-type-" + index).value,
         required: $("#" + prefix + "-required-" + index).checked,
         collapsed: $("#" + prefix + "-collapsed-" + index).checked,
-      }));
+      };
+      if (next.type === "select") {
+        let choices;
+        try { choices = JSON.parse($("#" + prefix + "-options-" + index).value); }
+        catch { throw new Error("下拉选项须为 JSON 数组，请检查格式。"); }
+        if (!Array.isArray(choices) || !choices.length || choices.length > 100 || choices.some((choice) =>
+          !choice || typeof choice !== "object" || Array.isArray(choice) || Object.keys(choice).some((key) => !["value", "label"].includes(key)) ||
+          typeof choice.value !== "string" || !/^[A-Za-z0-9][A-Za-z0-9_.-]{0,99}$/.test(choice.value) ||
+          !choice.label || typeof choice.label !== "object" || Array.isArray(choice.label) || !Object.keys(choice.label).length || Object.keys(choice.label).length > 20 ||
+          Object.entries(choice.label).some(([locale, text]) => !locale || locale.length > 40 || typeof text !== "string" || !text.trim() || text.length > 200)) || new Set(choices.map((choice) => choice.value)).size !== choices.length)
+          throw new Error("请设置 1–100 个下拉选项，每项包含唯一的 value 和多语言 label。");
+        next.options = choices;
+      } else delete next.options;
+      if (next.type === "images") {
+        const maximum = Number($("#" + prefix + "-max-items-" + index).value);
+        if (!Number.isInteger(maximum) || maximum < 1 || maximum > 20) throw new Error("图片集合数量须为 1–20 的整数。");
+        next.max_items = maximum;
+      } else delete next.max_items;
+      return next;
+    });
     const captureCustom = () => {
       if (!["script", "stock"].includes(previousMode)) {
         parameters = captureFields("f", parameters);
@@ -507,9 +530,20 @@
       container.innerHTML = fields
         .map(
           (definition, index) =>
-            `<div class="parameter"><h3>${prefix === "f" ? "参数" : "输出字段"} ${index + 1}${readonly ? "" : `<button type="button" class="danger" data-remove-${prefix}="${index}">删除</button>`}</h3><div class="grid">${field(prefix + "-key-" + index, "字段代码名", definition.key, "text", readonly ? "disabled" : "")}${select(prefix + "-type-" + index, "字段类型", inputTypes, definition.type, readonly ? "disabled" : "")}</div>${textarea(prefix + "-label-" + index, "显示名称（语言 → 文本 JSON）", JSON.stringify(definition.label, null, 2), readonly ? "disabled" : "")}${textarea(prefix + "-description-" + index, "Markdown 教程（语言 → 文本 JSON）", JSON.stringify(definition.description || {}, null, 2), readonly ? "disabled" : "")}<div class="checks"><label><input id="${prefix}-required-${index}" type="checkbox" ${definition.required ? "checked" : ""} ${readonly ? "disabled" : ""}>必填</label><label><input id="${prefix}-collapsed-${index}" type="checkbox" ${definition.collapsed ? "checked" : ""} ${readonly ? "disabled" : ""}>默认折叠教程</label></div></div>`,
+            `<div class="parameter"><h3>${prefix === "f" ? "参数" : "输出字段"} ${index + 1}${readonly ? "" : `<button type="button" class="danger" data-remove-${prefix}="${index}">删除</button>`}</h3><div class="grid">${field(prefix + "-key-" + index, "字段代码名", definition.key, "text", readonly ? "disabled" : "")}${select(prefix + "-type-" + index, "字段类型", inputTypes, definition.type, readonly ? "disabled" : "")}</div>${textarea(prefix + "-label-" + index, "显示名称（语言 → 文本 JSON）", JSON.stringify(definition.label, null, 2), readonly ? "disabled" : "")}${textarea(prefix + "-description-" + index, "Markdown 教程（语言 → 文本 JSON）", JSON.stringify(definition.description || {}, null, 2), readonly ? "disabled" : "")}<div id="${prefix}-options-section-${index}">${textarea(prefix + "-options-" + index, "下拉选项（JSON 数组）", JSON.stringify(definition.options || [{ value: "basic", label: { "zh-CN": "基础版", en: "Basic" } }], null, 2), readonly ? "disabled" : "")}<p class="caption">value 是传给处理程序的固定值；label 是顾客看到的名称。例如 [{"value":"basic","label":{"zh-CN":"基础版"}}]。</p></div><div id="${prefix}-images-section-${index}">${field(prefix + "-max-items-" + index, "最多图片数量", definition.max_items || 10, "number", `min="1" max="20" step="1" ${readonly ? "disabled" : ""}`)}<p class="caption">支持 PNG、JPEG、WebP；每张图片分别受上传大小限制。</p></div><div class="checks"><label><input id="${prefix}-required-${index}" type="checkbox" ${definition.required ? "checked" : ""} ${readonly ? "disabled" : ""}>必填</label><label><input id="${prefix}-collapsed-${index}" type="checkbox" ${definition.collapsed ? "checked" : ""} ${readonly ? "disabled" : ""}>默认折叠教程</label></div></div>`,
         )
         .join("");
+      fields.forEach((definition, index) => {
+        const type = $("#" + prefix + "-type-" + index);
+        const updateType = () => {
+          $("#" + prefix + "-options-section-" + index).hidden = type.value !== "select";
+          $("#" + prefix + "-images-section-" + index).hidden = type.value !== "images";
+          $("#" + prefix + "-options-" + index).disabled = readonly || type.value !== "select";
+          $("#" + prefix + "-max-items-" + index).disabled = readonly || type.value !== "images";
+        };
+        type.addEventListener("change", updateType);
+        updateType();
+      });
       all(`[data-remove-${prefix}]`).forEach((node) =>
         node.addEventListener("click", () =>
           perform(() => {

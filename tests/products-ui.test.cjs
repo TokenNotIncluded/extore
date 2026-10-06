@@ -853,3 +853,67 @@ test("products cannot add a thirty-first processing step", async () => {
   assert.equal(p.node("#ps-id-30"), null);
   assert.match(p.node("#error").textContent, /最多支持 30 个处理步骤/);
 });
+
+
+test("rich field definitions keep stable choices and bounded image collections", async () => {
+  const p = page();
+  await editProduct(p, product({ parameters: [fieldDefinition("tier")], outputs: [fieldDefinition("pictures", "images")] }));
+  p.node("#f-type-0").value = "select";
+  await p.node("#f-type-0").emit("change");
+  assert.equal(p.node("#f-options-section-0").hidden, false);
+  assert.equal(p.node("#f-images-section-0").hidden, true);
+  assert.equal(p.node("#f-options-0").disabled, false);
+  assert.equal(p.node("#f-max-items-0").disabled, true);
+  const choices = [{ value: "basic", label: { "zh-CN": "基础版", en: "Basic" } }, { value: "pro", label: { "zh-CN": "加强版" } }];
+  p.node("#f-options-0").value = JSON.stringify(choices);
+  p.node("#o-max-items-0").value = "4";
+  p.node("#product-form").emit("submit");
+  const body = JSON.parse(JSON.stringify(p.requests[1].body));
+  assert.deepEqual(body.parameters[0].options, choices);
+  assert.equal(body.outputs[0].max_items, 4);
+  assert.equal(body.outputs[0].type, "images");
+  assert.equal(Object.hasOwn(body.parameters[0], "max_items"), false);
+  assert.equal(Object.hasOwn(body.outputs[0], "options"), false);
+});
+
+test("changing rich field types removes obsolete metadata while preserving the draft", async () => {
+  const p = page();
+  await editProduct(p, product({ parameters: [{ ...fieldDefinition("tier", "select"), options: [{ value: "basic", label: { "zh-CN": "基础版" } }] }], outputs: [{ ...fieldDefinition("pictures", "images"), max_items: 3 }] }));
+  p.node("#f-type-0").value = "boolean";
+  await p.node("#f-type-0").emit("change");
+  p.node("#o-type-0").value = "image";
+  await p.node("#o-type-0").emit("change");
+  assert.equal(p.node("#f-options-section-0").hidden, true);
+  assert.equal(p.node("#o-images-section-0").hidden, true);
+  assert.equal(p.node("#o-max-items-0").disabled, true);
+  assert.equal(p.node("#f-options-0").disabled, true);
+  p.node("#product-form").emit("submit");
+  const body = JSON.parse(JSON.stringify(p.requests[1].body));
+  assert.equal(body.parameters[0].type, "boolean");
+  assert.equal(body.outputs[0].type, "image");
+  assert.equal(Object.hasOwn(body.parameters[0], "options"), false);
+  assert.equal(Object.hasOwn(body.outputs[0], "max_items"), false);
+});
+
+test("invalid rich definitions block saving and keep typed schema drafts", async () => {
+  for (const options of ["not JSON", "[]", '[{"value":"same","label":{"zh-CN":"一"}},{"value":"same","label":{"zh-CN":"二"}}]', '[{"value":"不能用显示名称","label":{"zh-CN":"名称"}}]']) {
+    const p = page();
+    await editProduct(p, product({ parameters: [fieldDefinition("tier", "select")] }));
+    p.node("#f-options-0").value = options;
+    p.node("#p-name").value = "保留的商品草稿";
+    await p.node("#product-form").emit("submit");
+    assert.equal(p.requests.length, 1);
+    assert.match(p.node("#error").textContent, /下拉选项/);
+    assert.equal(p.node("#f-options-0").value, options);
+    assert.equal(p.node("#p-name").value, "保留的商品草稿");
+  }
+  for (const limit of ["0", "21", "2.5", ""]) {
+    const p = page();
+    await editProduct(p, product({ outputs: [fieldDefinition("pictures", "images")] }));
+    p.node("#o-max-items-0").value = limit;
+    await p.node("#product-form").emit("submit");
+    assert.equal(p.requests.length, 1);
+    assert.match(p.node("#error").textContent, /1–20/);
+    assert.equal(p.node("#o-max-items-0").value, limit);
+  }
+});

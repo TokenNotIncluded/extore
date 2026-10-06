@@ -49,6 +49,7 @@ test("fresh output drafts can be reviewed and selected without uploading again",
   assert.match(page.node("#batch-uploaded-id-0").textContent, /server-draft/);
   page.node("#batch-message").value = "检查后交付";
   const submitting = page.node("#batch-submit").emit("click");
+  await flush();
   assert.equal(page.requests[3].url, "/api/manage/batch");
   assert.deepEqual(page.requests[3].body.output, { document: "server-draft" });
   assert.equal(page.requests.filter((request) => request.url.includes("/files/upload")).length, 0);
@@ -87,6 +88,7 @@ test("two prepared files for one job bind independently to their declared output
   assert.equal(page.node("#batch-output-0").required, false);
   assert.equal(page.node("#batch-output-1").required, false);
   const submitting = page.node("#batch-submit").emit("click");
+  await flush();
   assert.equal(page.requests[3].url, "/api/manage/batch");
   assert.deepEqual(page.requests[3].body.output, { document: "document-id", slides: "slides-id" });
   page.requests[3].respond({ ok: true });
