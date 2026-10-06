@@ -228,8 +228,10 @@ def _exchange(raw):
         for index, code in enumerate(codes):
             suffix = _suffix(code)
             try:
-                key = card_digest(code)
-            except UnicodeError:
+                from .proxy_routes import unwrap_local_code
+
+                key = card_digest(unwrap_local_code(c, code))
+            except (UnicodeError, HTTPException):
                 items.append(
                     _base(index, suffix, error="卡密格式无效", http_status=400)
                 )

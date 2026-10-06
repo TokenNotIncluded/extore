@@ -116,6 +116,7 @@ def init():
             flow_adapter,
             flow_worker,
             private_worker,
+            proxy_routes,
             task_flow,
             text_cards,
         )
@@ -126,6 +127,7 @@ def init():
             flow_adapter,
             flow_worker,
             private_worker,
+            proxy_routes,
             automation,
         ):
             module.init_schema(c)

@@ -199,6 +199,11 @@ def issue_text_cards(c, pid, text, *, variant_id="default", label="", expires=No
         "SELECT batch_id FROM card_meta WHERE card_id=(SELECT id FROM cards WHERE digest=?)",
         (card_digest(codes[0]),),
     ).fetchone()
+    from .proxy_routes import default_issuer_route, wrap_issued_codes
+
+    codes = wrap_issued_codes(c, codes, default_issuer_route(c, source["shop_id"]))
+    for item, code in zip(items, codes, strict=True):
+        item["code"] = code
     return {
         "codes": codes,
         "items": items,
