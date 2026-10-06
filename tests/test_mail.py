@@ -203,6 +203,8 @@ class FakeSMTP:
     calls = None
     fail_tls = False
     refused = None
+    quit_error = None
+    send_error = None
 
     def __init__(self, host, port, *, timeout, context=None):
         self.calls.append(("connect", host, port, timeout, context))
@@ -212,9 +214,12 @@ class FakeSMTP:
 
     def __exit__(self, *args):
         self.calls.append(("close",))
+        if self.quit_error is not None:
+            raise self.quit_error
 
     def ehlo(self):
         self.calls.append(("ehlo",))
+        return 250, b"OK"
 
     def starttls(self, *, context):
         self.calls.append(("starttls", context))
@@ -226,6 +231,8 @@ class FakeSMTP:
 
     def send_message(self, message, *, from_addr, to_addrs):
         self.calls.append(("send", message, from_addr, to_addrs))
+        if self.send_error is not None:
+            raise self.send_error
         return self.refused or {}
 
 
@@ -235,6 +242,8 @@ def smtp(monkeypatch):
     monkeypatch.setattr(FakeSMTP, "calls", calls)
     monkeypatch.setattr(FakeSMTP, "fail_tls", False)
     monkeypatch.setattr(FakeSMTP, "refused", None)
+    monkeypatch.setattr(FakeSMTP, "quit_error", None)
+    monkeypatch.setattr(FakeSMTP, "send_error", None)
     monkeypatch.setattr(smtplib, "SMTP", FakeSMTP)
     monkeypatch.setattr(smtplib, "SMTP_SSL", FakeSMTP)
     return calls
@@ -278,6 +287,173 @@ def test_implicit_tls_uses_verified_context_from_the_first_connection(smtp):
     assert context.verify_mode == ssl.CERT_REQUIRED and context.check_hostname
 
 
+@pytest.mark.parametrize(
+    "failure",
+    [
+        smtplib.SMTPResponseException(550, b"QUIT failed"),
+        smtplib.SMTPResponseException(421, b"QUIT failed"),
+        smtplib.SMTPServerDisconnected("Disconnected during QUIT"),
+        OSError("Connection cleanup failed"),
+    ],
+)
+def test_smtp_quit_failure_after_acceptance_does_not_resend(smtp, monkeypatch, failure):
+    configure()
+    message_id = enqueue()
+    monkeypatch.setattr(FakeSMTP, "quit_error", failure)
+    assert asyncio.run(mail.process_outbox_once()) is True
+    current = row(message_id)
+    assert current["state"] == "delivered" and current["attempts"] == 1
+    assert current["payload"] == current["error"] == ""
+    assert asyncio.run(mail.process_outbox_once()) is False
+    assert sum(call[0] == "send" for call in smtp) == 1
+
+
+def test_non_io_exit_errors_are_not_swallowed(smtp, monkeypatch):
+    failure = ValueError("Unexpected error")
+    monkeypatch.setattr(FakeSMTP, "quit_error", failure)
+    with pytest.raises(type(failure), match=str(failure)):
+        mail._send(
+            CONFIG, {"to": RECIPIENT, "subject": "Subject", "body": TOKEN}, "test"
+        )
+
+
+def test_accepted_mail_is_not_resent_when_stdlib_smtp_close_has_an_io_failure(
+    monkeypatch,
+):
+    configure(mode="ssl", port=465, username="", password="")
+    message_id = enqueue()
+    # A real, disconnected stdlib instance exercises __exit__/docmd/close without
+    # creating a socket. Only protocol I/O and the accepted send are simulated.
+    server = smtplib.SMTP_SSL(local_hostname="extore.test")
+    commands, sent, closed = [], [], []
+    replies = iter([(250, b"extore.test"), (221, b"Bye")])
+    monkeypatch.setattr(server, "putcmd", lambda *args: commands.append(args))
+    monkeypatch.setattr(server, "getreply", lambda: next(replies))
+    monkeypatch.setattr(
+        server, "send_message", lambda *args, **kwargs: sent.append(kwargs) or {}
+    )
+
+    class BrokenReader:
+        def close(self):
+            closed.append(True)
+            raise OSError("Synthetic close failure")
+
+    server.file = BrokenReader()
+    monkeypatch.setattr(smtplib, "SMTP_SSL", lambda *args, **kwargs: server)
+    assert asyncio.run(mail.process_outbox_once()) is True
+    current = row(message_id)
+    assert current["state"] == "delivered" and current["attempts"] == 1
+    assert current["payload"] == current["error"] == ""
+    assert [command[0].lower() for command in commands] == ["ehlo", "quit"]
+    assert len(sent) == len(closed) == 1
+    assert server.file is server.sock is None
+    assert asyncio.run(mail.process_outbox_once()) is False
+    assert len(sent) == 1
+
+
+@pytest.mark.parametrize("code", [421, 550])
+def test_stdlib_ehlo_rejection_is_classified_before_tls_or_authentication(
+    monkeypatch, code
+):
+    configure()
+    message_id = enqueue()
+    server = smtplib.SMTP(local_hostname="extore.test")
+    commands = []
+    replies = iter([(code, b"Rejected"), (221, b"Bye")])
+    monkeypatch.setattr(server, "putcmd", lambda *args: commands.append(args))
+    monkeypatch.setattr(server, "getreply", lambda: next(replies))
+    monkeypatch.setattr(smtplib, "SMTP", lambda *args, **kwargs: server)
+    assert asyncio.run(mail.process_outbox_once()) is True
+    current = row(message_id)
+    assert current["state"] == ("dead" if code == 550 else "pending")
+    assert current["attempts"] == 1 and current["error"] == "transport_failed"
+    assert [command[0].lower() for command in commands] == ["ehlo", "quit"]
+
+
+@pytest.mark.parametrize("code", [451, 554, None, True, "550", 200])
+def test_post_tls_ehlo_rejection_cannot_proceed_to_credentials(smtp, monkeypatch, code):
+    configure()
+    message_id = enqueue()
+
+    def ehlo(self):
+        self.calls.append(("ehlo",))
+        if sum(call[0] == "ehlo" for call in self.calls) == 1:
+            return 250, b"OK"
+        return code, b"Rejected"
+
+    monkeypatch.setattr(FakeSMTP, "ehlo", ehlo)
+    assert asyncio.run(mail.process_outbox_once()) is True
+    current = row(message_id)
+    assert current["state"] == ("dead" if code == 554 else "pending")
+    assert current["error"] == "transport_failed" and current["attempts"] == 1
+    assert [entry[0] for entry in smtp] == [
+        "connect",
+        "ehlo",
+        "starttls",
+        "ehlo",
+        "close",
+    ]
+
+
+@pytest.mark.parametrize(
+    ("failure", "quit_code", "state"),
+    [
+        (smtplib.SMTPDataError(554, b"Rejected"), 421, "dead"),
+        (smtplib.SMTPDataError(451, b"Try later"), 550, "pending"),
+        (smtplib.SMTPRecipientsRefused({RECIPIENT: (550, b"Rejected")}), 421, "dead"),
+        (
+            smtplib.SMTPRecipientsRefused({RECIPIENT: (450, b"Try later")}),
+            550,
+            "pending",
+        ),
+    ],
+)
+@pytest.mark.parametrize("io_cleanup", [False, True])
+def test_smtp_quit_error_cannot_replace_the_original_send_failure(
+    smtp, monkeypatch, failure, quit_code, state, io_cleanup
+):
+    configure()
+    message_id = enqueue()
+    monkeypatch.setattr(FakeSMTP, "send_error", failure)
+    monkeypatch.setattr(
+        FakeSMTP,
+        "quit_error",
+        OSError("Cleanup failed")
+        if io_cleanup
+        else smtplib.SMTPResponseException(quit_code, b"QUIT failed"),
+    )
+    assert asyncio.run(mail.process_outbox_once()) is True
+    current = row(message_id)
+    assert current["state"] == state and current["attempts"] == 1
+    assert current["error"] == (
+        "recipient_rejected"
+        if isinstance(failure, smtplib.SMTPRecipientsRefused)
+        else "transport_failed"
+    )
+    assert bool(current["payload"]) is (state == "pending")
+
+
+@pytest.mark.parametrize(
+    "failure",
+    [smtplib.SMTPResponseException(550, b"QUIT failed"), OSError("Cleanup failed")],
+)
+def test_smtp_quit_rejection_cannot_replace_a_certificate_failure(
+    smtp, monkeypatch, failure
+):
+    configure()
+    message_id = enqueue()
+
+    def fail_tls(self, **kwargs):
+        raise ssl.SSLCertVerificationError("Untrusted certificate")
+
+    monkeypatch.setattr(FakeSMTP, "starttls", fail_tls)
+    monkeypatch.setattr(FakeSMTP, "quit_error", failure)
+    assert asyncio.run(mail.process_outbox_once()) is True
+    current = row(message_id)
+    assert current["state"] == "pending" and current["error"] == "tls_failed"
+    assert not any(call[0] in ("login", "send") for call in smtp)
+
+
 def test_tls_failure_never_sends_credentials_or_message_in_plaintext(smtp, monkeypatch):
     configure()
     message_id = enqueue()
@@ -294,7 +470,7 @@ def test_smtp_exception_text_is_not_persisted_and_retries_are_bounded(monkeypatc
     message_id = enqueue()
 
     def fail(*args):
-        raise smtplib.SMTPAuthenticationError(535, (PASSWORD + TOKEN).encode())
+        raise smtplib.SMTPAuthenticationError(454, (PASSWORD + TOKEN).encode())
 
     monkeypatch.setattr(mail, "_send", fail)
     for attempt in range(1, mail.MAX_ATTEMPTS + 1):
@@ -310,6 +486,182 @@ def test_smtp_exception_text_is_not_persisted_and_retries_are_bounded(monkeypatc
         )
     assert current["payload"] == ""
     assert asyncio.run(mail.process_outbox_once()) is False
+
+
+@pytest.mark.parametrize(
+    ("failure", "error"),
+    [
+        (smtplib.SMTPAuthenticationError(535, b"Rejected"), "authentication_failed"),
+        (
+            smtplib.SMTPSenderRefused(553, b"Invalid sender", CONFIG["sender"]),
+            "sender_rejected",
+        ),
+        (smtplib.SMTPDataError(554, b"5.7.1 Policy rejection"), "transport_failed"),
+        (smtplib.SMTPConnectError(554, b"Unavailable"), "transport_failed"),
+        (smtplib.SMTPHeloError(501, b"Rejected"), "transport_failed"),
+        (smtplib.SMTPResponseException(500, b"Rejected"), "transport_failed"),
+        (
+            smtplib.SMTPRecipientsRefused({RECIPIENT: (550, b"5.1.1 NoSuchUser")}),
+            "recipient_rejected",
+        ),
+        (
+            smtplib.SMTPRecipientsRefused(
+                {RECIPIENT: (554, b"5.7.1 Policy rejection")}
+            ),
+            "recipient_rejected",
+        ),
+    ],
+)
+def test_permanent_smtp_failure_stops_only_this_message_and_erases_private_data(
+    monkeypatch, failure, error, capsys, caplog
+):
+    configure()
+    message_id = enqueue()
+
+    def fail(*args):
+        # Responses can contain recipient addresses, credentials and account links.
+        failure.smtp_error = (PASSWORD + RECIPIENT + TOKEN).encode()
+        if isinstance(failure, smtplib.SMTPRecipientsRefused):
+            failure.recipients = {
+                key: (code, failure.smtp_error)
+                for key, (code, _) in failure.recipients.items()
+            }
+        raise failure
+
+    monkeypatch.setattr(mail, "_send", fail)
+    assert asyncio.run(mail.process_outbox_once()) is True
+    current = row(message_id)
+    assert current["state"] == "dead" and current["attempts"] == 1
+    assert current["payload"] == "" and current["error"] == error
+    assert current["lease_token"] is current["lease_until"] is None
+    with db() as c:
+        c.execute("UPDATE mail_outbox SET due=0 WHERE id=?", (message_id,))
+    assert asyncio.run(mail.process_outbox_once()) is False
+    assert row(message_id)["attempts"] == 1
+
+    # A sender/auth/policy rejection must not blacklist the mailbox for other shops.
+    next_message = enqueue(shop_id="other-shop")
+    sent = []
+    monkeypatch.setattr(mail, "_send", lambda *args: sent.append(args))
+    assert asyncio.run(mail.process_outbox_once()) is True
+    assert row(next_message)["state"] == "delivered"
+    assert sent[0][1]["to"] == RECIPIENT
+    captured = capsys.readouterr()
+    public = json.dumps(current) + caplog.text + captured.out + captured.err
+    for secret in (PASSWORD, RECIPIENT, TOKEN):
+        assert secret not in public
+
+
+@pytest.mark.parametrize("code", [550, 554])
+def test_refused_recipient_returned_by_smtp_is_not_retried(smtp, monkeypatch, code):
+    configure()
+    message_id = enqueue()
+    monkeypatch.setattr(FakeSMTP, "refused", {RECIPIENT: (code, b"Rejected")})
+    assert asyncio.run(mail.process_outbox_once()) is True
+    assert row(message_id)["state"] == "dead"
+    assert row(message_id)["error"] == "recipient_rejected"
+    assert row(message_id)["payload"] == ""
+    assert asyncio.run(mail.process_outbox_once()) is False
+    assert sum(call[0] == "send" for call in smtp) == 1
+
+
+@pytest.mark.parametrize(
+    ("failure", "error"),
+    [
+        (smtplib.SMTPAuthenticationError(454, b"Try later"), "authentication_failed"),
+        (
+            smtplib.SMTPSenderRefused(450, b"Try later", CONFIG["sender"]),
+            "sender_rejected",
+        ),
+        (smtplib.SMTPDataError(451, b"Try later"), "transport_failed"),
+        (smtplib.SMTPResponseException(421, b"Try later"), "transport_failed"),
+        (
+            smtplib.SMTPRecipientsRefused({RECIPIENT: (450, b"Try later")}),
+            "recipient_rejected",
+        ),
+        (
+            smtplib.SMTPRecipientsRefused({RECIPIENT: (452, b"Try later")}),
+            "recipient_rejected",
+        ),
+        (smtplib.SMTPServerDisconnected("Disconnected"), "transport_failed"),
+        (OSError("Unavailable"), "transport_failed"),
+        (ssl.SSLCertVerificationError("Untrusted certificate"), "tls_failed"),
+    ],
+)
+def test_temporary_smtp_failures_keep_encrypted_payload_and_exponential_retry(
+    monkeypatch, failure, error
+):
+    configure()
+    message_id = enqueue()
+    now = time.time()
+    monkeypatch.setattr(mail.time, "time", lambda: now)
+
+    def fail(*args):
+        raise failure
+
+    monkeypatch.setattr(mail, "_send", fail)
+    for attempt in (1, 2):
+        with db() as c:
+            c.execute("UPDATE mail_outbox SET due=0 WHERE id=?", (message_id,))
+        assert asyncio.run(mail.process_outbox_once()) is True
+        current = row(message_id)
+        assert current["state"] == "pending" and current["attempts"] == attempt
+        assert current["error"] == error
+        assert current["payload"].startswith("v1.")
+        assert current["due"] == now + 30 * 2**attempt
+        assert current["lease_token"] is current["lease_until"] is None
+
+
+@pytest.mark.parametrize("code", [None, True, False, "550", b"550", 200, 600, 999])
+@pytest.mark.parametrize("recipient_response", [False, True])
+def test_unknown_or_malformed_smtp_codes_do_not_mean_permanent_rejection(
+    monkeypatch, code, recipient_response
+):
+    configure()
+    message_id = enqueue()
+
+    def fail(*args):
+        if recipient_response:
+            raise smtplib.SMTPRecipientsRefused({RECIPIENT: (code, b"550 Rejected")})
+        raise smtplib.SMTPResponseException(code, b"550 Rejected")
+
+    monkeypatch.setattr(mail, "_send", fail)
+    assert asyncio.run(mail.process_outbox_once()) is True
+    current = row(message_id)
+    assert current["state"] == "pending" and current["attempts"] == 1
+    assert current["payload"].startswith("v1.")
+
+
+@pytest.mark.parametrize(
+    "responses",
+    [
+        {},
+        None,
+        "550 Rejected",
+        {RECIPIENT: None},
+        {RECIPIENT: 550},
+        {RECIPIENT: (550,)},
+        {RECIPIENT: (550, b"Rejected", "extra")},
+        {RECIPIENT: {"code": 550}},
+        {RECIPIENT: (550, b"Rejected"), "other@example.test": (450, b"Try later")},
+        {RECIPIENT: (550, b"Rejected"), "other@example.test": ("550", b"Unknown")},
+    ],
+)
+def test_empty_malformed_or_mixed_recipient_responses_keep_bounded_retry(
+    monkeypatch, responses
+):
+    configure()
+    message_id = enqueue()
+
+    def fail(*args):
+        raise smtplib.SMTPRecipientsRefused(responses)
+
+    monkeypatch.setattr(mail, "_send", fail)
+    assert asyncio.run(mail.process_outbox_once()) is True
+    current = row(message_id)
+    assert current["state"] == "pending" and current["attempts"] == 1
+    assert current["error"] == "recipient_rejected"
+    assert current["payload"].startswith("v1.")
 
 
 def test_expired_messages_are_never_sent_and_disabled_config_pauses_pending(
@@ -375,7 +727,8 @@ def test_crashed_claim_is_recovered_without_creating_a_second_message(smtp):
     assert sum(call[0] == "send" for call in smtp) == 1
 
 
-def test_stale_worker_cannot_overwrite_a_newer_claim(monkeypatch):
+@pytest.mark.parametrize("permanent_failure", [False, True])
+def test_stale_worker_cannot_overwrite_a_newer_claim(monkeypatch, permanent_failure):
     configure()
     message_id = enqueue()
 
@@ -385,12 +738,15 @@ def test_stale_worker_cannot_overwrite_a_newer_claim(monkeypatch):
                 "UPDATE mail_outbox SET attempts=2,lease_token='newer',error='newer worker' WHERE id=?",
                 (message_id,),
             )
+        if permanent_failure:
+            raise smtplib.SMTPDataError(554, b"Rejected")
 
     monkeypatch.setattr(mail, "_send", replace_claim)
     assert asyncio.run(mail.process_outbox_once()) is True
     current = row(message_id)
     assert current["state"] == "sending" and current["lease_token"] == "newer"
     assert current["attempts"] == 2 and current["error"] == "newer worker"
+    assert current["payload"].startswith("v1.")
 
 
 def test_resource_replayed_ciphertext_is_not_delivered(monkeypatch):

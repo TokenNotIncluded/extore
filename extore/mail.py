@@ -264,6 +264,16 @@ def enqueue(c, to, subject, body, *, expires=None, shop_id=None):
     return message_id
 
 
+def _ehlo(server):
+    reply = server.ehlo()
+    if not isinstance(reply, (tuple, list)) or len(reply) != 2:
+        raise smtplib.SMTPHeloError(-1, b"Invalid EHLO response")
+    code, response = reply
+    # smtplib.ehlo returns rejection codes without raising an exception.
+    if type(code) is not int or code != 250:
+        raise smtplib.SMTPHeloError(code, response)
+
+
 def _send(config, payload, message_id):
     # Certificate/hostname verification cannot be disabled by SMTP configuration.
     context = ssl.create_default_context()
@@ -282,19 +292,34 @@ def _send(config, payload, message_id):
         )
     else:
         server = smtplib.SMTP(config["host"], config["port"], timeout=SMTP_TIMEOUT)
-    with server:
-        server.ehlo()
-        if config["mode"] == "starttls":
-            # STARTTLS failure is fatal; credentials/message never fall back to cleartext.
-            server.starttls(context=context)
-            server.ehlo()
-        if config["username"]:
-            server.login(config["username"], config["password"])
-        refused = server.send_message(
-            message, from_addr=config["sender"], to_addrs=[payload["to"]]
-        )
-        if refused:
-            raise smtplib.SMTPRecipientsRefused(refused)
+    accepted = False
+    send_failure = None
+    try:
+        with server:
+            try:
+                _ehlo(server)
+                if config["mode"] == "starttls":
+                    # Never fall back to cleartext credentials/message on TLS failure.
+                    server.starttls(context=context)
+                    _ehlo(server)
+                if config["username"]:
+                    server.login(config["username"], config["password"])
+                refused = server.send_message(
+                    message, from_addr=config["sender"], to_addrs=[payload["to"]]
+                )
+                if refused:
+                    raise smtplib.SMTPRecipientsRefused(refused)
+                accepted = True
+            except Exception as exc:
+                send_failure = exc
+                raise
+    except (smtplib.SMTPException, OSError):
+        # QUIT can fail after acceptance. It must neither resend accepted mail
+        # nor replace a failure from TLS/auth/MAIL/RCPT/DATA with its own reply.
+        if send_failure is not None:
+            raise send_failure
+        if not accepted:
+            raise
 
 
 def _error(exc):
@@ -310,6 +335,31 @@ def _error(exc):
     if isinstance(exc, (smtplib.SMTPException, OSError)):
         return "transport_failed"
     return "invalid_mail_payload"
+
+
+def _permanent_smtp_failure(exc):
+    """Stop this message on structured 5xx replies, without judging its mailbox."""
+
+    def permanent(code):
+        return type(code) is int and 500 <= code < 600
+
+    if isinstance(exc, smtplib.SMTPResponseException):
+        return permanent(exc.smtp_code)
+    if isinstance(exc, smtplib.SMTPRecipientsRefused):
+        responses = exc.recipients
+        # Extore sends to one recipient. Unknown/mixed replies remain bounded
+        # retries; never parse provider text that may contain private data.
+        return (
+            isinstance(responses, dict)
+            and bool(responses)
+            and all(
+                isinstance(response, (tuple, list))
+                and len(response) == 2
+                and permanent(response[0])
+                for response in responses.values()
+            )
+        )
+    return False
 
 
 async def process_outbox_once():
@@ -351,6 +401,7 @@ async def process_outbox_once():
             (now + LEASE_SECONDS, lease, row["id"]),
         )
     error = ""
+    permanent_failure = False
     try:
         payload = _open(row["payload"], "mail", row["id"], row["tenant_id"])
         if not isinstance(payload, dict) or set(payload) != {"to", "subject", "body"}:
@@ -369,6 +420,7 @@ async def process_outbox_once():
         await asyncio.to_thread(_send, config, payload, row["id"])
     except Exception as exc:
         error = _error(exc)
+        permanent_failure = _permanent_smtp_failure(exc)
     # Cancellation/crash leaves the claim to expire; a stale worker cannot overwrite
     # a claim made later by another process. SMTP cannot guarantee exactly-once send.
     with db() as c:
@@ -383,6 +435,7 @@ async def process_outbox_once():
             due = time.time() + min(3600, 30 * 2**attempts)
             dead = (
                 error == "invalid_mail_payload"
+                or permanent_failure
                 or attempts >= MAX_ATTEMPTS
                 or due >= row["expires"]
             )

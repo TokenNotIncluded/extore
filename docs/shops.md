@@ -21,6 +21,12 @@ Extore 一个实例可以服务多个独立店铺。商品、卡密、队列、�
 
 SMTP 配置使用 TLS：`mode="starttls"` 或 `"ssl"`，服务端验证证书。账号密码加密保存，查询只返回 host、port、sender、启用状态和是否有凭据；不会读回 SMTP 密码。邮件内容及确认链接也加密入队，由 worker 实际发送。接口接受请求或写入邮件队列不代表邮件已经送达。
 
+收到可靠的 SMTP `5xx` 永久拒绝后，该条邮件立即停止重试并清空正文；`4xx` 临时拒绝及连接故障继续指数退避，最多尝试 8 次，邮件过期会提前结束。认证、发件人或发送策略的拒绝只终止该条邮件，不会将收件地址全局标记为无效。修正 SMTP 配置后，需要重新请求邀请、注册验证或密码重置，已清空的旧邮件不会自动恢复。
+
+使用 Sequenzy 时，配置 `host="smtp.sequenzy.com"`、`port=587`、`mode="starttls"`、`username="api"`，密码私下填写公司/工作区 API Key，并仅授予 `transactional:send` 权限；发件地址须使用已验证的发件域名。不要使用个人账号 API Key。详见 [Sequenzy SMTP 文档](https://docs.sequenzy.com/send-email/smtp)。
+
+队列中的 `delivered` 表示 SMTP 服务商接受了邮件，不能证明最终到达收件箱；接受后的 SMTP 退出错误不会重复发送。最终送达、异步退信及地址压制状态需在服务商查看，Extore 暂无本地退信 Webhook 或地址压制表。`550 5.1.1` 等明确不存在的邮箱应由收件人更正地址，重试或取消压制不能恢复不存在的邮箱。
+
 平台 CLI 使用经过批准的 root 设备：
 
 ```sh
