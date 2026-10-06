@@ -118,7 +118,6 @@ def _i18n(value, *, limit=10000, required=False):
             or len(locale) > 40
             or _CONTROL.search(locale)
             or not isinstance(text, str)
-            or not text.strip()
             or len(text) > limit
             or "\0" in text
         ):
@@ -128,7 +127,11 @@ def _i18n(value, *, limit=10000, required=False):
             text.encode("utf-8")
         except UnicodeError:
             _invalid("多语言文本编码无效")
+        if not text.strip():
+            continue
         result[locale] = text
+    if required and not result:
+        _invalid("多语言文本必须至少有一项非空文本")
     return result
 
 

@@ -636,3 +636,42 @@ def test_output_and_input_context_have_a_separate_utf8_byte_budget():
     assert validate_values(
         [field(kind="textarea")], {"requirements": "中" * 60000}, output=True
     )
+
+
+def test_empty_optional_translations_are_dropped_but_required_labels_remain_nonempty():
+    definition = graph()
+    node(definition, "ask")["fields"][0].update(
+        label={"en": "Requirements", "zh-CN": ""}, description={"en": "", "zh-CN": "  "}
+    )
+    result = validate_definition(definition, product())
+    assert node(result, "ask")["fields"][0]["label"] == {"en": "Requirements"}
+    assert node(result, "ask")["fields"][0]["description"] == {}
+    node(definition, "ask")["fields"][0]["label"] = {"en": "", "zh-CN": " "}
+    with pytest.raises(ValueError):
+        validate_definition(definition, product())
+
+
+def test_real_catalog_product_read_with_blank_optional_translations_can_publish_flow(
+    owner,
+):
+    from extore.db import db
+    from extore.service import product as read_product
+
+    response = owner.post(
+        "/api/admin/products",
+        json={
+            "name": "Catalog flow",
+            "mode": "script",
+            "processor_id": "personalized_text",
+        },
+    )
+    assert response.status_code == 200, response.text
+    with db() as c:
+        configured = read_product(c, response.json()["id"])
+    before = deepcopy(configured)
+    definition = graph()
+    node(definition, "ask")["fields"] = deepcopy(configured["parameters"])
+    node(definition, "work")["inputs"] = {"name": reference("ask", "name")}
+    node(definition, "work")["outputs"] = deepcopy(configured["outputs"])
+    assert validate_definition(definition, configured)
+    assert configured == before
