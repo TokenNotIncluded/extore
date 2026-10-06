@@ -191,3 +191,80 @@ def test_product_with_stock_issued_cards_cannot_change_mode(owner):
         "/api/admin/products/" + pid, json={"name": "Text", "mode": "manual"}
     )
     assert response.status_code == 409
+
+
+def test_stock_uses_shared_storage_budget_until_delivery_is_discarded(
+    owner, monkeypatch
+):
+    from extore import storage
+
+    pid = stock_product(owner)
+    with db() as c:
+        text_cards.issue_text_cards(c, pid, "quota-protected")
+        row = c.execute(
+            "SELECT * FROM text_card_payloads WHERE product_id=?", (pid,)
+        ).fetchone()
+        allocation = row["size"]
+        assert allocation > 0
+        assert storage.storage_usage(c, row["shop_id"])["stored_bytes"] == allocation
+        # Completing delivery clears the vault original but the receipt still
+        # occupies its reservation until once-reveal or explicit destruction.
+        text_cards.clear_assignment(c, row["card_id"])
+        assert text_cards.allocated_bytes(c) == allocation
+        c.execute(
+            "UPDATE shops SET storage_limit_bytes=? WHERE id=?",
+            (allocation, row["shop_id"]),
+        )
+        with pytest.raises(HTTPException) as caught:
+            text_cards.issue_text_cards(c, pid, "not-allocated")
+        assert caught.value.status_code == 507
+        assert (
+            c.execute(
+                "SELECT COUNT(*) FROM cards WHERE product_id=?", (pid,)
+            ).fetchone()[0]
+            == 1
+        )
+        c.execute(
+            "UPDATE shops SET storage_limit_bytes=? WHERE id=?",
+            (10_000_000, row["shop_id"]),
+        )
+        monkeypatch.setattr(storage, "UPLOAD_TOTAL_BYTES", allocation)
+        with pytest.raises(HTTPException) as caught:
+            text_cards.issue_text_cards(c, pid, "global-not-allocated")
+        assert caught.value.status_code == 507
+        text_cards.discard_assignment(c, row["card_id"])
+        assert text_cards.allocated_bytes(c) == 0
+        assert text_cards.card_definition(c, row["card_id"])["mode"] == "stock"
+
+
+def test_stock_checks_disk_headroom_before_creating_any_cards(owner, monkeypatch):
+    from extore import storage
+
+    pid = stock_product(owner)
+    monkeypatch.setattr(
+        storage, "disk_free_bytes", lambda: storage.UPLOAD_DISK_RESERVE_BYTES
+    )
+    with db() as c:
+        with pytest.raises(HTTPException) as caught:
+            text_cards.issue_text_cards(c, pid, "must-not-write")
+        assert caught.value.status_code == 507
+        assert (
+            c.execute(
+                "SELECT COUNT(*) FROM cards WHERE product_id=?", (pid,)
+            ).fetchone()[0]
+            == 0
+        )
+
+
+def test_text_allocation_is_scoped_to_the_original_shop(owner):
+    from extore import storage
+
+    pid = stock_product(owner)
+    with db() as c:
+        text_cards.issue_text_cards(c, pid, "shop-a-stock")
+        shop_id = c.execute(
+            "SELECT shop_id FROM products WHERE id=?", (pid,)
+        ).fetchone()[0]
+        assert text_cards.allocated_bytes(c, shop_id) > 0
+        assert text_cards.allocated_bytes(c, "other-shop") == 0
+        assert storage._shop_totals(c, "other-shop") == (0, 0)

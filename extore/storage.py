@@ -67,13 +67,15 @@ def require_disk_space(additional, *, pending=0):
 
 
 def _totals(c):
+    from .text_cards import allocated_bytes
+
     stored = c.execute(
         "SELECT COALESCE(SUM(size),0) FROM job_files WHERE content IS NOT NULL"
     ).fetchone()[0]
     pending = c.execute(
         "SELECT COALESCE(SUM(size),0) FROM upload_reservations"
     ).fetchone()[0]
-    return stored, pending
+    return stored + allocated_bytes(c), pending
 
 
 def _product_shop(c, product_id):
@@ -88,6 +90,8 @@ def _product_shop(c, product_id):
 
 
 def _shop_totals(c, shop_id):
+    from .text_cards import allocated_bytes
+
     stored = c.execute(
         "SELECT COALESCE(SUM(job_files.size),0) FROM job_files "
         "JOIN products ON products.id=job_files.product_id "
@@ -98,7 +102,7 @@ def _shop_totals(c, shop_id):
         "SELECT COALESCE(SUM(size),0) FROM upload_reservations WHERE shop_id=?",
         (shop_id,),
     ).fetchone()[0]
-    return stored, pending
+    return stored + allocated_bytes(c, shop_id), pending
 
 
 def check_storage_quota(c, additional, *, reservation_id=None, product_id=None):

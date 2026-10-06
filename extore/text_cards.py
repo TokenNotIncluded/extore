@@ -51,7 +51,21 @@ def init_schema(c):
         "card_id TEXT PRIMARY KEY REFERENCES cards(id) ON DELETE CASCADE,"
         "product_id TEXT NOT NULL REFERENCES products(id) ON DELETE CASCADE,"
         "shop_id TEXT NOT NULL REFERENCES shops(id),"
-        "ciphertext TEXT,definition TEXT NOT NULL,created REAL NOT NULL)"
+        "ciphertext TEXT,definition TEXT NOT NULL,created REAL NOT NULL,"
+        "size INTEGER NOT NULL DEFAULT 0 CHECK(size>=0))"
+    )
+    columns = {
+        row["name"] for row in c.execute("PRAGMA table_info(text_card_payloads)")
+    }
+    if "size" not in columns:
+        c.execute(
+            "ALTER TABLE text_card_payloads ADD COLUMN size INTEGER NOT NULL DEFAULT 0 CHECK(size>=0)"
+        )
+        c.execute(
+            "UPDATE text_card_payloads SET size=length(CAST(ciphertext AS BLOB))+length(CAST(definition AS BLOB)) WHERE ciphertext IS NOT NULL"
+        )
+    c.execute(
+        "CREATE INDEX IF NOT EXISTS text_card_payloads_shop ON text_card_payloads(shop_id)"
     )
 
 
@@ -139,24 +153,36 @@ def issue_text_cards(c, pid, text, *, variant_id="default", label="", expires=No
     if expires is not None and expires <= time.time():
         fail("卡密到期时间必须是未来时间")
     frozen = json.dumps({key: p[key] for key in DEFINITION_FIELDS}, ensure_ascii=False)
-    items = []
+    assignments = []
     for line in lines:
         cid = str(uuid.uuid4())
-        code = new_card()
         ciphertext = store_secret(
             line,
             tenant_id=source["shop_id"],
             resource_type="text-card",
             resource_id=cid,
         )
+        # Reserve enough for either the ciphertext or the ordinary receipt's
+        # content + result_json. Transfer to the receipt is not a second charge.
+        size = max(
+            len(ciphertext.encode()),
+            2 * len(json.dumps(line, ensure_ascii=False).encode()) + 32,
+        ) + len(frozen.encode())
+        assignments.append((cid, ciphertext, line, size))
+    from .storage import check_storage_quota
+
+    check_storage_quota(c, sum(item[3] for item in assignments), product_id=pid)
+    items = []
+    for cid, ciphertext, line, size in assignments:
+        code = new_card()
         now = time.time()
         c.execute(
             "INSERT INTO cards(id,digest,product_id,created) VALUES (?,?,?,?)",
             (cid, card_digest(code), pid, now),
         )
         c.execute(
-            "INSERT INTO text_card_payloads VALUES (?,?,?,?,?,?)",
-            (cid, pid, source["shop_id"], ciphertext, frozen, now),
+            "INSERT INTO text_card_payloads(card_id,product_id,shop_id,ciphertext,definition,created,size) VALUES (?,?,?,?,?,?,?)",
+            (cid, pid, source["shop_id"], ciphertext, frozen, now, size),
         )
         items.append({"code": code, "content": line})
     codes = [item["code"] for item in items]
@@ -223,6 +249,30 @@ def clear_assignment(c, card_id):
     c.execute(
         "UPDATE text_card_payloads SET ciphertext=NULL WHERE card_id=?", (card_id,)
     )
+
+
+def discard_assignment(c, card_id):
+    """Release allocation after the receipt copy is destroyed or revealed once."""
+    c.execute(
+        "UPDATE text_card_payloads SET ciphertext=NULL,size=0 WHERE card_id=?",
+        (card_id,),
+    )
+
+
+def allocated_bytes(c, shop_id=None):
+    """Include text stock in shared quotas, while old databases remain readable."""
+    if not c.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='text_card_payloads'"
+    ).fetchone():
+        return 0
+    if shop_id is None:
+        return c.execute(
+            "SELECT COALESCE(SUM(size),0) FROM text_card_payloads"
+        ).fetchone()[0]
+    return c.execute(
+        "SELECT COALESCE(SUM(size),0) FROM text_card_payloads WHERE shop_id=?",
+        (shop_id,),
+    ).fetchone()[0]
 
 
 @router.post("/api/admin/cards/import-text")
