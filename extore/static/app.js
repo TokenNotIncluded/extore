@@ -142,7 +142,26 @@ function batchPending() {
   if (!currentBatch) return [];
   if (batchRetryOnly && batchSelection)
     return currentBatch.items.filter((item) => item.card_id === batchSelection);
-  return currentBatch.items.filter((item) => !item.job);
+  return currentBatch.items.filter((item) => !item.job && item.card_id && item.accepted !== false);
+}
+function batchRedemptionOptions() {
+  return {
+    app, $, tr, esc, localized, parameterFields, on, form, api,
+    token: currentToken,
+    receiptURL: location.origin + "/receipt#" + currentToken,
+    context: receiptRequestContext,
+    uploadMultipart, uploadFileLimit,
+    submit: (items, errors) => submitRedemption(items, { batchUploadErrors: errors }),
+    open: openBatchCard,
+    refresh: readReceipt,
+    edit: () => { selectBatchCard(); redemptionForm(); },
+    overview: () => { selectBatchCard(); renderBatch(currentBatch); },
+    home,
+    copy: async () => {
+      const copied = await writeClipboard(location.origin + "/receipt#" + currentToken);
+      toast(copied ? tr("链接已复制", "Link copied") : tr("复制失败，请手动复制上方链接。", "Could not copy. Copy the link above manually."));
+    },
+  };
 }
 function parameterFields(idPrefix, field, value = "") {
   const id = idPrefix + field.key;
@@ -173,6 +192,15 @@ function openBatchCard(item) {
   currentJob = item.job || null;
   currentVariant = item.variant || item.job?.variant || null;
   if (!item.job) {
+    if (currentBatch?.partial && window.ExtoreBatchRedemption?.flowOf(item)?.enabled) {
+      stopPoll();
+      receiptMotion?.dispose();
+      receiptMotion = null;
+      receiptViewKey = "";
+      window.ExtoreBatchRedemption.renderForm({ ...currentBatch, items: [item] }, batchRedemptionOptions());
+      window.ExtoreWebMCP?.refresh();
+      return;
+    }
     redemptionForm();
     return;
   }
@@ -219,12 +247,15 @@ async function api(path, body, method, options = {}) {
     if (error.name === "AbortError") throw error;
     throw new Error("服务器返回异常，请稍后重试");
   }
-  if (!response.ok)
-    throw new Error(
+  if (!response.ok) {
+    const error = new Error(
       typeof data.detail === "string"
         ? data.detail
         : "输入格式有误，请检查表单",
     );
+    error.status = response.status;
+    throw error;
+  }
   return data;
 }
 async function fileResponse(path, options = {}) {
@@ -487,7 +518,7 @@ function receiptRequestContext(options = {}) {
 }
 function openBatch(data) {
   currentBatch = data;
-  currentProduct = data.product;
+  currentProduct = data.product || data.items.find((item) => item.accepted !== false && item.product)?.product || null;
   currentJob = null;
   if (batchSelection) {
     const item = data.items.find((entry) => entry.card_id === batchSelection);
@@ -508,24 +539,25 @@ function openBatch(data) {
     selectBatchCard();
   }
   selectBatchCard();
-  if (data.items.some((item) => !item.job)) redemptionForm();
+  if (batchPending().length) redemptionForm();
   else renderBatch(data);
 }
 async function exchangeCode(code, options = {}) {
   const context = receiptRequestContext(options);
   const generation = receiptGeneration;
-  const data = await api("/exchange", { code }, "POST", options);
+  const multiple = splitCodes(code).length > 1 || /[\n,，;；]/.test(String(code).trim());
+  const data = await api(multiple ? "/batch/exchange" : "/exchange", { code }, "POST", options);
   if (!context.active()) return data;
   const render = () => {
     if (!context.active()) return;
-    currentToken = data.token;
+    currentToken = data.token || "";
     currentProduct = data.product;
     currentJob = data.job || null;
     currentVariant = data.variant || data.job?.variant || data.items?.[0]?.variant || null;
     currentBatch = data.batch ? data : null;
     batchSelection = "";
     batchRetryOnly = false;
-    history.pushState({}, "", "/receipt#" + currentToken);
+    if (currentToken) history.pushState({}, "", "/receipt#" + currentToken);
     if (data.batch) openBatch(data);
     else data.job ? renderReceipt(data.job) : redemptionForm();
   };
@@ -539,12 +571,18 @@ async function submitRedemption(params, options = {}) {
   const body = Array.isArray(params)
     ? { token: context.token, items: params }
     : { token: context.token, params };
-  const result = await api("/redeem", body, "POST", options);
+  const result = await api(currentBatch?.partial && Array.isArray(params) ? "/batch/redeem" : "/redeem", body, "POST", options);
   if (context.active()) {
     selectBatchCard();
     if (result.batch) {
-      currentBatch = result;
-      openBatch(result);
+      const rendered = options.batchUploadErrors?.length ? {
+        ...result,
+        results: [...(result.results || []), ...options.batchUploadErrors.map((error) => ({
+          card_id: error.card_id, status: "error", error: error.error,
+        }))],
+      } : result;
+      currentBatch = rendered;
+      openBatch(rendered);
     } else renderReceipt(result);
   }
   return result;
@@ -565,12 +603,19 @@ async function retryOriginalReceipt(options = {}) {
 }
 async function readReceipt(options = {}) {
   const context = receiptRequestContext(options);
-  const result = await api(
-    "/receipt",
-    { token: context.token },
-    "POST",
-    options,
-  );
+  let result;
+  if (currentBatch || currentProduct) {
+    result = await api(currentBatch?.partial ? "/batch/receipt" : "/receipt", { token: context.token }, "POST", options);
+  } else {
+    try {
+      result = await api("/batch/receipt", { token: context.token }, "POST", options);
+    } catch (error) {
+      // A legacy single-card grant is not a batch. No other failure should be
+      // hidden by a second request or treated as permission to use a fallback.
+      if (error.status !== 404 || !context.active()) throw error;
+      result = await api("/receipt", { token: context.token }, "POST", options);
+    }
+  }
   if (context.active()) {
     currentProduct = result.product;
     currentJob = result.job || null;
@@ -702,6 +747,10 @@ function redemptionForm() {
   receiptMotion = null;
   receiptViewKey = "";
   window.ExtoreWebMCP?.refresh();
+  if (currentBatch?.partial && !batchSelection && window.ExtoreBatchRedemption) {
+    window.ExtoreBatchRedemption.renderForm(currentBatch, batchRedemptionOptions());
+    return;
+  }
   const p = currentProduct;
   const pending = currentBatch ? batchPending() : null;
   if (currentBatch && !pending.length) {
@@ -845,6 +894,14 @@ function pollBatch(data) {
 function renderBatch(data) {
   stopPoll();
   window.ExtoreWebMCP?.refresh();
+  if (data.partial && window.ExtoreBatchRedemption) {
+    receiptMotion?.dispose();
+    receiptMotion = null;
+    receiptViewKey = "";
+    window.ExtoreBatchRedemption.renderOverview(data, batchRedemptionOptions());
+    pollBatch(data);
+    return;
+  }
   const items = data.items || [];
   const finished = items.filter((item) => ["succeeded", "failed", "rejected", "destroyed"].includes(item.job?.state)).length;
   const mean = items.length ? Math.round(items.reduce((sum, item) => sum + batchProgress(item), 0) / items.length) : 0;

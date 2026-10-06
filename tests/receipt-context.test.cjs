@@ -118,8 +118,8 @@ function page(language = "zh-CN") {
           url,
           options,
           body: options.body ? JSON.parse(options.body) : undefined,
-          respond(data) {
-            resolve({ ok: true, json: async () => data });
+          respond(data, status = 200) {
+            resolve({ ok: status < 400, status, json: async () => data });
           },
           reject,
         });
@@ -452,9 +452,13 @@ test("changing the language reloads the same receipt and updates its controls", 
   assert.equal(p.node("#language").attributes["aria-label"], "Language");
   p.requests[0].respond({ configured: true, role: null, password_enabled: false });
   for (let i = 0; i < 10 && p.requests.length < 2; i++) await Promise.resolve();
-  assert.equal(p.requests[1].url, "/api/receipt");
+  assert.equal(p.requests[1].url, "/api/batch/receipt");
   assert.equal(p.requests[1].body.token, "tokenA");
-  p.requests[1].respond({ product, job: job() });
+  p.requests[1].respond({ detail: "Not a batch token" }, 404);
+  for (let i = 0; i < 10 && p.requests.length < 3; i++) await Promise.resolve();
+  assert.equal(p.requests[2].url, "/api/receipt");
+  assert.equal(p.requests[2].body.token, "tokenA");
+  p.requests[2].respond({ product, job: job() });
   for (let i = 0; i < 10; i++) await Promise.resolve();
   assert.equal(p.getContext().currentToken, "tokenA");
   assert.equal(p.getContext().product, product);
