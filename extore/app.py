@@ -46,6 +46,8 @@ from .models import (
 )
 from .owner_cli_auth import router as owner_cli_router
 from .owner_cli_auth import verify_owner_cli_action
+from .private_worker import is_upload_path as private_worker_upload_path
+from .private_worker import router as private_worker_router
 from .processor_profiles import router as processor_profiles_router
 from .processors import processor_catalog
 from .scope_auth import router as scope_auth_router
@@ -106,6 +108,7 @@ app.include_router(device_login_router)
 app.include_router(scope_auth_router)
 app.include_router(owner_cli_router)
 app.include_router(processor_profiles_router)
+app.include_router(private_worker_router)
 app.include_router(maintenance_router)
 app.include_router(text_cards_router)
 
@@ -152,7 +155,10 @@ async def guard(request: Request, call_next):
             ):
                 return JSONResponse({"detail": "请求来源不匹配"}, status_code=403)
     # Streaming bounded read prevents unbounded webhook / JSON memory usage.
-    upload = request.url.path in ("/api/files/upload", "/api/manage/files/upload")
+    upload = request.url.path in (
+        "/api/files/upload",
+        "/api/manage/files/upload",
+    ) or private_worker_upload_path(request.url.path)
     if (
         upload
         and request.headers.get("content-length", "").isdigit()
