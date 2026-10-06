@@ -655,6 +655,7 @@
       $("#queue-help").hidden = mode !== "manual";
       $("#stock-help").hidden = !stock;
       $("#product-progress-section").hidden = stock;
+      $("#product-task-flow").hidden = stock;
       $("#webhook-settings").hidden = mode !== "webhook";
       $("#processor-settings").hidden = !codeDefined;
       $("#p-delivery").disabled = codeDefined || stock || !ctx.canConfigure;

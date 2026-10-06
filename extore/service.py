@@ -429,7 +429,8 @@ def job_view(c, row, staff=False):
                 fields = execution.get("parameters", [])
                 protected = {f["key"] for f in fields if f.get("sensitive")}
                 result["params"] = {
-                    key: value for key, value in execution["params"].items()
+                    key: value
+                    for key, value in execution["params"].items()
                     if key not in protected
                 }
                 result["parameters"] = fields
@@ -510,7 +511,13 @@ def submit(c, card, params):
         from .text_cards import assigned_payload, clear_assignment
 
         row = _apply_simple_update(
-            c, jid, JobUpdate(state="succeeded", attempt=row["attempt"], output={"content": assigned_payload(c, card["id"])}),
+            c,
+            jid,
+            JobUpdate(
+                state="succeeded",
+                attempt=row["attempt"],
+                output={"content": assigned_payload(c, card["id"])},
+            ),
         )
         clear_assignment(c, card["id"])
     else:
@@ -533,7 +540,9 @@ def apply_update(c, jid, update: JobUpdate):
             fail("流程处理必须指定当前步骤的 flow_epoch", 409)
         return finalize_task_flow(
             c,
-            task_flow.process_update(c, row, update, update.flow_epoch, actor=row["claimed_by"]),
+            task_flow.process_update(
+                c, row, update, update.flow_epoch, actor=row["claimed_by"]
+            ),
         )
     return _apply_simple_update(c, jid, update)
 

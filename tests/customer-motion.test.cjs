@@ -383,6 +383,7 @@ test("真实首页模板移除切换按钮，纸卡与纵向商品列表可键�
     assert.equal(typeof handler, "function");
   } };
   const context = {
+    clearDeliveryBlobs() {},
     queueLoadId: 0, receiptMotion: null, receiptViewKey: "old", currentToken: "old",
     currentBatch: {}, batchSelection: "old-card", batchRetryOnly: true,
     currentProduct: {}, currentJob: {}, currentVariant: {}, app,

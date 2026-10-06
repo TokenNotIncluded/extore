@@ -1750,3 +1750,6 @@ th {
   .processor-config-form textarea { font-size: 16px; }
   .processor-config-card .section-head { flex-wrap: wrap; }
 }
+
+.batch-card > .checks { margin-top: 0; }
+.batch-card > .checks label { min-height: 44px; overflow-wrap: anywhere; }

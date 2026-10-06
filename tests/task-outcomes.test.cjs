@@ -36,6 +36,7 @@ test("each needs_input card only prefills its own snapshot and retains its prior
   page.node("#param-A-answer").value = "A-updated";
   page.node("#param-A-attachment-retained").value = "file-A";
   const submitting = page.node("#form").emit("submit");
+  await flush();
   assert.equal(page.requests[0].url, "/api/redeem");
   assert.deepEqual(page.requests[0].body.items, [{ card_id: "A", params: { answer: "A-updated", attachment: "file-A" } }]);
   page.requests[0].respond({ batch: true, product: product(), items: [{ ...a, job: job("A", "queued") }, b] });

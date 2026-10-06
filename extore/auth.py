@@ -74,7 +74,7 @@ def status(request: Request):
         s = None
         owner_identity = {}
         role = None
-    from .security import management_actor
+    from .app import management_actor
 
     result = {
         **owner_identity,

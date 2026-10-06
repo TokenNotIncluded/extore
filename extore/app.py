@@ -12,8 +12,8 @@ from fastapi.staticfiles import StaticFiles
 
 from . import auth, shops
 from .account_auth import router as account_auth_router
-from .batch_redemption import router as batch_redemption_router
 from .automation import router as automation_router
+from .batch_redemption import router as batch_redemption_router
 from .card_tracking import router as card_tracking_router
 from .cli_auth import router as cli_auth_router
 from .config import ORIGIN, check_config
