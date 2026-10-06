@@ -1,6 +1,7 @@
 """Remote customer operations without browser file pickers or merchant credentials."""
 
 import getpass
+import hashlib
 import json
 import math
 import os
@@ -158,22 +159,110 @@ def _job_shape(value):
     return value
 
 
+BATCH_STATUSES = frozenset({"valid", "used", "needs_retry", "invalid", "duplicate"})
+
+
+def _batch_counts(items):
+    return {
+        "total": len(items),
+        "accepted": sum(item["accepted"] for item in items),
+        **{
+            state: sum(item["status"] == state for item in items)
+            for state in BATCH_STATUSES
+        },
+    }
+
+
 def _receipt_shape(value):
     _object(value)
-    _product_shape(value.get("product"))
     if "batch" in value and type(value["batch"]) is not bool:
         raise ManageError("Invalid receipt response", code="invalid_response")
+    if "partial" in value and type(value["partial"]) is not bool:
+        raise ManageError("Invalid receipt response", code="invalid_response")
+    partial = value.get("partial") is True
+    if partial and value.get("batch") is not True:
+        raise ManageError("Invalid partial receipt", code="invalid_response")
+    if not partial:
+        _product_shape(value.get("product"))
     if value.get("batch"):
         items = _objects(value.get("items"))
         if not 1 <= len(items) <= 30:
             raise ManageError("Invalid receipt items", code="invalid_response")
+        indices, cards = set(), set()
         for item in items:
-            if not isinstance(item.get("card_id"), str) or not item["card_id"]:
+            if partial:
+                index = item.get("index")
+                if (
+                    not {
+                        "index",
+                        "suffix",
+                        "status",
+                        "accepted",
+                        "error",
+                        "http_status",
+                    }.issubset(item)
+                    or type(index) is not int
+                    or not 0 <= index < 30
+                    or index in indices
+                    or not isinstance(item.get("status"), str)
+                    or item["status"] not in BATCH_STATUSES
+                    or type(item.get("accepted")) is not bool
+                    or not isinstance(item.get("suffix"), str)
+                    or len(item["suffix"]) > 6
+                    or not re.fullmatch(r"[A-Za-z0-9]*", item["suffix"])
+                    or (
+                        item.get("error") is not None
+                        and not isinstance(item["error"], str)
+                    )
+                    or (
+                        item.get("http_status") is not None
+                        and (
+                            type(item["http_status"]) is not int
+                            or not 100 <= item["http_status"] <= 599
+                        )
+                    )
+                ):
+                    raise ManageError(
+                        "Invalid partial receipt item", code="invalid_response"
+                    )
+                indices.add(index)
+                if "duplicate_of" in item and (
+                    type(item["duplicate_of"]) is not int
+                    or not 0 <= item["duplicate_of"] < index
+                ):
+                    raise ManageError(
+                        "Invalid duplicate receipt item", code="invalid_response"
+                    )
+                if not item["accepted"]:
+                    if any(
+                        key in item for key in ("card_id", "product", "variant", "job")
+                    ):
+                        raise ManageError(
+                            "Invalid rejected receipt item", code="invalid_response"
+                        )
+                    continue
+                if item["status"] not in ("valid", "used", "needs_retry"):
+                    raise ManageError(
+                        "Invalid accepted receipt item", code="invalid_response"
+                    )
+            if (
+                not isinstance(item.get("card_id"), str)
+                or not item["card_id"]
+                or item["card_id"] in cards
+            ):
                 raise ManageError("Invalid receipt card", code="invalid_response")
+            cards.add(item["card_id"])
             _product_shape(item.get("product"))
             _job_shape(item.get("job"))
             if item.get("variant") is not None:
                 _object(item["variant"])
+        if partial:
+            summary = _object(value.get("summary"))
+            if any(
+                type(summary.get(key)) is not int or summary[key] != count
+                for key, count in _batch_counts(items).items()
+            ):
+                raise ManageError("Invalid receipt counts", code="invalid_response")
     else:
         _job_shape(value.get("job"))
         if value.get("variant") is not None:
@@ -450,29 +539,207 @@ def _summary_variant(value):
     }
 
 
-def _summary_receipt(value):
+def _safe_batch_error(error):
+    # Error text is not a trusted public field; it may contain a credential or
+    # customer input from a downstream handler. Preserve status, not its body.
+    return (
+        "This card or its inputs could not be processed" if error is not None else None
+    )
+
+
+def _summary_receipt(value, *, allowed_card_ids=None):
     _receipt_shape(value)
     if value.get("batch"):
-        return {
-            "batch": True,
-            "product": _summary_product(value["product"]),
-            "items": [
-                {
-                    "card_id": item["card_id"],
-                    "suffix": item.get("suffix", ""),
-                    "product": _summary_product(item["product"]),
-                    "variant": _summary_variant(item.get("variant")),
-                    "job": _summary_job(item.get("job")),
+        partial = value.get("partial") is True
+        result = {"batch": True, "items": []}
+        if partial:
+            result.update(partial=True, summary=_batch_counts(value["items"]))
+        else:
+            result["product"] = _summary_product(value["product"])
+        for item in value["items"]:
+            rendered = {"suffix": item.get("suffix", "")}
+            if partial:
+                rendered.update(
+                    {
+                        key: item[key]
+                        for key in ("index", "status", "accepted", "http_status")
+                    }
+                )
+                rendered["error"] = _safe_batch_error(item.get("error"))
+                if "duplicate_of" in item:
+                    rendered["duplicate_of"] = item["duplicate_of"]
+            if item.get("accepted") is not False:
+                rendered.update(
+                    card_id=item["card_id"],
+                    product=_summary_product(item["product"]),
+                    variant=_summary_variant(item.get("variant")),
+                    job=_summary_job(item.get("job")),
+                )
+            result["items"].append(rendered)
+        if "results" in value:
+            rows = _objects(value["results"])
+            if not 1 <= len(rows) <= 30:
+                raise ManageError("Invalid submission results", code="invalid_response")
+            owned = (
+                set(allowed_card_ids)
+                if allowed_card_ids is not None
+                else {
+                    item["card_id"]
+                    for item in value["items"]
+                    if item.get("accepted") is not False
                 }
-                for item in value["items"]
-            ],
-        }
+            )
+            indices = set()
+            clean = []
+            for row in rows:
+                if (
+                    type(row.get("index")) is not int
+                    or not 0 <= row["index"] < 30
+                    or row["index"] in indices
+                    or not isinstance(row.get("status"), str)
+                    or row["status"]
+                    not in ("submitted", "unchanged", "error", "duplicate")
+                    or type(row.get("http_status")) is not int
+                    or not 100 <= row["http_status"] <= 599
+                    or (
+                        "card_id" in row
+                        and (
+                            not isinstance(row["card_id"], str)
+                            or row["card_id"] not in owned
+                        )
+                    )
+                ):
+                    raise ManageError(
+                        "Invalid submission result", code="invalid_response"
+                    )
+                indices.add(row["index"])
+                rendered = {key: row[key] for key in ("index", "status", "http_status")}
+                rendered["error"] = _safe_batch_error(row.get("error"))
+                if "card_id" in row:
+                    rendered["card_id"] = row["card_id"]
+                if row["status"] in ("submitted", "unchanged"):
+                    if "card_id" not in row or row.get("job") is None:
+                        raise ManageError(
+                            "Invalid successful submission", code="invalid_response"
+                        )
+                    _job_shape(row["job"])
+                    rendered["job"] = _summary_job(row["job"])
+                elif row.get("job") is not None:
+                    raise ManageError(
+                        "Invalid failed submission", code="invalid_response"
+                    )
+                clean.append(rendered)
+            counts = {
+                "total": len(rows),
+                "succeeded": sum(
+                    row["status"] in ("submitted", "unchanged") for row in rows
+                ),
+            }
+            counts["failed"] = counts["total"] - counts["succeeded"]
+            supplied = _object(value.get("submission_summary"))
+            if any(
+                type(supplied.get(key)) is not int or supplied[key] != count
+                for key, count in counts.items()
+            ):
+                raise ManageError("Invalid submission counts", code="invalid_response")
+            result.update(results=clean, submission_summary=counts)
+        return result
     return {
         "batch": False,
         "product": _summary_product(value["product"]),
         "variant": _summary_variant(value.get("variant")),
         "job": _summary_job(value.get("job")),
     }
+
+
+def _batch_groups(value, *, detail=False):
+    _receipt_shape(value)
+    groups = {}
+    for item in value.get("items", []):
+        if item.get("accepted") is False:
+            continue
+        flow = _selected_flow(item)
+        fields = [] if flow else item["product"].get("parameters", [])
+        defaults = {
+            field["key"]: (item.get("job") or {})
+            .get("params", {})
+            .get(field["key"], "")
+            for field in fields
+            if field.get("type") not in ATTACHMENT_TYPES
+        }
+        signature = json.dumps(
+            [
+                item["product"]["id"],
+                fields,
+                defaults,
+                (flow or {}).get("definition_hash"),
+            ],
+            sort_keys=True,
+            ensure_ascii=False,
+            separators=(",", ":"),
+        )
+        groups.setdefault(signature, []).append(item)
+    result = []
+    for grouped in groups.values():
+        item = grouped[0]
+        flow = _selected_flow(item)
+        fields = [] if flow else item["product"].get("parameters", [])
+        cards = [row["card_id"] for row in grouped]
+        # Do not hash saved private inputs into the exposed ID (dictionary attack).
+        public_key = json.dumps(
+            [
+                item["product"]["id"],
+                sorted(cards),
+                fields,
+                (flow or {}).get("definition_hash"),
+            ],
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        result.append(
+            {
+                "group_id": "grp_"
+                + hashlib.sha256(public_key.encode()).hexdigest()[:24],
+                "card_ids": cards,
+                "product": _schema(item["product"], detail),
+                "shared_parameters": [
+                    _field_schema(field, detail=detail)
+                    for field in fields
+                    if field.get("type") not in ATTACHMENT_TYPES
+                ],
+                "separate_files": [
+                    _field_schema(field, detail=detail)
+                    for field in fields
+                    if field.get("type") in ATTACHMENT_TYPES
+                ],
+                "flow": bool(flow),
+                "variants": [
+                    {
+                        "card_id": row["card_id"],
+                        "variant": _summary_variant(row.get("variant")),
+                    }
+                    for row in grouped
+                ],
+            }
+        )
+    return result
+
+
+def _selected_group(value, group_id, *, detail=False):
+    group = next(
+        (
+            row
+            for row in _batch_groups(value, detail=detail)
+            if row["group_id"] == group_id
+        ),
+        None,
+    )
+    if group is None:
+        raise ManageError(
+            "Group changed or is not in this receipt; refresh customer schema",
+            code="invalid_group",
+        )
+    return group
 
 
 def _schema(product, detail=False):
@@ -541,22 +808,17 @@ def _validate_params(value, product, *, attached=()):
 
 def _exchange_groups(client, origin, text):
     """Resolve signed destinations locally; no routed secret is sent to A."""
-    codes = []
-    initial_seen = set()
-    for part in re.split(r"[\s,，;；]+", text):
-        if not part:
-            continue
-        identity = (
-            part
-            if re.match(r"(?i)^EXR[0-9]+(?:\.|$)", part)
-            else part.upper().replace("-", "")
-        )
-        if identity not in initial_seen:
-            initial_seen.add(identity)
-            codes.append(part)
+    from .proxy_routes import is_routed_code
+
+    whole = re.sub(r"[-\s]", "", text).upper()
+    codes = (
+        [text]
+        if re.fullmatch(r"[A-Z2-7]{32}", whole)
+        else [part for part in re.split(r"[\s,，;；]+", text) if part]
+    )
     if not 1 <= len(codes) <= 30:
         raise ManageError("Provide 1 to 30 codes", code="invalid_input")
-    routed = [code for code in codes if re.match(r"(?i)^EXR[0-9]+(?:\.|$)", code)]
+    routed = [code for code in codes if is_routed_code(code)]
     routes = {}
     parsed = {}
     if routed:
@@ -596,7 +858,6 @@ def _exchange_groups(client, origin, text):
                 if key in row
             }
     groups = {}
-    seen = set()
     for code in codes:
         destination = origin
         if code in parsed:
@@ -607,7 +868,7 @@ def _exchange_groups(client, origin, text):
                     code="unknown_route",
                 )
             try:
-                secret = verify_routed_code(code, route)
+                verify_routed_code(code, route)
                 destination = canonical_origin(route["origin"])
                 if canonical_path(route["path"]) != "/":
                     raise ValueError("unsupported mount")
@@ -615,12 +876,6 @@ def _exchange_groups(client, origin, text):
                 raise ManageError(
                     "Routed destination or signature is invalid", code="invalid_route"
                 ) from None
-            identity = (destination, secret)
-        else:
-            identity = (destination, code.upper().replace("-", "").replace(" ", ""))
-        if identity in seen:
-            continue
-        seen.add(identity)
         groups.setdefault(destination, []).append(code)
     return groups
 
@@ -755,7 +1010,12 @@ class CustomerClient:
     def receipt(self, entry):
         value = _object(
             self.json(
-                entry["origin"], "POST", "/api/receipt", json={"token": entry["token"]}
+                entry["origin"],
+                "POST",
+                "/api/batch/receipt"
+                if entry.get("status", {}).get("partial")
+                else "/api/receipt",
+                json={"token": entry["token"]},
             )
         )
         entry["status"] = _summary_receipt(value)
@@ -769,7 +1029,13 @@ class CustomerClient:
                     "Select --card for this batch receipt", code="card_required"
                 )
             item = next(
-                (item for item in value["items"] if item["card_id"] == card_id), None
+                (
+                    item
+                    for item in value["items"]
+                    if item.get("accepted") is not False
+                    and item.get("card_id") == card_id
+                ),
+                None,
             )
             if item is None:
                 raise ManageError("Card is not in this receipt", code="invalid_card")
@@ -884,10 +1150,317 @@ class CustomerClient:
         self.persist()
         return {"ok": True, "receipt_id": entry["id"], "field": field, **descriptor}
 
+    def redeem_partial(
+        self,
+        entry,
+        value,
+        params,
+        *,
+        card_id=None,
+        group_id=None,
+        items=None,
+        attachments=(),
+        card_attachments=(),
+        retry=False,
+    ):
+        if not value.get("batch"):
+            raise ManageError(
+                "Groups and per-card files require a batch receipt",
+                code="invalid_input",
+            )
+        if items is not None:
+            if (
+                card_id
+                or group_id
+                or attachments
+                or not isinstance(items, list)
+                or not 1 <= len(items) <= 30
+            ):
+                raise ManageError(
+                    "--items-file requires 1 to 30 batch items without --card, --group or --file",
+                    code="invalid_input",
+                )
+            requested = []
+            for item in items:
+                if (
+                    not isinstance(item, dict)
+                    or set(item) != {"card_id", "params"}
+                    or not isinstance(item["card_id"], str)
+                ):
+                    raise ManageError(
+                        "Each batch item needs card_id and params", code="invalid_input"
+                    )
+                requested.append(
+                    {
+                        "card_id": item["card_id"],
+                        "params": dict(_params(item["params"])),
+                    }
+                )
+        elif group_id:
+            if card_id or attachments:
+                raise ManageError(
+                    "--group cannot be combined with --card or --file; use --card-file",
+                    code="invalid_input",
+                )
+            group = _selected_group(value, group_id)
+            supplied = _params(params)
+            if set(supplied) & {field["key"] for field in group["separate_files"]}:
+                raise ManageError(
+                    "Shared parameters cannot include file or image fields; use --card-file",
+                    code="invalid_input",
+                )
+            requested = [
+                {"card_id": selected, "params": dict(supplied)}
+                for selected in group["card_ids"]
+            ]
+        else:
+            self.select(value, card_id)
+            requested = [{"card_id": card_id, "params": dict(_params(params))}]
+            if card_attachments:
+                raise ManageError(
+                    "--card-file requires --group or --items-file", code="invalid_input"
+                )
+        owned_ids = {
+            item["card_id"]
+            for item in value["items"]
+            if item.get("accepted") is not False
+        }
+        selected_ids = {item["card_id"] for item in requested}
+        specifications = {}
+        for specification in card_attachments:
+            selected, separator, field_path = specification.partition(":")
+            if not separator or selected not in selected_ids:
+                raise ManageError(
+                    "Use --card-file CARD:FIELD=PATH for a selected card",
+                    code="invalid_input",
+                )
+            specifications.setdefault(selected, []).append(field_path)
+        if attachments:
+            specifications[card_id] = list(attachments)
+        attached_by_card = {}
+        for selected, paths in specifications.items():
+            item = self.select(value, selected)
+            if _selected_flow(item):
+                raise ManageError(
+                    "Prepare task flows with empty inputs; upload at customer flow answer",
+                    code="invalid_input",
+                )
+            fields = {
+                field["key"]: field for field in item["product"].get("parameters", [])
+            }
+            attached_by_card[selected] = _attachment_paths(paths, fields)
+        self.preflight_uploads(
+            entry["origin"],
+            {
+                f"{selected}:{field}": paths
+                for selected, attached in attached_by_card.items()
+                for field, paths in attached.items()
+            },
+        )
+        prepared, original_indices, local_errors = [], [], []
+        seen = set()
+        for index, item in enumerate(requested):
+            selected = None
+            supplied = item["params"]
+            attached = attached_by_card.get(item["card_id"], {})
+            try:
+                selected = self.select(value, item["card_id"])
+                if item["card_id"] in seen:
+                    local_errors.append(
+                        {
+                            "index": index,
+                            "card_id": item["card_id"],
+                            "status": "duplicate",
+                            "error": "Duplicate card",
+                            "http_status": 400,
+                        }
+                    )
+                    continue
+                seen.add(item["card_id"])
+                if retry:
+                    self._submit_state(selected, True)
+                flow = _selected_flow(selected)
+                if flow:
+                    if supplied or attached:
+                        raise ManageError(
+                            "Prepare task flows with empty inputs; use customer flow start separately",
+                            code="invalid_input",
+                        )
+                elif not selected.get("job") or selected["job"].get("can_retry"):
+                    # Only this card's private upload cache can fill its file fields.
+                    fields = {
+                        field["key"]: field
+                        for field in selected["product"].get("parameters", [])
+                    }
+                    for field, cached in (
+                        entry.get("inputs", {}).get(item["card_id"], {}).items()
+                    ):
+                        if (
+                            field not in supplied
+                            and field in fields
+                            and fields[field].get("type") in ATTACHMENT_TYPES
+                        ):
+                            ids = (
+                                [row["id"] for row in cached.get("files", [])]
+                                if cached.get("type") == "images"
+                                else [cached.get("id")]
+                            )
+                            if ids and all(isinstance(file_id, str) for file_id in ids):
+                                supplied[field] = (
+                                    json.dumps(ids, separators=(",", ":"))
+                                    if fields[field].get("type") == "images"
+                                    else ids[0]
+                                )
+                    _validate_params(supplied, selected["product"], attached=attached)
+                    for field, paths in attached.items():
+                        ids = [
+                            self.upload(
+                                entry, item["card_id"], field, path, value=value
+                            )["id"]
+                            for path in paths
+                        ]
+                        supplied[field] = (
+                            json.dumps(ids, separators=(",", ":"))
+                            if fields[field].get("type") == "images"
+                            else ids[0]
+                        )
+                prepared.append(item)
+                original_indices.append(index)
+            except ManageError as error:
+                if error.code == "invalid_response":
+                    raise
+                local_errors.append(
+                    {
+                        "index": index,
+                        "status": "error",
+                        "error": "Inputs or attachments could not be submitted",
+                        "http_status": error.status
+                        or (404 if error.code == "invalid_card" else 400),
+                        **({"card_id": item["card_id"]} if selected else {}),
+                    }
+                )
+        response = dict(value)
+        combined = []
+        # Shared input may grow thirtyfold when expanded per card. Keep every
+        # request below the API body limit without making the caller split it.
+        chunks, chunk = [], []
+        for position, item in enumerate(prepared):
+            candidate = chunk + [(position, item)]
+            encoded = json.dumps(
+                {"token": entry["token"], "items": [row for _, row in candidate]},
+                ensure_ascii=False,
+                separators=(",", ":"),
+            ).encode("utf-8")
+            if len(encoded) > MAX_INPUT_BYTES:
+                if not chunk:
+                    raise ManageError(
+                        "One card's inputs exceed the API request limit",
+                        code="invalid_input",
+                    )
+                chunks.append(chunk)
+                chunk = [(position, item)]
+                single = json.dumps(
+                    {"token": entry["token"], "items": [item]},
+                    ensure_ascii=False,
+                    separators=(",", ":"),
+                ).encode("utf-8")
+                if len(single) > MAX_INPUT_BYTES:
+                    raise ManageError(
+                        "One card's inputs exceed the API request limit",
+                        code="invalid_input",
+                    )
+            else:
+                chunk = candidate
+        if chunk:
+            chunks.append(chunk)
+        for chunk in chunks:
+            try:
+                current = _object(
+                    self.json(
+                        entry["origin"],
+                        "POST",
+                        "/api/batch/redeem",
+                        json={
+                            "token": entry["token"],
+                            "items": [item for _, item in chunk],
+                        },
+                    )
+                )
+                # Validate before mapping response indices or persisting status.
+                _summary_receipt(current, allowed_card_ids=owned_ids)
+                rows = current["results"]
+                if len(rows) != len(chunk) or {row["index"] for row in rows} != set(
+                    range(len(chunk))
+                ):
+                    raise ManageError(
+                        "Invalid submission result count", code="invalid_response"
+                    )
+                for row in rows:
+                    position, submitted = chunk[row["index"]]
+                    if "card_id" in row and row["card_id"] != submitted["card_id"]:
+                        raise ManageError(
+                            "Invalid submission card", code="invalid_response"
+                        )
+                    row["index"] = original_indices[position]
+                response = current
+                combined.extend(rows)
+            except ManageError as error:
+                if error.code == "invalid_response":
+                    raise
+                combined.extend(
+                    {
+                        "index": original_indices[position],
+                        "card_id": item["card_id"],
+                        "status": "error",
+                        "error": "This submission could not be confirmed; refresh before retrying",
+                        "http_status": error.status or 503,
+                    }
+                    for position, item in chunk
+                )
+        response["results"] = combined
+        response["results"] = sorted(
+            response["results"] + local_errors, key=lambda row: row["index"]
+        )
+        successes = sum(
+            row["status"] in ("submitted", "unchanged") for row in response["results"]
+        )
+        response["submission_summary"] = {
+            "total": len(requested),
+            "succeeded": successes,
+            "failed": len(requested) - successes,
+        }
+        entry["status"] = _summary_receipt(response, allowed_card_ids=owned_ids)
+        return {
+            "ok": successes == len(requested),
+            "receipt_id": entry["id"],
+            **entry["status"],
+        }
+
     def redeem(
-        self, entry, params, *, card_id=None, items=None, attachments=(), retry=False
+        self,
+        entry,
+        params,
+        *,
+        card_id=None,
+        items=None,
+        attachments=(),
+        retry=False,
+        group_id=None,
+        card_attachments=(),
     ):
         value = self.receipt(entry)
+        if value.get("partial") or group_id or card_attachments:
+            return self.redeem_partial(
+                entry,
+                value,
+                params,
+                card_id=card_id,
+                group_id=group_id,
+                items=items,
+                attachments=attachments,
+                card_attachments=card_attachments,
+                retry=retry,
+            )
         body = {"token": entry["token"]}
         if items is not None:
             if not value.get("batch") or card_id or attachments:
@@ -1244,7 +1817,11 @@ def add_parser(commands):
     )
     selection.add_argument("--product", help="public product ID")
     schema.add_argument("--origin", help="server origin for --product")
-    schema.add_argument("--card", help="card ID in a batch receipt")
+    card_selection = schema.add_mutually_exclusive_group()
+    card_selection.add_argument("--card", help="card ID in a batch receipt")
+    card_selection.add_argument(
+        "--group", help="compatible group ID from customer schema"
+    )
     schema.add_argument(
         "--detail",
         action="store_true",
@@ -1260,6 +1837,17 @@ def add_parser(commands):
         action="store_true",
         required=True,
         help="read private codes from standard input, never command arguments",
+    )
+    exchange_mode = exchange.add_mutually_exclusive_group()
+    exchange_mode.add_argument(
+        "--batch",
+        action="store_true",
+        help="use per-card partial results, including for one code",
+    )
+    exchange_mode.add_argument(
+        "--atomic",
+        action="store_true",
+        help="legacy same-product exchange; reject the whole group on an invalid code",
     )
     flow = commands.add_parser(
         "flow", help="start, answer, continue or view the current customer task step"
@@ -1354,9 +1942,15 @@ def add_parser(commands):
         command.add_argument(
             "receipt_id", help="local ID printed by exchange or import-receipt"
         )
-        command.add_argument(
+        card_selection = command.add_mutually_exclusive_group()
+        card_selection.add_argument(
             "--card", help="required for a particular card in a batch receipt"
         )
+        if name in ("redeem", "retry"):
+            card_selection.add_argument(
+                "--group",
+                help="share text inputs within a compatible group from customer schema",
+            )
         if name == "receipt":
             command.add_argument(
                 "--inputs",
@@ -1388,6 +1982,13 @@ def add_parser(commands):
                 default=[],
                 help="upload FIELD=PATH and put its file ID into inputs",
             )
+        if name in ("redeem", "retry"):
+            command.add_argument(
+                "--card-file",
+                action="append",
+                default=[],
+                help="CARD:FIELD=PATH; separate uploads for --group or --items-file",
+            )
         if name == "upload":
             command.add_argument("--field", required=True)
             command.add_argument("--file", type=Path, required=True)
@@ -1413,6 +2014,10 @@ def add_parser(commands):
 def dispatch(client, args):
     command = args.customer_command
     if command in ("products", "schema") and not getattr(args, "receipt_id", None):
+        if getattr(args, "group", None) or getattr(args, "card", None):
+            raise ManageError(
+                "--group and --card require --receipt", code="invalid_input"
+            )
         if not args.origin:
             raise ManageError(
                 "--origin is required for a public product", code="invalid_input"
@@ -1447,6 +2052,10 @@ def dispatch(client, args):
                 "Provide 1 to 30 codes, at most 8000 characters", code="invalid_input"
             )
         groups = _exchange_groups(client, origin, code)
+        partial = getattr(args, "batch", False) or (
+            not getattr(args, "atomic", False)
+            and sum(len(codes) for codes in groups.values()) > 1
+        )
         results = []
         failures = []
         for destination, codes in groups.items():
@@ -1455,10 +2064,24 @@ def dispatch(client, args):
                     client.json(
                         destination,
                         "POST",
-                        "/api/exchange",
+                        "/api/batch/exchange" if partial else "/api/exchange",
                         json={"code": "\n".join(codes)},
                     )
                 )
+                if partial:
+                    clean = _summary_receipt(value)
+                    if value.get("partial") is not True:
+                        raise ManageError(
+                            "Invalid partial exchange response", code="invalid_response"
+                        )
+                    if clean["summary"]["accepted"] == 0:
+                        if value.get("token") is not None:
+                            raise ManageError(
+                                "Invalid empty receipt credential",
+                                code="invalid_response",
+                            )
+                        results.append({"ok": False, "origin": destination, **clean})
+                        continue
                 results.append(client.remember(destination, value.get("token"), value))
             except ManageError as error:
                 if len(groups) == 1:
@@ -1468,7 +2091,11 @@ def dispatch(client, args):
                 )
         if len(groups) == 1:
             return results[0]
-        return {"ok": not failures, "receipts": results, "failed": failures}
+        return {
+            "ok": not failures and all(result["ok"] for result in results),
+            "receipts": results,
+            "failed": failures,
+        }
     if command == "import-receipt":
         link = (
             sys.stdin.read(4097).strip()
@@ -1487,9 +2114,16 @@ def dispatch(client, args):
             or any(ord(char) < 33 or ord(char) > 126 for char in token)
         ):
             raise ManageError("Use the complete /receipt#… link", code="invalid_input")
-        value = _object(
-            client.json(origin, "POST", "/api/receipt", json={"token": token})
-        )
+        try:
+            value = _object(
+                client.json(origin, "POST", "/api/batch/receipt", json={"token": token})
+            )
+        except ManageError as error:
+            if error.status != 404:
+                raise
+            value = _object(
+                client.json(origin, "POST", "/api/receipt", json={"token": token})
+            )
         return client.remember(origin, token, value)
     if command == "receipts":
         return {
@@ -1508,6 +2142,25 @@ def dispatch(client, args):
     if command in ("receipt", "status", "schema", "files"):
         value = client.receipt(entry)
         if command == "schema":
+            group_id = getattr(args, "group", None)
+            if value.get("batch") and not card_id:
+                if group_id:
+                    return {
+                        "ok": True,
+                        "receipt_id": entry["id"],
+                        "group": _selected_group(value, group_id, detail=args.detail),
+                    }
+                return {
+                    "ok": True,
+                    "receipt_id": entry["id"],
+                    "batch": True,
+                    "partial": value.get("partial", False),
+                    "groups": _batch_groups(value, detail=args.detail),
+                }
+            if group_id:
+                raise ManageError(
+                    "--group requires a batch receipt", code="invalid_input"
+                )
             selected = client.select(value, card_id)
             return {
                 "ok": True,
@@ -1589,9 +2242,10 @@ def dispatch(client, args):
         )
     if command in ("redeem", "retry"):
         if getattr(args, "reuse", False):
-            if args.file:
+            if args.file or args.card_file or args.group:
                 raise ManageError(
-                    "--reuse cannot upload new attachments", code="invalid_input"
+                    "--reuse cannot upload new attachments or use --group; select one card",
+                    code="invalid_input",
                 )
             return client.retry_existing(entry, card_id)
         items = _read_json(args.items_file) if args.items_file else None
@@ -1603,6 +2257,8 @@ def dispatch(client, args):
             items=items,
             attachments=args.file,
             retry=command == "retry",
+            group_id=args.group,
+            card_attachments=args.card_file,
         )
     if command == "upload":
         return client.upload(entry, card_id, args.field, args.file)

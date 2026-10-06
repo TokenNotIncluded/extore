@@ -544,7 +544,37 @@ def test_mixed_routes_save_successful_receipts_and_report_failures_without_crede
             return httpx.Response(403, text=legacy)
         assert request.url.host == "b.example"
         assert json.loads(request.content)["code"] == code
-        return httpx.Response(200, json={"token": TOKEN, **receipt(None)})
+        return httpx.Response(
+            200,
+            json={
+                "token": TOKEN,
+                "batch": True,
+                "partial": True,
+                "items": [
+                    {
+                        "index": 0,
+                        "suffix": "ABCDEF",
+                        "status": "valid",
+                        "accepted": True,
+                        "error": None,
+                        "http_status": None,
+                        "card_id": "routed-card",
+                        "product": receipt(None)["product"],
+                        "variant": None,
+                        "job": None,
+                    }
+                ],
+                "summary": {
+                    "total": 1,
+                    "accepted": 1,
+                    "valid": 1,
+                    "used": 0,
+                    "needs_retry": 0,
+                    "invalid": 0,
+                    "duplicate": 0,
+                },
+            },
+        )
 
     monkeypatch.setattr("sys.stdin", io.StringIO(legacy + "\n" + code))
     result = remote.execute(
@@ -561,8 +591,8 @@ def test_mixed_routes_save_successful_receipts_and_report_failures_without_crede
     assert legacy not in profile.read_text() and code not in profile.read_text()
     assert [str(request.url) for request in calls] == [
         ORIGIN + "/api/proxy/routes",
-        ORIGIN + "/api/exchange",
-        "https://b.example/api/exchange",
+        ORIGIN + "/api/batch/exchange",
+        "https://b.example/api/batch/exchange",
     ]
 
 

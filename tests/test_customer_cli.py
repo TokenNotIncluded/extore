@@ -227,8 +227,8 @@ def test_batch_requires_scoped_card_and_uses_each_frozen_schema(
     receipt = exchange(run, codes)
     rid = receipt["receipt_id"]
     cards = [item["card_id"] for item in receipt["items"]]
-    with pytest.raises(ManageError, match="Select --card"):
-        run("schema", "--receipt", rid)
+    grouped = run("schema", "--receipt", rid)["groups"]
+    assert len(grouped) == 1 and set(grouped[0]["card_ids"]) == set(cards)
     with pytest.raises(ManageError, match="not in this receipt"):
         run("schema", "--receipt", rid, "--card", "wrong-card")
     first = run(
@@ -274,7 +274,14 @@ def test_batch_requires_scoped_card_and_uses_each_frozen_schema(
 def test_batch_invalid_items_do_not_partially_submit(owner, customer, tmp_path):
     run, _, _ = customer
     product = make_product(owner)
-    receipt = exchange(run, issue(owner, product, 2))
+    receipt = run(
+        "exchange",
+        "--origin",
+        ORIGIN,
+        "--codes-stdin",
+        "--atomic",
+        stdin="\n".join(issue(owner, product, 2)),
+    )
     first, second = (item["card_id"] for item in receipt["items"])
     path = tmp_path / "items.json"
     path.write_text(
@@ -299,7 +306,14 @@ def test_exchange_mixed_products_is_atomic_and_expired_receipt_is_rejected(
     first = make_product(owner)
     second = make_product(owner)
     with pytest.raises(ManageError) as error:
-        exchange(run, issue(owner, first) + issue(owner, second))
+        run(
+            "exchange",
+            "--origin",
+            ORIGIN,
+            "--codes-stdin",
+            "--atomic",
+            stdin="\n".join(issue(owner, first) + issue(owner, second)),
+        )
     assert error.value.status == 400
     with db() as c:
         assert c.execute("SELECT count(*) FROM grants").fetchone()[0] == 0
@@ -901,7 +915,7 @@ def test_reuse_batch_requires_a_card_from_the_private_receipt(
     expected = "not in this receipt" if selection == "foreign" else "Select --card"
     with pytest.raises(ManageError, match=expected):
         run("retry", receipt["receipt_id"], "--reuse", *selected)
-    assert [path for _, path, _, _ in calls[count:]] == ["/api/receipt"]
+    assert [path for _, path, _, _ in calls[count:]] == ["/api/batch/receipt"]
     assert foreign["receipt_id"] != receipt["receipt_id"]
     with db() as c:
         assert c.execute("SELECT count(*) FROM jobs").fetchone()[0] == 0
