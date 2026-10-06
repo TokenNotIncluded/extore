@@ -1,6 +1,7 @@
 import io
 import json
 import stat
+import sys
 
 import httpx
 import pytest
@@ -119,3 +120,88 @@ def test_import_text_accepts_payload_over_old_json_loader_cap(cli):
         "cards", "import-text", "--product", "product-a", "--stdin", stdin="x" * 300000
     )
     assert result["ok"] and len(merchant.imports[0]["text"]) == 300000
+
+
+def test_actual_cli_imports_text_mapping_without_consuming_existing_cards(
+    owner, tmp_path, monkeypatch
+):
+    from fastapi.testclient import TestClient
+
+    from extore.app import app
+    from extore.db import db
+
+    response = owner.post(
+        "/api/admin/products",
+        json={"name": "Isolated stocked text", "mode": "stock", "parameters": []},
+    )
+    assert response.status_code == 200, response.text
+    pid = response.json()["id"]
+    response = owner.post(
+        "/api/admin/staff",
+        json={
+            "product_id": pid,
+            "name": "Synthetic stock manager",
+            "permissions": ["cards.manage"],
+        },
+    )
+    assert response.status_code == 200, response.text
+    profile = tmp_path / "profile.json"
+    with TestClient(app, base_url="http://localhost:8000") as api:
+
+        def actual(request):
+            result = api.request(
+                request.method,
+                str(request.url),
+                content=request.read(),
+                headers=dict(request.headers),
+            )
+            return httpx.Response(
+                result.status_code, content=result.content, headers=dict(result.headers)
+            )
+
+        transport = httpx.MockTransport(actual)
+
+        def command(*argv):
+            return remote.execute(
+                arguments(*argv, profile=profile), transport=transport
+            )
+
+        monkeypatch.setattr(sys, "stdin", io.StringIO(response.json()["url"]))
+        assert command("login", "--link-stdin")["ok"]
+        source = tmp_path / "stock.txt"
+        source.write_bytes("\ufeff alpha \r\n\r\nalpha\r\nβeta\r\n".encode())
+        saved = tmp_path / "mapping.json"
+        result = command(
+            "cards",
+            "import-text",
+            "--product",
+            pid,
+            "--file",
+            str(source),
+            "--output",
+            str(saved),
+        )
+        assert result["count"] == 2 and result["stats"]["duplicates"] == 1
+        assert stat.S_IMODE(saved.stat().st_mode) == 0o600
+        mapping = json.loads(saved.read_text())
+        assert [item["content"] for item in mapping["items"]] == ["alpha", "βeta"]
+        assert all(item["code"] not in json.dumps(result) for item in mapping["items"])
+        # A valid, line-bounded import exceeds the old 256k JSON transport cap.
+        bulk = tmp_path / "bulk.txt"
+        bulk.write_text("\n".join(f"{i}:" + "x" * 9000 for i in range(40)))
+        second = command("cards", "import-text", "--product", pid, "--file", str(bulk))
+        assert second["count"] == 40
+    with db() as c:
+        assert (
+            c.execute(
+                "SELECT count(*) FROM cards WHERE product_id=? AND state='ready'",
+                (pid,),
+            ).fetchone()[0]
+            == 42
+        )
+        assert (
+            c.execute(
+                "SELECT count(*) FROM jobs WHERE product_id=?", (pid,)
+            ).fetchone()[0]
+            == 0
+        )
