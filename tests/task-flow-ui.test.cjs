@@ -8,7 +8,7 @@ function fixture() {
   const nodes = new Map(), timers = new Map(), requests = [], results = [], uploads = [];
   let now = 1000000, active = true, writes = 0, id = 0;
   const decode = (value) => String(value).replaceAll("&quot;", '"').replaceAll("&#39;", "'").replaceAll("&lt;", "<").replaceAll("&gt;", ">").replaceAll("&amp;", "&");
-  const create = (id) => ({ id, value: "", textContent: "", isConnected: true, disabled: false, hidden: false, checked: false, files: [], dataset: {}, listeners: new Map(),
+  const create = (id) => ({ id, value: "", textContent: "", isConnected: true, disabled: false, hidden: false, checked: false, files: [], style: {}, dataset: {}, listeners: new Map(),
     addEventListener(event, fn) { this.listeners.set(event, fn); },
     emit(event) { return this.listeners.get(event)?.({ preventDefault() {}, target: this }); },
     getAttribute(name) { return this.attributes?.[name]; },
@@ -175,4 +175,36 @@ test("invalid timeout destinations are caught without restricting bounded back j
   assert.doesNotThrow(() => editor.validate(definition));
   definition.nodes[0].timeout_next = "does_not_exist";
   assert.throws(() => editor.validate(definition), /不存在/);
+});
+
+test("display stages render their own configured content without treating it as HTML", () => {
+  const page = fixture(); page.ctx.flow = flow("display", { current: { id: "review", kind: "display", content: { "zh-CN": "请检查 <b>上一步</b> 的内容后继续。" } } });
+  page.context.window.ExtoreTaskFlow.render(page.ctx);
+  assert.match(page.app.innerHTML, /请检查 &lt;b&gt;上一步/);
+  assert.equal(page.node("task-flow-submit").isConnected, true);
+});
+
+test("retrying a rejected answer reuses uploaded IDs instead of filling the card quota again", async () => {
+  const page = fixture(); page.ctx.flow = flow("input", { current: { id: "upload", kind: "input", fields: [{ key: "brief", type: "file" }] } });
+  let attempts = 0;
+  page.ctx.api = async () => { attempts++; throw new Error("Please retry submission"); };
+  page.context.window.ExtoreTaskFlow.render(page.ctx);
+  page.node("task-flow-field-brief").files = [{ name: "brief.docx" }];
+  page.node("task-flow-form").emit("submit"); await flush();
+  page.node("task-flow-form").emit("submit"); await flush();
+  assert.equal(attempts, 2);
+  assert.equal(page.uploads.length, 1);
+});
+
+test("cancellation requires confirmation and uses the current step revision", async () => {
+  const page = fixture(); page.ctx.flow = flow("processing", { actions: [], current: { id: "process", kind: "process" } });
+  let consent = false; page.ctx.confirm = () => consent;
+  page.context.window.ExtoreTaskFlow.render(page.ctx);
+  page.node("task-flow-cancel").emit("click"); await flush();
+  assert.equal(page.requests.length, 0);
+  consent = true; page.node("task-flow-cancel").emit("click"); await flush();
+  assert.equal(page.requests[0].route, "/task-flow/cancel");
+  assert.equal(page.requests[0].body.flow_epoch, 2);
+  assert.equal(page.requests[0].body.expected_revision, 7);
+  assert.equal(page.requests[0].body.values, undefined);
 });

@@ -363,6 +363,10 @@
       value: product.task_flow || null,
       disabled: !ctx.canConfigure,
       active,
+      onChange: (enabled) => {
+        const section = $("#parameters")?.closest(".form-divider");
+        if (section) section.hidden = enabled;
+      },
       confirm: (message) => globalThis.confirm(message),
       onPreset: () => {
         captureCustom();

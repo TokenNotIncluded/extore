@@ -7,8 +7,6 @@
 .task-flow-answer h3 { margin: 0 0 12px; }
 .task-flow-answer .result { margin: 0; }
 .task-flow-process-line { margin: 24px 0; }
-.task-flow-process-line > span { display: block; height: 3px; background: var(--green); transform-origin: left; animation: task-flow-processing 2.4s ease-in-out infinite; }
-@keyframes task-flow-processing { 0%, 100% { transform: scaleX(.24); opacity: .5; } 50% { transform: scaleX(.78); opacity: 1; } }
 .task-flow-presets { display: flex; gap: 12px; align-items: center; margin: 20px 0 24px; }
 .task-flow-presets > label { white-space: nowrap; }
 .task-flow-presets > select { flex: 1; min-width: 0; }
@@ -40,4 +38,4 @@
   .task-flow-schema textarea, .task-flow-advanced textarea { font-size: 16px; }
   .task-flow-timing { align-items: flex-start; flex-direction: column; gap: 4px; }
 }
-@media (prefers-reduced-motion: reduce) { .task-flow-process-line > span { animation: none; } }
+.task-flow-cancel { margin-top: 24px; }

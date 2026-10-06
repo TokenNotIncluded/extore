@@ -21,7 +21,7 @@
         : field.options || [];
       markup = `<select id="${escape(id)}" ${required}><option value="">${lang === "en" ? "Choose…" : "请选择"}</option>${options.map((option) => `<option value="${escape(option.value)}">${escape(localized(option.label, lang))}</option>`).join("")}</select>`;
     } else if (["file", "image", "images"].includes(field.type)) {
-      markup = `<input id="${escape(id)}" type="file" ${required} ${field.type === "images" ? "multiple" : ""} ${field.type !== "file" ? 'accept="image/png,image/jpeg,image/webp,image/gif"' : ""}>`;
+      markup = `<input id="${escape(id)}" type="file" ${required} ${field.type === "images" ? "multiple" : ""} ${field.type !== "file" ? 'accept="image/png,image/jpeg,image/webp"' : ""}>`;
     } else if (field.type === "textarea") markup = `<textarea id="${escape(id)}" ${required} maxlength="10000"></textarea>`;
     else markup = `<input id="${escape(id)}" ${field.sensitive ? "data-task-flow-sensitive" : ""} type="${field.sensitive ? "password" : escape(["text", "email", "url", "number"].includes(field.type) ? field.type : "text")}" ${required} ${field.type === "number" ? 'step="any"' : ""} maxlength="10000" ${field.sensitive ? 'autocomplete="off"' : ""}>`;
     if (field.sensitive) markup = markup.replace(/<(input|textarea)\b/, "<$1 data-task-flow-sensitive");
@@ -43,7 +43,7 @@
       return true;
     }
     dispose(ctx.app);
-    view = { key, flow, ctx, timer: null, expiredRefresh: false, disposed: false, busy: false };
+    view = { key, flow, ctx, timer: null, expiredRefresh: false, disposed: false, busy: false, uploads: new Map() };
     views.set(ctx.app, view);
     const current = flow.current || {};
     const phase = flow.phase;
@@ -53,24 +53,44 @@
     const action = awaiting ? "start" : activeInput ? "answer" : phase === "display" ? "continue" : null;
     const title = localized(current.label, ctx.lang) || tr("兑换步骤", "Redemption step");
     const shown = (flow.shown || []).map((item) => `<section class="task-flow-answer"><h3>${escape(localized(item.label, ctx.lang) || item.key || tr("上一步的结果", "Previous result"))}</h3><pre class="result">${escape(item.value)}</pre></section>`).join("");
-    const prompt = localized(awaiting ? current.prompt : current.question || current.prompt, ctx.lang);
+    const prompt = localized(awaiting ? current.prompt : current.question || current.content || current.prompt, ctx.lang);
     const batchBack = ctx.cardId ? `<button type="button" id="task-flow-batch-back" class="secondary">← ${tr("全部卡密", "All codes")}</button>` : "";
-    ctx.app.innerHTML = `<div id="task-flow-root" class="narrow task-flow-page">${batchBack}<h1>${escape(ctx.product.name)}</h1>${ctx.variant?.name ? `<p class="caption">${tr("规格：", "Variant: ")}${escape(ctx.variant.name)}</p>` : ""}<section class="panel receipt-panel ${processing ? "receipt-waiting" : ""}">${processing ? '<div class="paper-divider waiting-top" aria-hidden="true"></div>' : ""}<div class="section-head"><h2>${escape(title)}</h2><span id="task-flow-status" class="status"></span></div><p id="task-flow-timing" class="task-flow-timing" hidden><span>${tr("本步剩余时间", "Time left for this step")}</span><strong id="task-flow-clock" class="mono"></strong></p>${shown}${prompt ? `<p class="task-flow-prompt">${escape(prompt)}</p>` : ""}<p id="task-flow-message"></p><p id="task-flow-position" class="caption" hidden></p>${activeInput ? `<form id="task-flow-form">${(current.fields || []).map((field) => control(field, ctx.lang)).join("")}<button id="task-flow-submit" type="submit" class="full">${tr("提交，继续下一步", "Submit and continue")}</button></form>` : action ? `<button id="task-flow-submit" type="button" class="full">${awaiting ? tr("开始", "Start") : tr("继续", "Continue")}</button>` : ""}${awaiting ? `<p class="caption">${tr("点击开始后，本步骤才开始计时。刷新页面不会重新计时。", "This step's timer starts when you click Start. Refreshing the page does not reset it.")}</p>` : ""}${processing ? `<div class="task-flow-process-line"><span aria-hidden="true"></span><p class="caption">${tr("正在处理当前步骤，结果会自动出现在这里。", "This step is being processed. Its result will appear here automatically.")}</p></div>` : ""}<div id="task-flow-error" class="error" role="alert"></div>${processing ? '<div class="paper-divider waiting-bottom" aria-hidden="true"></div>' : ""}</section><div class="receipt-link"><strong>${tr("保存领取链接", "Save your receipt link")}</strong><p>${escape(ctx.receiptUrl)}</p><button type="button" id="task-flow-copy" class="secondary">${tr("复制链接", "Copy link")}</button><p class="caption">${tr("可以从同一个领取链接继续当前步骤，请勿转发给他人。", "Use this receipt link to return to the current step. Do not forward it.")}</p></div></div>`;
+    ctx.app.innerHTML = `<div id="task-flow-root" class="narrow task-flow-page">${batchBack}<h1>${escape(ctx.product.name)}</h1>${ctx.variant?.name ? `<p class="caption">${tr("规格：", "Variant: ")}${escape(ctx.variant.name)}</p>` : ""}<section class="panel receipt-panel ${processing ? "receipt-waiting" : ""}">${processing ? '<div class="paper-divider waiting-top" aria-hidden="true"></div>' : ""}<div class="section-head"><h2>${escape(title)}</h2><span id="task-flow-status" class="status"></span></div><p id="task-flow-timing" class="task-flow-timing" hidden><span>${tr("本步剩余时间", "Time left for this step")}</span><strong id="task-flow-clock" class="mono"></strong></p>${shown}${prompt ? `<p class="task-flow-prompt">${escape(prompt)}</p>` : ""}<p id="task-flow-message"></p><p id="task-flow-position" class="caption" hidden></p>${activeInput ? `<form id="task-flow-form">${(current.fields || []).map((field) => control(field, ctx.lang)).join("")}<button id="task-flow-submit" type="submit" class="full">${tr("提交，继续下一步", "Submit and continue")}</button></form>` : action ? `<button id="task-flow-submit" type="button" class="full">${awaiting ? tr("开始", "Start") : tr("继续", "Continue")}</button>` : ""}${awaiting ? `<p class="caption">${tr("点击开始后，本步骤才开始计时。刷新页面不会重新计时。", "This step's timer starts when you click Start. Refreshing the page does not reset it.")}</p>` : ""}${processing ? `<div id="task-flow-progress" class="progress" role="progressbar" aria-label="${tr("处理进度", "Processing progress")}" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0"><span id="task-flow-progress-bar"></span></div><p id="task-flow-progress-label" class="caption"></p><div id="task-flow-progress-steps"></div><div class="task-flow-process-line"><p class="caption">${tr("正在处理当前步骤，结果会自动出现在这里。", "This step is being processed. Its result will appear here automatically.")}</p></div>${window.ExtoreMotion?.waitingMarkup(ctx.lang) || ""}${window.ExtoreMotion ? `<button type="button" id="task-flow-motion-toggle" class="secondary motion-toggle" aria-pressed="${ctx.animationPaused === true}">${ctx.animationPaused ? tr("播放动画", "Play animation") : tr("暂停动画", "Pause animation")}</button>` : ""}` : ""}<button type="button" id="task-flow-cancel" class="secondary task-flow-cancel">${tr("取消本次处理", "Cancel this attempt")}</button><div id="task-flow-error" class="error" role="alert"></div>${processing ? '<div class="paper-divider waiting-bottom" aria-hidden="true"></div>' : ""}</section><div class="receipt-link"><strong>${tr("保存领取链接", "Save your receipt link")}</strong><p>${escape(ctx.receiptUrl)}</p><button type="button" id="task-flow-copy" class="secondary">${tr("复制链接", "Copy link")}</button><p class="caption">${tr("可以从同一个领取链接继续当前步骤，请勿转发给他人。", "Use this receipt link to return to the current step. Do not forward it.")}</p></div></div>`;
     view.root = ctx.app.querySelector("#task-flow-root");
+    if (processing && window.ExtoreMotion) {
+      view.motion = window.ExtoreMotion.mount(ctx.app);
+      view.paused = ctx.animationPaused === true;
+      view.motion.setPaused(view.paused);
+      ctx.app.querySelector("#task-flow-motion-toggle")?.addEventListener("click", () => {
+        if (view.disposed) return;
+        view.paused = !view.paused;
+        view.motion.setPaused(view.paused);
+        ctx.setAnimationPaused?.(view.paused);
+        const button = ctx.app.querySelector("#task-flow-motion-toggle");
+        button?.setAttribute("aria-pressed", String(view.paused));
+        if (button) button.textContent = view.paused ? tr("播放动画", "Play animation") : tr("暂停动画", "Pause animation");
+      });
+    }
     const active = () => !view.disposed && views.get(ctx.app) === view && view.ctx.active() && view.root?.isConnected !== false;
-    const execute = async () => {
+    const execute = async (requestedAction = action) => {
       if (!active() || view.busy) return;
+      if (requestedAction === "cancel") {
+        const message = view.flow.phase === "processing"
+          ? tr("取消本次处理并清除资料？已发生的外部操作不会被撤销；商家需要核实后续状态。", "Cancel this attempt and clear its data? External actions that already occurred cannot be undone; the merchant must verify their status.")
+          : tr("取消本次处理并清除本次资料？", "Cancel this attempt and clear its data?");
+        if (!(ctx.confirm ? ctx.confirm(message) : window.confirm(message))) return;
+      }
       view.busy = true;
-      const button = ctx.app.querySelector("#task-flow-submit");
+      const button = ctx.app.querySelector(requestedAction === "cancel" ? "#task-flow-cancel" : "#task-flow-submit");
       if (button) button.disabled = true;
       const error = ctx.app.querySelector("#task-flow-error");
       if (error) error.textContent = "";
       try {
         const currentFlow = view.flow;
-        if (!(currentFlow.actions || []).includes(action)) throw new Error(tr("当前步骤已经变化，请刷新后继续。", "The step has changed. Refresh to continue."));
+        if (requestedAction !== "cancel" && !(currentFlow.actions || []).includes(requestedAction)) throw new Error(tr("当前步骤已经变化，请刷新后继续。", "The step has changed. Refresh to continue."));
         const body = { token: ctx.token, flow_epoch: currentFlow.flow_epoch, expected_revision: currentFlow.revision };
         if (ctx.cardId) body.card_id = ctx.cardId;
-        if (action === "answer") {
+        if (requestedAction === "answer") {
           body.values = {};
           for (const definition of currentFlow.current?.fields || []) {
             const node = ctx.app.querySelector("#task-flow-field-" + definition.key);
@@ -79,18 +99,24 @@
               const chosen = Array.from(node.files || []);
               if (definition.type !== "images" && chosen.length > 1) throw new Error(tr("这个填写项只能上传一个文件。", "This field accepts one file."));
               if (definition.type === "images" && chosen.length > (definition.max_items || 10)) throw new Error(tr("选择的图片数量超过这个填写项的限制。", "Too many images for this field."));
-              const ids = [];
-              for (const file of chosen) {
+              let cached = view.uploads.get(definition.key);
+              if (!cached || cached.sources.length !== chosen.length || cached.sources.some((file, index) => file !== chosen[index])) {
+                cached = { sources: chosen, ids: [] };
+                view.uploads.set(definition.key, cached);
+              }
+              for (const [index, file] of chosen.entries()) {
+                if (cached.ids[index]) continue;
                 const upload = { token: ctx.token, field_key: definition.key, flow_epoch: currentFlow.flow_epoch, expected_revision: currentFlow.revision, node_id: currentFlow.current.id };
                 if (ctx.cardId) upload.card_id = ctx.cardId;
-                ids.push((await ctx.upload("/files/upload", upload, file)).id);
+                cached.ids[index] = (await ctx.upload("/files/upload", upload, file)).id;
                 if (!active()) return;
               }
+              const ids = cached.ids;
               body.values[definition.key] = definition.type === "images" ? JSON.stringify(ids) : ids[0] || "";
             } else body.values[definition.key] = window.ExtoreFields?.read ? window.ExtoreFields.read(node, definition) : node.value;
           }
         }
-        const result = await ctx.api("/task-flow/" + action, body);
+        const result = await ctx.api("/task-flow/" + requestedAction, body);
         if (active()) await view.ctx.onResult(result);
       } catch (failure) {
         if (active() && error) error.textContent = failure.message || String(failure);
@@ -102,6 +128,7 @@
     const form = ctx.app.querySelector("#task-flow-form");
     if (form) form.addEventListener("submit", (event) => { event.preventDefault(); void execute(); });
     else ctx.app.querySelector("#task-flow-submit")?.addEventListener("click", () => { void execute(); });
+    ctx.app.querySelector("#task-flow-cancel")?.addEventListener("click", () => { void execute("cancel"); });
     ctx.app.querySelector("#task-flow-copy")?.addEventListener("click", async () => {
       const copied = await ctx.copy(ctx.receiptUrl);
       if (active()) ctx.notify(copied ? tr("链接已复制", "Link copied") : tr("复制失败，请手动复制上方链接。", "Could not copy. Copy the link above manually."));
@@ -141,6 +168,17 @@
       const place = ctx.job?.queue_position || (Number(ctx.job?.queue_ahead) || 0) + 1;
       position.textContent = tr(`当前队列第 ${place} 位`, `Queue position ${place}`);
     }
+    const progress = ctx.app.querySelector("#task-flow-progress");
+    if (progress) {
+      const percentage = Math.max(0, Math.min(100, Number(ctx.job?.progress) || 0));
+      progress.setAttribute?.("aria-valuenow", String(percentage));
+      const bar = ctx.app.querySelector("#task-flow-progress-bar");
+      if (bar) bar.style.transform = "scaleX(" + percentage / 100 + ")";
+      const label = ctx.app.querySelector("#task-flow-progress-label");
+      if (label) label.textContent = percentage + "%";
+      const steps = ctx.app.querySelector("#task-flow-progress-steps");
+      if (steps && ctx.renderSteps) steps.innerHTML = ctx.renderSteps(ctx.job || {});
+    }
     if (seconds === 0 && !view.expiredRefresh && !view.busy) {
       view.expiredRefresh = true;
       Promise.resolve(ctx.refresh()).catch(() => { view.expiredRefresh = false; });
@@ -152,6 +190,8 @@
     if (!view || (expected && expected !== view)) return;
     view.disposed = true;
     clearTimeout(view.timer);
+    view.motion?.dispose();
+    view.uploads.clear();
     for (const input of app.querySelectorAll?.('[data-task-flow-sensitive]') || []) input.value = "";
     views.delete(app);
   }

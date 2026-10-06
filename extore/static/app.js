@@ -672,6 +672,23 @@ async function retryOriginalReceipt(options = {}) {
   }
   return result;
 }
+async function restartTaskFlowReceipt(options = {}) {
+  const context = receiptRequestContext(options);
+  const flow = window.ExtoreTaskFlow?.flowOf(currentJob, currentProduct) || currentJob?.task_flow;
+  if (!flow) throw new Error(tr("当前任务不使用编排", "This task does not use a task flow"));
+  const result = await api("/task-flow/restart", receiptCardBody(context, {
+    flow_epoch: flow.flow_epoch, expected_revision: flow.revision,
+  }), "POST", options);
+  if (context.active()) {
+    const nextJob = result.job || result;
+    if (currentBatch && context.cardId) {
+      const item = currentBatch.items.find((entry) => entry.card_id === context.cardId);
+      if (item) item.job = nextJob;
+    }
+    renderReceipt(nextJob);
+  }
+  return result;
+}
 async function readReceipt(options = {}) {
   const context = receiptRequestContext(options);
   let result;
@@ -787,8 +804,10 @@ function renderTaskFlow(job = null) {
     token: context.token, cardId: context.cardId,
     variant: job?.variant || currentVariant,
     receiptUrl: location.origin + "/receipt#" + context.token,
-    active: context.active, api, upload: uploadMultipart, uploadLimit: uploadFileLimit,
-    copy: writeClipboard, notify: toast, refresh: readReceipt,
+    active: context.active, api, upload: uploadMultipart, uploadLimit: uploadFileLimit, confirm: (message) => confirm(message),
+    copy: writeClipboard, notify: toast, refresh: readReceipt, renderSteps: fulfillmentStepsMarkup,
+    animationPaused: waitingAnimationPaused,
+    setAnimationPaused: (value) => { waitingAnimationPaused = value; },
     back: () => { selectBatchCard(); openBatch(currentBatch); },
     onResult: async (result) => {
       if (!context.active()) return;
@@ -1047,6 +1066,7 @@ function renderReceipt(j) {
     openBatch(currentBatch);
   });
   on("#retry", async () => {
+    if (j.task_flow) { await restartTaskFlowReceipt(); return; }
     if (j.state === "needs_input" && j.retry_mode === "reuse") { await retryOriginalReceipt(); return; }
     selectBatchCard(batchSelection, Boolean(currentBatch && batchSelection));
     redemptionForm();

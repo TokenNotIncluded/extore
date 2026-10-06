@@ -2,7 +2,9 @@
 
 import getpass
 import json
+import math
 import os
+import re
 import secrets
 import stat
 import sys
@@ -179,6 +181,213 @@ def _receipt_shape(value):
     return value
 
 
+FLOW_PHASES = frozenset(
+    {"await_start", "input", "queued", "processing", "display", "ended"}
+)
+ATTACHMENT_TYPES = frozenset({"file", "image", "images"})
+
+
+def _field_schema(field, *, detail=False):
+    _object(field)
+    if not isinstance(field.get("key"), str):
+        raise ManageError("Invalid field schema", code="invalid_response")
+    keys = ("key", "label", "type", "required", "options", "max_items", "sensitive")
+    if detail:
+        keys += ("description", "collapsed")
+    return {key: field[key] for key in keys if key in field}
+
+
+def _selected_flow(selected):
+    row = selected.get("job") or {}
+    product = selected.get("product") or {}
+    flow = row.get("task_flow") or product.get("task_flow_view")
+    if (
+        flow is None
+        and isinstance(product.get("task_flow"), dict)
+        and product["task_flow"].get("enabled")
+    ):
+        flow = product["task_flow"]
+    if flow is not None:
+        _object(flow)
+        if (
+            flow.get("enabled") is not True
+            or flow.get("phase") not in FLOW_PHASES
+            or type(flow.get("flow_epoch")) is not int
+            or flow["flow_epoch"] < 0
+            or type(flow.get("revision")) is not int
+            or flow["revision"] < 0
+            or not isinstance(flow.get("current"), dict)
+            or not isinstance(flow.get("actions", []), list)
+            or any(
+                action not in ("start", "answer", "continue", "restart")
+                for action in flow.get("actions", [])
+            )
+        ):
+            raise ManageError("Invalid task flow response", code="invalid_response")
+    return flow
+
+
+def _summary_flow(flow, *, content=False, detail=False):
+    if flow is None:
+        return None
+    _selected_flow({"job": {"task_flow": flow}})
+    result = {
+        key: flow[key]
+        for key in (
+            "enabled",
+            "version",
+            "flow_epoch",
+            "revision",
+            "phase",
+            "deadline",
+            "server_time",
+            "actions",
+        )
+        if key in flow
+    }
+    current = flow["current"]
+    result["current"] = {
+        key: current[key]
+        for key in (
+            "id",
+            "kind",
+            "label",
+            "prompt",
+            "question",
+            "content",
+            "start_policy",
+        )
+        if key in current
+    }
+    if "fields" in current:
+        result["current"]["fields"] = [
+            _field_schema(field, detail=detail) for field in _objects(current["fields"])
+        ]
+    shown = _objects(flow.get("shown", []))
+    result["shown"] = [
+        {
+            key: item[key]
+            for key in (
+                ("key", "label", "type", "value")
+                if content
+                else ("key", "label", "type")
+            )
+            if key in item
+        }
+        for item in shown
+    ]
+    if content:
+        for public, source in zip(result["shown"], shown, strict=True):
+            if "files" in source:
+                public["files"] = [
+                    {
+                        key: item[key]
+                        for key in ("id", "field_key", "filename", "size", "mime")
+                        if key in item
+                    }
+                    for item in _objects(source["files"])
+                ]
+    return result
+
+
+def _attachment_paths(attachments, fields):
+    attached = {}
+    for specification in attachments:
+        key, separator, path = specification.partition("=")
+        if not separator or not key or not path or key not in fields:
+            raise ManageError(
+                "Use --file FIELD=PATH for a defined attachment field",
+                code="invalid_input",
+            )
+        field = fields[key]
+        if field.get("type") not in ATTACHMENT_TYPES:
+            raise ManageError(
+                "An attachment must target a file or image parameter",
+                code="invalid_input",
+            )
+        paths = attached.setdefault(key, [])
+        if paths and field.get("type") != "images":
+            raise ManageError(
+                "Use --file FIELD=PATH once per single-file field", code="invalid_input"
+            )
+        paths.append(Path(path).expanduser())
+        if len(paths) > (
+            field.get("max_items", 10) if field.get("type") == "images" else 1
+        ):
+            raise ManageError(
+                "Too many files for this attachment field", code="invalid_input"
+            )
+    # All local paths are checked before the first upload begins.
+    for paths in attached.values():
+        for source in paths:
+            info = source.lstat()
+            if not stat.S_ISREG(info.st_mode) or info.st_size > MAX_FILE_BYTES:
+                raise ManageError(
+                    "Attachment is not a regular file or exceeds 20 MiB",
+                    code="invalid_upload",
+                )
+    return attached
+
+
+def _flow_values(value, fields):
+    if not isinstance(value, dict) or any(not isinstance(key, str) for key in value):
+        raise ManageError("Step values must be a JSON object", code="invalid_input")
+    if set(value) - fields.keys():
+        raise ManageError(
+            "Unknown step field; use customer flow view first", code="invalid_input"
+        )
+    result = {}
+    for key, supplied in value.items():
+        kind = fields[key].get("type", "text")
+        if kind == "boolean" and type(supplied) is bool:
+            supplied = "true" if supplied else "false"
+        elif kind == "number" and type(supplied) in (int, float):
+            if type(supplied) is float and not math.isfinite(supplied):
+                raise ManageError("Step numbers must be finite", code="invalid_input")
+            supplied = str(supplied)
+        elif (
+            kind == "images"
+            and isinstance(supplied, list)
+            and all(isinstance(item, str) for item in supplied)
+        ):
+            supplied = json.dumps(supplied, separators=(",", ":"))
+        if not isinstance(supplied, str) or len(supplied) > 10000:
+            raise ManageError(
+                "Step values must match their defined field types", code="invalid_input"
+            )
+        if kind == "boolean" and supplied not in ("", "true", "false"):
+            raise ManageError(
+                "A boolean field accepts true or false", code="invalid_input"
+            )
+        if (
+            kind == "select"
+            and supplied
+            and supplied
+            not in {item["value"] for item in fields[key].get("options", [])}
+        ):
+            raise ManageError("Choose a defined option value", code="invalid_input")
+        if kind == "images" and supplied:
+            try:
+                ids = json.loads(supplied)
+            except ValueError:
+                raise ManageError(
+                    "An image collection needs a JSON array of file IDs",
+                    code="invalid_input",
+                ) from None
+            if (
+                not isinstance(ids, list)
+                or any(not isinstance(item, str) for item in ids)
+                or len(set(ids)) != len(ids)
+                or len(ids) > fields[key].get("max_items", 10)
+            ):
+                raise ManageError(
+                    "Invalid or oversized image collection", code="invalid_input"
+                )
+            supplied = json.dumps(ids, separators=(",", ":"))
+        result[key] = supplied
+    return result
+
+
 def _summary_product(product):
     _product_shape(product)
     result = {
@@ -195,6 +404,9 @@ def _summary_product(product):
             }
             for variant in product["variants"]
         ]
+    flow = _selected_flow({"product": product})
+    if flow is not None:
+        result["task_flow"] = _summary_flow(flow)
     return result
 
 
@@ -202,7 +414,7 @@ def _summary_job(job):
     _job_shape(job)
     if job is None:
         return None
-    return {
+    result = {
         key: job[key]
         for key in (
             "id",
@@ -223,6 +435,10 @@ def _summary_job(job):
         )
         if key in job
     }
+    flow = _selected_flow({"job": job})
+    if flow is not None:
+        result["task_flow"] = _summary_flow(flow)
+    return result
 
 
 def _summary_variant(value):
@@ -244,6 +460,7 @@ def _summary_receipt(value):
                 {
                     "card_id": item["card_id"],
                     "suffix": item.get("suffix", ""),
+                    "product": _summary_product(item["product"]),
                     "variant": _summary_variant(item.get("variant")),
                     "job": _summary_job(item.get("job")),
                 }
@@ -263,22 +480,8 @@ def _schema(product, detail=False):
         return product
     return {
         **_summary_product(product),
-        "parameters": [
-            {
-                key: field[key]
-                for key in ("key", "label", "type", "required")
-                if key in field
-            }
-            for field in product.get("parameters", [])
-        ],
-        "outputs": [
-            {
-                key: field[key]
-                for key in ("key", "label", "type", "required")
-                if key in field
-            }
-            for field in product.get("outputs", [])
-        ],
+        "parameters": [_field_schema(field) for field in product.get("parameters", [])],
+        "outputs": [_field_schema(field) for field in product.get("outputs", [])],
     }
 
 
@@ -316,19 +519,110 @@ def _validate_params(value, product, *, attached=()):
         raise ManageError(
             "Unknown parameter; use customer schema first", code="invalid_input"
         )
-    if any(fields[key].get("type") != "file" for key in attached):
+    if any(fields[key].get("type") not in ATTACHMENT_TYPES for key in attached):
         raise ManageError(
-            "An attachment must target a file parameter", code="invalid_input"
+            "An attachment must target a file or image parameter", code="invalid_input"
         )
     for key, field in fields.items():
         if (
             field.get("required", True)
-            and not value.get(key, "").strip()
+            and (
+                not value.get(key, "").strip()
+                or (
+                    field.get("type") == "images" and value.get(key, "").strip() == "[]"
+                )
+            )
             and key not in attached
         ):
             raise ManageError(
                 f"Required parameter is missing: {key}", code="invalid_input"
             )
+
+
+def _exchange_groups(client, origin, text):
+    """Resolve signed destinations locally; no routed secret is sent to A."""
+    codes = []
+    initial_seen = set()
+    for part in re.split(r"[\s,，;；]+", text):
+        if not part:
+            continue
+        identity = (
+            part
+            if re.match(r"(?i)^EXR[0-9]+(?:\.|$)", part)
+            else part.upper().replace("-", "")
+        )
+        if identity not in initial_seen:
+            initial_seen.add(identity)
+            codes.append(part)
+    if not 1 <= len(codes) <= 30:
+        raise ManageError("Provide 1 to 30 codes", code="invalid_input")
+    routed = [code for code in codes if re.match(r"(?i)^EXR[0-9]+(?:\.|$)", code)]
+    routes = {}
+    parsed = {}
+    if routed:
+        try:
+            from .proxy_routes import (
+                canonical_origin,
+                canonical_path,
+                parse_routed_code,
+                verify_routed_code,
+            )
+        except ImportError:
+            raise ManageError(
+                "Routed code support is unavailable; update Extore CLI",
+                code="unsupported_route",
+            ) from None
+        # Reject unknown protocol versions and malformed signatures before
+        # contacting A, even for its public metadata.
+        for code in routed:
+            try:
+                parsed[code] = parse_routed_code(code)
+            except ValueError:
+                raise ManageError(
+                    "Invalid or unsupported routed code", code="invalid_route"
+                ) from None
+        metadata = _objects(client.json(origin, "GET", "/api/proxy/routes"))
+        if len(metadata) > 1000:
+            raise ManageError("Too many routed destinations", code="invalid_response")
+        for row in metadata:
+            route_id = row.get("route_id")
+            if not isinstance(route_id, str) or route_id in routes:
+                raise ManageError(
+                    "Invalid routed destination metadata", code="invalid_response"
+                )
+            routes[route_id] = {
+                key: row[key]
+                for key in ("route_id", "issuer_id", "origin", "path", "public_key")
+                if key in row
+            }
+    groups = {}
+    seen = set()
+    for code in codes:
+        destination = origin
+        if code in parsed:
+            route = routes.get(parsed[code]["route_id"])
+            if route is None:
+                raise ManageError(
+                    "Routed destination is unavailable; contact the merchant",
+                    code="unknown_route",
+                )
+            try:
+                secret = verify_routed_code(code, route)
+                destination = canonical_origin(route["origin"])
+                if canonical_path(route["path"]) != "/":
+                    raise ValueError("unsupported mount")
+            except ValueError:
+                raise ManageError(
+                    "Routed destination or signature is invalid", code="invalid_route"
+                ) from None
+            identity = (destination, secret)
+        else:
+            identity = (destination, code.upper().replace("-", "").replace(" ", ""))
+        if identity in seen:
+            continue
+        seen.add(identity)
+        groups.setdefault(destination, []).append(code)
+    return groups
 
 
 def _private_output(target):
@@ -343,6 +637,7 @@ class CustomerClient:
     def __init__(self, data=None, *, transport=None, persist=None):
         self.data = data
         self.persist = persist or (lambda: None)
+        self.upload_limits = {}
         self.http = httpx.Client(
             transport=transport,
             timeout=httpx.Timeout(120, connect=15),
@@ -485,29 +780,58 @@ class CustomerClient:
             )
         return value
 
+    def upload_limit(self, origin):
+        if origin not in self.upload_limits:
+            limits = _object(self.json(origin, "GET", "/api/upload-limits"))
+            limit = limits.get("max_file_bytes")
+            if type(limit) is not int or limit < 1:
+                raise ManageError(
+                    "Invalid server upload limit", code="invalid_response"
+                )
+            self.upload_limits[origin] = min(limit, MAX_FILE_BYTES)
+        return self.upload_limits[origin]
+
+    def preflight_uploads(self, origin, attached):
+        if not attached:
+            return
+        limit = self.upload_limit(origin)
+        for sources in attached.values():
+            for source in sources:
+                info = source.lstat()
+                if not stat.S_ISREG(info.st_mode) or info.st_size > limit:
+                    raise ManageError(
+                        f"Upload must be a regular file no larger than {limit} bytes",
+                        code="invalid_upload",
+                    )
+
     def upload(self, entry, card_id, field, source, *, value=None):
         value = value or self.receipt(entry)
         selected = self.select(value, card_id)
-        fields = {
-            item["key"]: item for item in selected["product"].get("parameters", [])
-        }
-        if field not in fields or fields[field].get("type") != "file":
+        flow = _selected_flow(selected)
+        definitions = (
+            flow["current"].get("fields", [])
+            if flow
+            else selected["product"].get("parameters", [])
+        )
+        fields = {item["key"]: item for item in definitions}
+        if field not in fields or fields[field].get("type") not in ATTACHMENT_TYPES:
             raise ManageError(
-                "Select a file parameter from customer schema", code="invalid_input"
+                "Select a file or image parameter from customer schema",
+                code="invalid_input",
             )
         row = selected.get("job")
-        if row and (
-            row.get("state") not in ("failed", "needs_input")
-            or not row.get("can_retry")
+        if (flow and flow.get("phase") != "input") or (
+            not flow
+            and row
+            and (
+                row.get("state") not in ("failed", "needs_input")
+                or not row.get("can_retry")
+            )
         ):
             raise ManageError(
                 "This task cannot accept new input files", code="invalid_state"
             )
-        limits = _object(self.json(entry["origin"], "GET", "/api/upload-limits"))
-        limit = limits.get("max_file_bytes")
-        if type(limit) is not int or limit < 1:
-            raise ManageError("Invalid server upload limit", code="invalid_response")
-        limit = min(limit, MAX_FILE_BYTES)
+        limit = self.upload_limit(entry["origin"])
         info = source.lstat()
         if not stat.S_ISREG(info.st_mode) or info.st_size > limit:
             raise ManageError(
@@ -515,6 +839,12 @@ class CustomerClient:
                 code="invalid_upload",
             )
         data = {"token": entry["token"], "field_key": field}
+        if flow:
+            data.update(
+                flow_epoch=flow["flow_epoch"],
+                expected_revision=flow["revision"],
+                node_id=flow["current"]["id"],
+            )
         if card_id:
             data["card_id"] = card_id
         with os.fdopen(os.open(source, os.O_RDONLY | os.O_NOFOLLOW), "rb") as upload:
@@ -534,9 +864,23 @@ class CustomerClient:
         }
         if not isinstance(descriptor.get("id"), str) or not descriptor["id"]:
             raise ManageError("Invalid uploaded file response", code="invalid_response")
-        entry.setdefault("inputs", {}).setdefault(card_id or "single", {})[field] = (
-            descriptor
-        )
+        cached = entry.setdefault("inputs", {}).setdefault(card_id or "single", {})
+        if fields[field].get("type") == "images":
+            previous = cached.get(field, {})
+            epoch = flow["flow_epoch"] if flow else None
+            descriptors = (
+                previous.get("files", []) if previous.get("flow_epoch") == epoch else []
+            )
+            cached[field] = {
+                "field_key": field,
+                "type": "images",
+                "flow_epoch": epoch,
+                "files": [*descriptors, descriptor],
+            }
+        else:
+            cached[field] = descriptor
+            if flow:
+                descriptor["flow_epoch"] = flow["flow_epoch"]
         self.persist()
         return {"ok": True, "receipt_id": entry["id"], "field": field, **descriptor}
 
@@ -570,34 +914,39 @@ class CustomerClient:
                 seen.add(item["card_id"])
                 selected = self.select(value, item["card_id"])
                 self._submit_state(selected, retry)
+                if _selected_flow(selected):
+                    raise ManageError(
+                        "Start each task flow explicitly with customer flow start",
+                        code="invalid_state",
+                    )
                 _validate_params(_params(item["params"]), selected["product"])
             body["items"] = items
         else:
             selected = self.select(value, card_id)
             self._submit_state(selected, retry)
             params = _params(params)
-            attached = {}
-            for specification in attachments:
-                field, separator, path = specification.partition("=")
-                if not separator or not field or not path or field in attached:
-                    raise ManageError(
-                        "Use --file FIELD=PATH once per file field",
-                        code="invalid_input",
-                    )
-                attached[field] = Path(path).expanduser()
+            if _selected_flow(selected):
+                raise ManageError(
+                    "This product uses a task flow; use customer flow start or answer",
+                    code="invalid_state",
+                )
+            fields = {
+                field["key"]: field
+                for field in selected["product"].get("parameters", [])
+            }
+            attached = _attachment_paths(attachments, fields)
             _validate_params(params, selected["product"], attached=attached)
-            # Validate every local attachment before starting any upload.
-            for source in attached.values():
-                info = source.lstat()
-                if not stat.S_ISREG(info.st_mode) or info.st_size > MAX_FILE_BYTES:
-                    raise ManageError(
-                        "Attachment is not a regular file or exceeds 20 MiB",
-                        code="invalid_upload",
-                    )
-            for field, source in attached.items():
-                params[field] = self.upload(entry, card_id, field, source, value=value)[
-                    "id"
+            self.preflight_uploads(entry["origin"], attached)
+            for field, sources in attached.items():
+                ids = [
+                    self.upload(entry, card_id, field, source, value=value)["id"]
+                    for source in sources
                 ]
+                params[field] = (
+                    json.dumps(ids, separators=(",", ":"))
+                    if fields[field].get("type") == "images"
+                    else ids[0]
+                )
             if value.get("batch"):
                 body["items"] = [{"card_id": card_id, "params": params}]
             else:
@@ -607,6 +956,114 @@ class CustomerClient:
             result = {**value, "job": result}
         entry["status"] = _summary_receipt(result)
         return {"ok": True, "receipt_id": entry["id"], **entry["status"]}
+
+    def flow(
+        self,
+        entry,
+        action,
+        *,
+        card_id=None,
+        values=None,
+        attachments=(),
+        flow_epoch=None,
+        expected_revision=None,
+        target=None,
+        detail=False,
+    ):
+        receipt = self.receipt(entry)
+        selected = self.select(receipt, card_id)
+        flow = _selected_flow(selected)
+        if flow is None:
+            raise ManageError(
+                "This receipt uses simple redemption, not a task flow",
+                code="invalid_state",
+            )
+        if action == "view":
+            result = _summary_flow(flow, content=True, detail=detail)
+            if target is not None:
+                fd = _private_output(target)
+                with os.fdopen(fd, "w", encoding="utf-8") as output:
+                    json.dump(result, output, ensure_ascii=False, separators=(",", ":"))
+                    output.write("\n")
+                    output.flush()
+                    os.fsync(output.fileno())
+                return {
+                    "ok": True,
+                    "receipt_id": entry["id"],
+                    "output": str(target),
+                    "flow_epoch": flow["flow_epoch"],
+                    "phase": flow["phase"],
+                }
+            return {
+                "ok": True,
+                "receipt_id": entry["id"],
+                "card_id": card_id,
+                "task_flow": result,
+            }
+        can_restart = (
+            action == "restart"
+            and flow.get("phase") == "ended"
+            and (selected.get("job") or {}).get("state") in ("failed", "needs_input")
+            and (selected.get("job") or {}).get("can_retry") is True
+        )
+        can_cancel = action == "cancel" and flow.get("phase") != "ended"
+        if not can_restart and not can_cancel and action not in flow.get("actions", []):
+            raise ManageError(
+                "The current step does not accept this action; use customer flow view",
+                code="invalid_state",
+            )
+        if (flow_epoch is not None and flow_epoch != flow["flow_epoch"]) or (
+            expected_revision is not None and expected_revision != flow["revision"]
+        ):
+            raise ManageError(
+                "The step changed; refresh its epoch and revision before continuing",
+                code="stale_flow",
+                status=409,
+            )
+        body = {
+            "token": entry["token"],
+            "flow_epoch": flow["flow_epoch"],
+            "expected_revision": flow["revision"],
+        }
+        if card_id:
+            body["card_id"] = card_id
+        if action == "answer":
+            fields = {
+                field["key"]: field
+                for field in _objects(flow["current"].get("fields", []))
+            }
+            params = _flow_values({} if values is None else values, fields)
+            attached = _attachment_paths(attachments, fields)
+            _validate_params(
+                params, {"parameters": list(fields.values())}, attached=attached
+            )
+            self.preflight_uploads(entry["origin"], attached)
+            for field, sources in attached.items():
+                ids = [
+                    self.upload(entry, card_id, field, source, value=receipt)["id"]
+                    for source in sources
+                ]
+                params[field] = (
+                    json.dumps(ids, separators=(",", ":"))
+                    if fields[field].get("type") == "images"
+                    else ids[0]
+                )
+            body["values"] = params
+        response = _object(
+            self.json(entry["origin"], "POST", "/api/task-flow/" + action, json=body)
+        )
+        row = response.get("job") if isinstance(response.get("job"), dict) else response
+        _job_shape(row)
+        selected["job"] = row
+        if action in ("restart", "cancel"):
+            entry.setdefault("inputs", {}).pop(card_id or "single", None)
+            entry.setdefault("files", {}).pop(card_id or "single", None)
+        entry["status"] = _summary_receipt(receipt)
+        self.persist()
+        result = {"ok": True, "receipt_id": entry["id"], "job": _summary_job(row)}
+        if card_id:
+            result["card_id"] = card_id
+        return result
 
     def retry_existing(self, entry, card_id=None):
         value = self.receipt(entry)
@@ -795,7 +1252,7 @@ def add_parser(commands):
     )
     exchange = commands.add_parser(
         "exchange",
-        help="verify 1 to 30 same-product codes and privately save the receipt",
+        help="verify up to 30 codes and privately save their receipts",
     )
     exchange.add_argument("--origin", required=True)
     exchange.add_argument(
@@ -804,6 +1261,71 @@ def add_parser(commands):
         required=True,
         help="read private codes from standard input, never command arguments",
     )
+    flow = commands.add_parser(
+        "flow", help="start, answer, continue or view the current customer task step"
+    )
+    flow_commands = flow.add_subparsers(dest="flow_action", required=True)
+    for action in ("view", "start", "answer", "continue", "restart", "cancel"):
+        command = flow_commands.add_parser(
+            action,
+            help={
+                "view": "show the current step and explicitly visible prior results",
+                "start": "explicitly start this step and its server timer",
+                "answer": "submit this step's defined inputs",
+                "continue": "continue after reviewing the current result",
+                "restart": "explicitly restart an eligible failed flow without starting its timer",
+                "cancel": "cancel this attempt and clear its data; external actions cannot be undone",
+            }[action],
+        )
+        command.add_argument("receipt_id", help="saved local receipt ID")
+        command.add_argument("--card", help="select one card in a batch receipt")
+        if action == "view":
+            command.add_argument(
+                "--detail",
+                action="store_true",
+                help="include the current field tutorials",
+            )
+            command.add_argument(
+                "--output",
+                type=Path,
+                help="save the step content privately instead of printing it",
+            )
+        else:
+            command.add_argument(
+                "--flow-epoch",
+                type=int,
+                help="optionally require this exact step activation",
+            )
+            command.add_argument(
+                "--expected-revision",
+                type=int,
+                help="optionally require this exact step revision",
+            )
+        if action == "cancel":
+            command.add_argument(
+                "--confirm",
+                action="store_true",
+                required=True,
+                help="confirm cancellation; processing actions may need merchant verification",
+            )
+        if action == "answer":
+            inputs = command.add_mutually_exclusive_group()
+            inputs.add_argument(
+                "--values-file",
+                type=Path,
+                help="bounded JSON object matching the current step fields",
+            )
+            inputs.add_argument(
+                "--values-stdin",
+                action="store_true",
+                help="read private step values from standard input",
+            )
+            command.add_argument(
+                "--file",
+                action="append",
+                default=[],
+                help="FIELD=PATH; repeat for an images field",
+            )
     importer = commands.add_parser(
         "import-receipt", help="privately import an existing browser receipt link"
     )
@@ -924,10 +1446,29 @@ def dispatch(client, args):
             raise ManageError(
                 "Provide 1 to 30 codes, at most 8000 characters", code="invalid_input"
             )
-        value = _object(
-            client.json(origin, "POST", "/api/exchange", json={"code": code})
-        )
-        return client.remember(origin, value.get("token"), value)
+        groups = _exchange_groups(client, origin, code)
+        results = []
+        failures = []
+        for destination, codes in groups.items():
+            try:
+                value = _object(
+                    client.json(
+                        destination,
+                        "POST",
+                        "/api/exchange",
+                        json={"code": "\n".join(codes)},
+                    )
+                )
+                results.append(client.remember(destination, value.get("token"), value))
+            except ManageError as error:
+                if len(groups) == 1:
+                    raise
+                failures.append(
+                    {"origin": destination, "code": error.code, "status": error.status}
+                )
+        if len(groups) == 1:
+            return results[0]
+        return {"ok": not failures, "receipts": results, "failed": failures}
     if command == "import-receipt":
         link = (
             sys.stdin.read(4097).strip()
@@ -979,9 +1520,17 @@ def dispatch(client, args):
                 "ok": True,
                 "receipt_id": entry["id"],
                 "cached": True,
-                "inputs": list(
-                    entry.get("inputs", {}).get(card_id or "single", {}).values()
-                ),
+                "inputs": [
+                    descriptor
+                    for stored in entry.get("inputs", {})
+                    .get(card_id or "single", {})
+                    .values()
+                    for descriptor in (
+                        stored.get("files", [])
+                        if stored.get("type") == "images"
+                        else [stored]
+                    )
+                ],
                 "outputs": [
                     {
                         key: item[key]
@@ -1020,6 +1569,24 @@ def dispatch(client, args):
             elif value.get("job") and value["job"].get("state") == "needs_input":
                 result["inputs"] = value["job"].get("params", {})
         return result
+    if command == "flow":
+        action = args.flow_action
+        values = (
+            _read_json(args.values_file)
+            if action == "answer" and (args.values_file or args.values_stdin)
+            else {}
+        )
+        return client.flow(
+            entry,
+            action,
+            card_id=card_id,
+            values=values,
+            attachments=getattr(args, "file", ()),
+            flow_epoch=getattr(args, "flow_epoch", None),
+            expected_revision=getattr(args, "expected_revision", None),
+            target=getattr(args, "output", None),
+            detail=getattr(args, "detail", False),
+        )
     if command in ("redeem", "retry"):
         if getattr(args, "reuse", False):
             if args.file:
