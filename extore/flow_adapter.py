@@ -109,9 +109,16 @@ def submit_flow(c, card, params):
         "INSERT INTO jobs(id,card_id,product_id,state,params,created,updated,progress_plan,schema_snapshot) "
         "VALUES (?,?,?,'waiting','{}',?,?,?,?)",
         (
-            jid, card["id"], card["product_id"], now, now,
+            jid,
+            card["id"],
+            card["product_id"],
+            now,
+            now,
             json.dumps(frozen.get("progress_steps", []), ensure_ascii=False),
-            json.dumps({key: frozen[key] for key in ("parameters", "outputs")}, ensure_ascii=False),
+            json.dumps(
+                {key: frozen[key] for key in ("parameters", "outputs")},
+                ensure_ascii=False,
+            ),
         ),
     )
     c.execute("UPDATE cards SET state='reserved' WHERE id=?", (card["id"],))
@@ -152,9 +159,11 @@ def finalize(c, effect):
             # rules using the issuance snapshot rather than the current editor.
             c.execute("UPDATE jobs SET state='processing' WHERE id=?", (row["id"],))
             _apply_simple_update(
-                c, row["id"],
+                c,
+                row["id"],
                 JobUpdate(
-                    state=terminal["state"], attempt=row["attempt"],
+                    state=terminal["state"],
+                    attempt=row["attempt"],
                     output=terminal.get("output"),
                     message=message,
                     retryable=terminal.get("retryable", False),
@@ -196,14 +205,22 @@ def validate_stage_files(c, row, accepted):
             continue
         for fid in _ids(field, accepted["values"].get(field["key"], "")):
             item = _file(c, fid)
-            scope = c.execute("SELECT * FROM task_flow_files WHERE file_id=?", (fid,)).fetchone()
+            scope = c.execute(
+                "SELECT * FROM task_flow_files WHERE file_id=?", (fid,)
+            ).fetchone()
             if (
-                scope is None or scope["job_id"] != row["id"]
-                or scope["node_id"] != node_id or scope["flow_epoch"] != epoch
-                or scope["attempt"] != row["attempt"] or scope["kind"] != kind
-                or item["job_id"] != row["id"] or item["product_id"] != row["product_id"]
-                or item["card_id"] != row["card_id"] or item["attempt"] != row["attempt"]
-                or item["field_key"] != field["key"] or item["kind"] != kind
+                scope is None
+                or scope["job_id"] != row["id"]
+                or scope["node_id"] != node_id
+                or scope["flow_epoch"] != epoch
+                or scope["attempt"] != row["attempt"]
+                or scope["kind"] != kind
+                or item["job_id"] != row["id"]
+                or item["product_id"] != row["product_id"]
+                or item["card_id"] != row["card_id"]
+                or item["attempt"] != row["attempt"]
+                or item["field_key"] != field["key"]
+                or item["kind"] != kind
                 or not item["available"]
             ):
                 fail("附件不属于当前任务步骤或字段", 403)
@@ -230,19 +247,29 @@ def promote_final_files(c, row, terminal):
             fail("交付附件缺少经过验证的步骤来源", 403)
         for fid in ids:
             item = _file(c, fid)
-            scope = c.execute("SELECT * FROM task_flow_files WHERE file_id=?", (fid,)).fetchone()
+            scope = c.execute(
+                "SELECT * FROM task_flow_files WHERE file_id=?", (fid,)
+            ).fetchone()
             if (
-                fid in seen or scope is None or scope["job_id"] != row["id"]
-                or scope["attempt"] != row["attempt"] or scope["kind"] != "output"
+                fid in seen
+                or scope is None
+                or scope["job_id"] != row["id"]
+                or scope["attempt"] != row["attempt"]
+                or scope["kind"] != "output"
                 or scope["node_id"] != source["node"]
                 or scope["flow_epoch"] != source["flow_epoch"]
-                or item["field_key"] != source["field"] or not item["bound"]
-                or not item["available"] or item["card_id"] != row["card_id"]
-                or item["product_id"] != row["product_id"] or item["job_id"] != row["id"]
+                or item["field_key"] != source["field"]
+                or not item["bound"]
+                or not item["available"]
+                or item["card_id"] != row["card_id"]
+                or item["product_id"] != row["product_id"]
+                or item["job_id"] != row["id"]
             ):
                 fail("最终交付附件的步骤来源无效", 403)
             seen.add(fid)
-            c.execute("UPDATE job_files SET field_key=? WHERE id=?", (field["key"], fid))
+            c.execute(
+                "UPDATE job_files SET field_key=? WHERE id=?", (field["key"], fid)
+            )
 
 
 def input_file_scope(c, card, field_key, *, flow_epoch, revision, node_id):
@@ -255,8 +282,10 @@ def input_file_scope(c, card, field_key, *, flow_epoch, revision, node_id):
         return None
     state = task_flow.view(c, row)
     if (
-        state["phase"] != "input" or flow_epoch != state["flow_epoch"]
-        or revision != state["revision"] or node_id != state["current"]["id"]
+        state["phase"] != "input"
+        or flow_epoch != state["flow_epoch"]
+        or revision != state["revision"]
+        or node_id != state["current"]["id"]
         or (state.get("deadline") is not None and state["deadline"] <= time.time())
     ):
         fail("上传所属步骤已改变或超时，请刷新", 409)
@@ -272,7 +301,8 @@ def output_file_scope(c, row, *, flow_epoch, node_id=None):
         return None
     execution = task_flow.execution(c, row)
     if (
-        execution is None or execution["flow_epoch"] != flow_epoch
+        execution is None
+        or execution["flow_epoch"] != flow_epoch
         or row["state"] != "processing"
         or (node_id is not None and node_id != execution["node_id"])
         or execution["deadline"] <= time.time()
@@ -294,14 +324,23 @@ def private_worker_file_scope(c, row, execution, field_key, kind, file_id=None):
     if kind != "input" or not file_id:
         fail("附件请求无效")
     params = execution["params"]
-    field = next((f for f in execution.get("parameters", []) if f["key"] == field_key), None)
-    if field is None or field["type"] not in ATTACHMENT_TYPES or file_id not in _ids(field, params.get(field_key, "")):
+    field = next(
+        (f for f in execution.get("parameters", []) if f["key"] == field_key), None
+    )
+    if (
+        field is None
+        or field["type"] not in ATTACHMENT_TYPES
+        or file_id not in _ids(field, params.get(field_key, ""))
+    ):
         fail("文件不是当前处理步骤授权的输入", 403)
     item = _file(c, file_id)
     if (
-        item["job_id"] != row["id"] or item["card_id"] != row["card_id"]
-        or item["product_id"] != row["product_id"] or item["attempt"] != row["attempt"]
-        or not item["bound"] or not item["available"]
+        item["job_id"] != row["id"]
+        or item["card_id"] != row["card_id"]
+        or item["product_id"] != row["product_id"]
+        or item["attempt"] != row["attempt"]
+        or not item["bound"]
+        or not item["available"]
     ):
         fail("文件不属于本次任务", 403)
     return field
@@ -309,7 +348,9 @@ def private_worker_file_scope(c, row, execution, field_key, kind, file_id=None):
 
 def bind_private_worker_file(c, row, execution, field_key, file_id):
     private_worker_file_scope(c, row, execution, field_key, "output")
-    bind_stage_file(c, row, execution["node_id"], execution["flow_epoch"], "output", file_id)
+    bind_stage_file(
+        c, row, execution["node_id"], execution["flow_epoch"], "output", file_id
+    )
 
 
 def release_actor_tasks(c, actor):

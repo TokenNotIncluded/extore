@@ -74,8 +74,11 @@ def status(request: Request):
         s = None
         owner_identity = {}
         role = None
+    from .security import management_actor
+
     result = {
         **owner_identity,
+        "actor": management_actor(s) if s else None,
         "configured": configured or bool(passkeys),
         "password_enabled": configured and not passkeys,
         "role": role,

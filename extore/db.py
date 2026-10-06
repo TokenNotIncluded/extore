@@ -111,8 +111,26 @@ def init():
         from .scope_auth import init_schema as init_scope_auth_schema
 
         init_scope_auth_schema(c)
-        if c.execute("PRAGMA user_version").fetchone()[0] < 13:
-            c.execute("PRAGMA user_version=13")
+        from . import (
+            automation,
+            flow_adapter,
+            flow_worker,
+            private_worker,
+            task_flow,
+            text_cards,
+        )
+
+        for module in (
+            text_cards,
+            task_flow,
+            flow_adapter,
+            flow_worker,
+            private_worker,
+            automation,
+        ):
+            module.init_schema(c)
+        if c.execute("PRAGMA user_version").fetchone()[0] < 14:
+            c.execute("PRAGMA user_version=14")
     # WAL is set outside a transaction.
     with sqlite3.connect(DATA / "extore.sqlite3") as c:
         c.execute("PRAGMA journal_mode=WAL")

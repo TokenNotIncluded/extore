@@ -19,6 +19,15 @@ def clean():
     init()
     with db() as c:
         for table in (
+            "automation_requests",
+            "private_worker_receipts",
+            "private_worker_nonces",
+            "task_flow_dispatches",
+            "task_flow_files",
+            "task_flow_steps",
+            "task_flow_runs",
+            "card_task_flows",
+            "text_card_payloads",
             "cli_scope_requests",
             "pipeline_bindings",
             "pipeline_authorizations",

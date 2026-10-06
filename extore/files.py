@@ -115,13 +115,29 @@ def _descriptor(row):
         )
     }
     result["available"] = bool(row["available"])
+    for key in ("flow_epoch", "node_id"):
+        if key in row.keys():
+            result[key] = row[key]
     return result
+
+
+def _with_flow_scope(c, row):
+    if c.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='task_flow_files'"
+    ).fetchone():
+        scope = c.execute(
+            "SELECT flow_epoch,node_id FROM task_flow_files WHERE file_id=?",
+            (row["id"],),
+        ).fetchone()
+        if scope:
+            return {**dict(row), **dict(scope)}
+    return row
 
 
 def listfiles(c, row, kind=None):
     """Return descriptors only; authorization belongs to the caller."""
     return [
-        _descriptor(item)
+        _descriptor(_with_flow_scope(c, item))
         for item in c.execute(
             "SELECT "
             + _METADATA
@@ -139,7 +155,7 @@ def _file(c, fid, *, content=False):
     ).fetchone()
     if not row:
         fail("文件不存在或已删除", 404)
-    return row
+    return _with_flow_scope(c, row)
 
 
 def _input_scope(c, card, field_key, *, flow_epoch=None, revision=None, node_id=None):
@@ -152,7 +168,12 @@ def _input_scope(c, card, field_key, *, flow_epoch=None, revision=None, node_id=
         from .flow_adapter import input_file_scope
 
         flow_scope = input_file_scope(
-            c, card, field_key, flow_epoch=flow_epoch, revision=revision, node_id=node_id
+            c,
+            card,
+            field_key,
+            flow_epoch=flow_epoch,
+            revision=revision,
+            node_id=node_id,
         )
         if flow_scope:
             return flow_scope
@@ -225,7 +246,9 @@ def _bind_flow_upload(c, row, key, kind, descriptor):
 
     if row is not None and task_flow.is_flow(c, row):
         state = task_flow.view(c, row)
-        bind_stage_file(c, row, state["current"]["id"], state["flow_epoch"], kind, descriptor["id"])
+        bind_stage_file(
+            c, row, state["current"]["id"], state["flow_epoch"], kind, descriptor["id"]
+        )
     return descriptor
 
 
@@ -504,7 +527,9 @@ async def upload_input(request: Request):
                     card = resolve_customer_card(
                         c, fields["token"], fields.get("card_id") or None
                     )
-                    _input_scope(c, card, fields["field_key"], **_flow_upload_args(fields))
+                    _input_scope(
+                        c, card, fields["field_key"], **_flow_upload_args(fields)
+                    )
                     reservation.bind_product(c, card["product_id"])
 
             async with asyncio.timeout(UPLOAD_TIMEOUT_SECONDS):
@@ -520,7 +545,9 @@ async def upload_input(request: Request):
                         card = resolve_customer_card(
                             c, form["token"], form.get("card_id") or None
                         )
-                        p, row = _input_scope(c, card, form["field_key"], **_flow_upload_args(form))
+                        p, row = _input_scope(
+                            c, card, form["field_key"], **_flow_upload_args(form)
+                        )
                         descriptor = _store(
                             c,
                             card["id"],
@@ -533,7 +560,9 @@ async def upload_input(request: Request):
                             reservation,
                             field=_field(p, form["field_key"], "input"),
                         )
-                        return _bind_flow_upload(c, row, form["field_key"], "input", descriptor)
+                        return _bind_flow_upload(
+                            c, row, form["field_key"], "input", descriptor
+                        )
                 finally:
                     await _close_form(form)
     except TimeoutError:
@@ -555,7 +584,11 @@ async def upload_output(request: Request):
                 current = session(request, ("admin", "staff"))
                 with db() as c:
                     row = _output_scope(
-                        c, current, fields["job_id"], fields["field_key"], **_flow_upload_args(fields, output=True)
+                        c,
+                        current,
+                        fields["job_id"],
+                        fields["field_key"],
+                        **_flow_upload_args(fields, output=True),
                     )
                     reservation.bind_product(c, row["product_id"])
 
@@ -570,7 +603,13 @@ async def upload_output(request: Request):
                 try:
                     s = session(request, ("admin", "staff"))
                     with db() as c:
-                        row = _output_scope(c, s, form["job_id"], form["field_key"], **_flow_upload_args(form, output=True))
+                        row = _output_scope(
+                            c,
+                            s,
+                            form["job_id"],
+                            form["field_key"],
+                            **_flow_upload_args(form, output=True),
+                        )
                         descriptor = _store(
                             c,
                             row["card_id"],
@@ -585,7 +624,9 @@ async def upload_output(request: Request):
                                 _job_product(c, row), form["field_key"], "output"
                             ),
                         )
-                        return _bind_flow_upload(c, row, form["field_key"], "output", descriptor)
+                        return _bind_flow_upload(
+                            c, row, form["field_key"], "output", descriptor
+                        )
                 finally:
                     await _close_form(form)
     except TimeoutError:

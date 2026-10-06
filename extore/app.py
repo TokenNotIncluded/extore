@@ -171,7 +171,10 @@ async def guard(request: Request, call_next):
         return JSONResponse({"detail": file_limit_message()}, status_code=413)
     if request.method not in ("GET", "HEAD") and not upload:
         maximum_body = 256000
-        if request.url.path in ("/api/admin/cards/import-text", "/api/manage/cards/import-text"):
+        if request.url.path in (
+            "/api/admin/cards/import-text",
+            "/api/manage/cards/import-text",
+        ):
             from .text_cards import MAX_IMPORT_BYTES
 
             # JSON escape sequences can be six bytes per decoded character.
@@ -1142,10 +1145,10 @@ def batch(body: BatchUpdate, request: Request):
                 current = task_flow.view(c, r)
                 if epoch is None or epoch != current["flow_epoch"]:
                     fail("提交对应的流程步骤已失效", 409)
-                execution = task_flow.execution(c, r)
-                if execution is None:
+                authority = task_flow.frozen_authority(c, r, epoch, r["attempt"])
+                if current["phase"] not in ("queued", "processing"):
                     fail("当前流程步骤不能由队列处理", 409)
-                if action_id is not None and action_id != execution["action_id"]:
+                if action_id is not None and action_id != authority["action_id"]:
                     fail("提交对应的流程动作已失效", 409)
             if p["mode"] != "manual" and body.action != "retry":
                 fail("自动处理任务不能由队列处理覆盖", 409)

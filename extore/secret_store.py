@@ -64,6 +64,7 @@ def init_schema(c):
             ("text_card_payloads", "ciphertext"),
             ("card_task_flows", "snapshot_ciphertext"),
             ("task_flow_steps", "payload_ciphertext"),
+            ("task_flow_dispatches", "payload_ciphertext"),
             ("proxy_identities", "private_key"),
             ("shops", "totp_secret"),
             ("shops", "pending_totp_secret"),
