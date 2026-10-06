@@ -61,6 +61,10 @@ def init_schema(c):
         encrypted = False
         for table, column in (
             ("processor_profile_revisions", "ciphertext"),
+            ("text_card_payloads", "ciphertext"),
+            ("card_task_flows", "snapshot_ciphertext"),
+            ("task_flow_steps", "payload_ciphertext"),
+            ("proxy_identities", "private_key"),
             ("shops", "totp_secret"),
             ("shops", "pending_totp_secret"),
             ("mail_outbox", "payload"),
