@@ -56,7 +56,7 @@ def test_legacy_staff_links_migrate_without_escalating_permissions(
         database.init()
         database.init()
         with database.db() as c:
-            assert c.execute("PRAGMA user_version").fetchone()[0] == 8
+            assert c.execute("PRAGMA user_version").fetchone()[0] == 9
             assert "result_json" in {
                 row["name"] for row in c.execute("PRAGMA table_info(jobs)")
             }
@@ -84,6 +84,8 @@ def test_legacy_staff_links_migrate_without_escalating_permissions(
                 "created": 0,
                 "max_uses": 1,
                 "uses": 1,
+                "max_cli_uses": 1,
+                "cli_uses": 0,
             }
             assert staff_authorization(c, "legacy")["permissions"] == [
                 "queue.view",

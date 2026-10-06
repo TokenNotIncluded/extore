@@ -292,13 +292,24 @@ def job_view(c, row, staff=False):
     result["support_email"] = p["support_email"]
     result["delivery"] = p["delivery"]
     result["view_policy"] = p["view_policy"]
+    card_state = c.execute(
+        "SELECT state FROM cards WHERE id=?", (row["card_id"],)
+    ).fetchone()[0]
     result["can_retry"] = bool(
-        row["state"] == "failed"
-        and row["retryable"]
-        and p["allow_retry"]
-        and row["attempt"] < p["max_attempts"]
+        (
+            row["state"] == "needs_input"
+            or (
+                row["state"] == "failed"
+                and row["retryable"]
+                and p["allow_retry"]
+                and row["attempt"] < p["max_attempts"]
+            )
+        )
         and not card_expired(c, row["card_id"])
+        and card_state not in ("revoked", "rejected")
     )
+    if row["state"] == "needs_input":
+        result["params"] = json.loads(row["params"])
     result["queue_ahead"] = (
         c.execute(
             "SELECT count(*) FROM jobs WHERE product_id=? AND state IN ('queued','processing') "
@@ -328,13 +339,15 @@ def submit(c, card, params):
 
     ensure_card_usable(c, card)
     row = c.execute("SELECT * FROM jobs WHERE card_id=?", (card["id"],)).fetchone()
+    if row and row["state"] == "rejected":
+        fail("此任务已被拒绝，不能重新提交", 409)
     p = job_product(c, row) if row else product(c, card["product_id"])
     clean = validate_params(p, params)
     validate_input_files(c, card, p, clean)
     if row:
-        if row["state"] != "failed":
+        if row["state"] not in ("failed", "needs_input"):
             return row
-        if (
+        if row["state"] == "failed" and (
             not row["retryable"]
             or not p["allow_retry"]
             or row["attempt"] >= p["max_attempts"]

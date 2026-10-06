@@ -25,6 +25,7 @@ await window.ExtoreWebMCP.configure({
     linkExpires: null, // 可选，/auth/status 返回的 link_expires，Unix 秒
     product: currentProduct,
     currentToken,
+    cardId, // 批量领取页当前在界面选中的 card_id
     queueProductId, // 管理任务页当前选择的商品 ID
     queueProduct, // 已授权商品队列的安全元数据，含 mode、outputs 与 progress_steps
     tab,
@@ -106,7 +107,7 @@ window.ExtoreWebMCP.dispose();
 | 管理链接标签：商家或 `links.delegate` | `extore_staff_list`、`extore_staff_authorize`、`extore_staff_revoke` | 查询、创建或撤销商品管理链接；委托限于下级授权 |
 | 任务标签：商家或 `queue.view` | `extore_queue_products`、`extore_queue_select`、`extore_jobs_list` | 选择和查看商品独立队列 |
 | 任务标签：商家或 `queue.view` | `extore_jobs_files_list`、`extore_jobs_file_read` | 查看任务附件元数据、受限读取文件 |
-| 任务标签：商家或 `queue.process` | `extore_jobs_claim`、`extore_jobs_progress`、`extore_jobs_complete`、`extore_jobs_fail` | 批量处理队列任务，仍限于授权商品 |
+| 任务标签：商家或 `queue.process` | `extore_jobs_claim`、`extore_jobs_progress`、`extore_jobs_complete`、`extore_jobs_fail`、`extore_jobs_request_changes`、`extore_jobs_reject` | 批量处理队列任务，退回补充或拒绝须说明原因，仍限于授权商品 |
 | 任务标签：商家或 `queue.process` | `extore_jobs_file_upload` | 为自己领取的任务上传交付文件 |
 | 任务标签：商家或 `queue.retry` | `extore_jobs_allow_retry` | 核实失败任务后放行顾客重试 |
 | 事件标签：商家或 `events.manage` | `extore_events_list`、`extore_event_retry` | 查看事件，重投已停止投递的 Webhook |
@@ -114,7 +115,7 @@ window.ExtoreWebMCP.dispose();
 | 会话标签 `sessions`：商家或已登录管理链接 | `extore_sessions_list`、`extore_session_revoke`、`extore_audit_list` | 查看安全会话与登录审计元数据，撤销授权范围内的会话 |
 | 已登录商家后台或管理链接页 | `extore_session_logout` | 退出当前会话 |
 
-共有 47 个工具定义，按页面、标签和权限动态注册，不会同时全部暴露。实际工具的 `inputSchema` 是调用参数的权威说明。每次切换页面后重新发现工具，不能缓存之前的工具对象继续操作。
+共有 49 个工具定义，按页面、标签和权限动态注册，不会同时全部暴露。实际工具的 `inputSchema` 是调用参数的权威说明。每次切换页面后重新发现工具，不能缓存之前的工具对象继续操作。
 
 ## 输入与确认
 
@@ -139,9 +140,9 @@ window.ExtoreWebMCP.dispose();
 |---|---|
 | `context`、`products_list`、`product_parameters`、`receipt_status` | `{}` |
 | `product_get`、`product_admin_get` | `product_id` |
-| `code_verify` | `code`，1–128 字符，不能全是空白 |
+| `code_verify` | `code`，1–8000 字符，不能全是空白；支持最多 30 张同商品卡密，用换行、空格、逗号或分号分隔 |
 | `ui_navigate` | `page`: `home` / `admin` / `staff`；`tab?` 允许后台页，值为 `products` / `jobs` / `cards` / `staff` / `events` / `security` / `sessions`，管理链接只可打开已授权标签与自身 sessions，security 仅商家 |
-| `redemption_submit`、`redemption_retry` | `params` + confirm；参数值为字符串，单项最多 10000 字符；邮箱、URL 和数字另做格式检查 |
+| `redemption_submit`、`redemption_retry` | 恰好一种：单卡 `params`，或批量 `items:[{card_id,params}]`（1–30 项，ID 不重复）+ confirm；参数值为字符串，单项最多 10000 字符；逐卡按输入快照验证 |
 | `redemption_file_upload` | `field_key`、`filename`、`base64`、`content_type?` + confirm；限当前已验证卡密的文件参数 |
 | `receipt_reveal`、`receipt_destroy`、`session_logout` | confirm |
 | `products_admin_list`、`processors_list`、`staff_list`、`events_list`、`passkeys_list`、`queue_products`、`sessions_list` | `{}` |
@@ -156,12 +157,12 @@ window.ExtoreWebMCP.dispose();
 | `cards_list` | `product_id?`、`limit?`，limit 为 1–500 |
 | `cards_issue` | `product_id`、`count`、`variant_id?`、`label?`、`expires?` + confirm；variant_id 默认 `default`，count 为 1–1000，label 最多 100 字符且可空，expires 为未来有限 Unix 秒时间戳或 null（无截止时间） |
 | `card_stats` | `product_id?`，管理链接仍只能查询自己的商品 |
-| `card_inventory` | `product_id?`、`variant_id?`（规格 ID，空串为全部规格）、`status?`（下列 9 状态或空串）、`batch_id?`（最多 100 字符，只含字母/数字/`_`/`-`，可空）、`search?`（最多 100 字符）、`offset?`（整数 ≥0）、`limit?`（整数 1–500），按页查询安全库存记录 |
+| `card_inventory` | `product_id?`、`variant_id?`（规格 ID，空串为全部规格）、`status?`（下列 11 状态或空串）、`batch_id?`（最多 100 字符，只含字母/数字/`_`/`-`，可空）、`search?`（最多 100 字符）、`offset?`（整数 ≥0）、`limit?`（整数 1–500），按页查询安全库存记录 |
 | `card_history` | `card_id`、`product_id?`，读取单张卡密的安全生命周期 |
 | `card_revoke` | `card_id` + confirm |
-| `staff_authorize` | `product_id`、`name`、`days`、`permissions`、`max_uses?` + confirm；name 为 1–100 字符且非空白，days 为大于 0 且不超过 90 的有限数字，可用小数；permissions 为上述 8 个权限中的非空、不重复数组，并满足权限依赖；max_uses 是 1–1000 的整数，默认 1 |
+| `staff_authorize` | `product_id`、`name`、`days`、`permissions`、`max_uses?`、`max_cli_uses?` + confirm；name 为 1–100 字符且非空白，days 为大于 0 且不超过 90 的有限数字，可用小数；permissions 为上述 8 个权限中的非空、不重复数组，并满足权限依赖；max_uses 与 max_cli_uses 分别为浏览器登录和 CLI 设备绑定额度，均为 1–1000 的整数，默认 1 |
 | `staff_revoke` | `staff_id` + confirm |
-| `jobs_list` | `product_id`、`view?`、`state?`、`limit?`；view 为 `active`（默认）/ `processed` / `all`；state 为 `queued` / `processing` / `succeeded` / `failed` / `destroyed`，limit 为 1–500 |
+| `jobs_list` | `product_id`、`view?`、`state?`、`limit?`；view 为 `active`（默认）/ `processed` / `all`；state 为 `queued` / `processing` / `succeeded` / `failed` / `needs_input` / `rejected` / `destroyed`，limit 为 1–500 |
 | `jobs_files_list` | `product_id`、`job_id`；任务必须属于当前选择的商品队列 |
 | `jobs_file_read` | `product_id`、`job_id`、`file_id`；先验证任务和附件所属范围，再读取限量内容 |
 | `jobs_file_upload` | `product_id`、`job_id`、`field_key`、`filename`、`base64`、`content_type?` + confirm；必须为自己领取任务的输出快照中的文件字段 |
@@ -170,11 +171,12 @@ window.ExtoreWebMCP.dispose();
 | `jobs_progress` | `product_id`、`ids`、`progress?`、`progress_steps?`、`completed_steps?`、`message?` + confirm；progress 为 0–99 的整数，步骤型任务由服务端计算百分比；completed_steps 是任务快照中的完整已完成 ID 集合，省略则保留 |
 | `jobs_complete` | `product_id`、`ids`、`message?`、`progress_steps?`、`output?`、`content?` + confirm；成功会自动完成全部步骤；执行时读取目标任务的输出快照严格验证，批内交付类型、字段代码、类型和必填规则必须相同；仅默认单 content 快照兼容 content，服务型任务只提交成功状态 |
 | `jobs_fail` | `product_id`、`ids`、`message?`、`progress_steps?`、`retryable?` + confirm；仅确认未交付时设置 retryable=true |
+| `jobs_request_changes`、`jobs_reject` | `product_id`、`ids`、`reason` + confirm；reason 为非空白、最多 1000 字符的顾客可见原因；只处理自己领取的 processing 队列任务 |
 | `event_retry` | `event_id` + confirm |
 
 任务 `message` 最多 1000 字符。未提供列表 `limit` 时使用后端默认值；不是无限查询。
 
-`jobs_list` 默认使用 `view=active`，仅返回排队、处理中和失败待核实任务；已完成及已销毁任务放在 `view=processed`，主动传 `view=all` 才读取全部历史。显式 `state` 优先，因此 `state=succeeded` 仍能精确查询已完成任务。文件工具通过 `job_id` 精确定位历史任务，仍可在相同商品权限下读取其安全附件信息。
+`jobs_list` 默认使用 `view=active`，返回排队、处理中、失败待核实和退回补充任务；已完成、已销毁和已拒绝任务放在 `view=processed`，主动传 `view=all` 才读取全部历史。显式 `state` 优先，因此 `state=succeeded` 仍能精确查询已完成任务。文件工具通过 `job_id` 精确定位历史任务，仍可在相同商品权限下读取其安全附件信息。
 
 队列按商品独立。先调用 `queue_products` 查询当前身份允许处理的商品，再用 `queue_select` 选择队列。`jobs_list` 和所有任务批处理必须传入与当前 `queueProductId` 相同的 `product_id`；不能把不同商品的任务 ID 混入一批，也没有“所有商品混合队列”。`/api/manage/products` 只返回可处理的商品，`/api/manage/jobs` 与 `/api/manage/batch` 同样限定商品范围；管理链接即使伪造参数，也不能访问授权商品之外的队列。
 
@@ -182,15 +184,17 @@ window.ExtoreWebMCP.dispose();
 
 `jobs_list` 返回每个任务的 `steps:[{id,label,done}]` 与 `completed_steps`。填写已完成步骤时必须使用这个任务的快照 ID，不应根据商品当前默认计划猜测。`completed_steps` 只接受最多 30 个不重复的 slug；省略保留现有集合，明确传入时须包含当前尝试已经完成的步骤，服务端拒绝未知步骤和撤回。步骤型任务的百分比由服务端计算，处理过程中最高 99，成功后自动完成全部步骤并显示 100；没有计划的旧任务仍支持百分比进度。
 
+`jobs_request_changes` 与 `jobs_reject` 调用 `/api/manage/batch`，分别使用 `action=request_changes` / `reject`，把 `reason` 映射为 API 的 `message`。退回补充不等于发货失败：顾客可以沿用原任务重新提交，attempt 增加，不受商品失败重试次数限制；过期或撤销仍阻止重提。拒绝为终态，卡密同时禁用，原领取链接显示原因。两个工具都要求当前所选商品、最新权限和任务领取者匹配，且不能覆盖自动处理任务。
+
 对于尚无计划、无已完成步骤且处于排队或处理状态的任务，`jobs_claim`、`jobs_progress`、`jobs_complete`、`jobs_fail` 可附带 `progress_steps`，一次绑定 1–30 项自定义步骤；计划一经绑定便不能替换。整批仍由服务端验证和原子更新。放行重试不清空完成集合；顾客真正提交新一次尝试时才重置步骤完成情况和进度，保留计划快照。`receipt_status` 使用字段白名单返回步骤、完成标记、`queue_position`、`support_email` 等公开状态，交付结果仍只通过明确的领取工具返回。
 
 管理链接不能复制自己的全部权限。创建子链接时，`permissions` 必须是当前有效权限的**严格子集**，子链接至少少一个权限，并且有效期不能超过父链接的 `link_expires`。同商品、相同权限的子链接也会被拒绝。管理链接只能查询、撤销自己的下级，不能撤销父级或同级。撤销上级会同时撤销全部下级、结束相关会话并释放未完成的队列任务。普通查询不返回子链接凭证；新建时按需返回新授权链接。
 
-新建管理链接的 `max_uses` 默认是 1，原生 Schema 与执行函数限制为 1–1000；子链接还必须不大于最新父链接的上限。次数只在成功建立新的登录会话时消耗，访问链接的 GET、现有会话查询和刷新不会消耗。上限耗尽不结束已经有效的会话。安全元数据可显示 `max_uses`、`uses`、`remaining_uses`，没有重新取回链接凭据的工具。
+新建管理链接的 `max_uses` 与 `max_cli_uses` 独立，分别限制新浏览器登录与新 CLI 设备绑定，默认均为 1，原生 Schema 与执行函数限制为 1–1000；子链接两项都不能高于最新父链接的对应上限。浏览器次数只在成功建立新会话时消耗，CLI 次数只在成功绑定新设备时消耗。页面 GET、已有会话查询和设备签名续签不会消费额度，上限耗尽也不结束已有效的会话或设备。安全元数据可显示两组上限、已用和剩余额度，没有重新取回链接凭据的工具。CLI 绑定、短期票据与撤销见[接口协议](protocol.md#cli-设备授权)。
 
-`sessions_list` 使用 `/api/admin/sessions` 或 `/api/manage/sessions`；`session_revoke` 使用对应 `/sessions/{id}` 的 DELETE。返回字段只包含 UUID 会话标识、角色、管理链接/商品安全名称与 ID、创建/最近活动/截止时间、当前/撤销/有效标记、IP 和最多 300 字符的 User-Agent，不包含 Cookie、摘要或凭据。商品管理链接默认只能管理自己的会话；`links.delegate` 才将范围扩到同商品的下级，仍不能访问商家、父级或同级会话。
+`sessions_list` 使用 `/api/admin/sessions` 或 `/api/manage/sessions`；`session_revoke` 使用对应 `/sessions/{id}` 的 DELETE。返回字段只包含 UUID 会话标识、角色、`channel`（browser / cli）、`device_id`、`client_name`、管理链接/商品安全名称与 ID、创建/最近活动/截止时间、当前/撤销/有效标记、IP 和最多 300 字符的 User-Agent，不包含 Cookie、摘要或凭据。商品管理链接默认只能管理自己的会话；`links.delegate` 才将范围扩到同商品的下级，仍不能访问商家、父级或同级会话。
 
-`audit_list` 使用 `/api/admin/audit` 或 `/api/manage/audit`，最多 200 条，只返回 `id`、`actor`、`action`、`target`、`created` 的安全登录与授权事件。范围由服务端限定，不能查询全站任意订单、商品交付结果或请求 payload。撤销当前会话仍返回成功和已结束状态；随后界面需要登录或刷新返回 401，不会把已经提交的撤销误报为失败，旧的原生工具会被撤回。
+`audit_list` 使用 `/api/admin/audit` 或 `/api/manage/audit`，最多 200 条，只返回 `id`、`actor`、`action`、`target`、`created` 的安全登录与授权事件，包括分渠道消费、设备绑定/撤销及 CLI 票据创建。范围由服务端限定，不能查询全站任意订单、商品交付结果或请求 payload。撤销当前会话仍返回成功和已结束状态；随后界面需要登录或刷新返回 401，不会把已经提交的撤销误报为失败，旧的原生工具会被撤回。
 
 商家工具继续使用 `/api/admin/*`；商品管理链接按权限使用下列同源接口：
 
@@ -212,11 +216,17 @@ window.ExtoreWebMCP.dispose();
 
 原生工具的 `product` 和 `changes` 接受以下字段：`name`、`description`、`logo`、`image`、`public`、`variants`、`progress_steps`、`support_email`、`mode`、`delivery`、`view_policy`、`allow_retry`、`max_attempts`、`parameters`、`outputs`、`webhook_url`、`webhook_secret`、`processor_id`、`processor_config`。原生 Schema 拒绝 `script` 字段，包括空字符串；协议商品查询中的 `script:""` 只用于兼容旧客户端，不能执行任意脚本。输入/输出字段支持 `key`、`label`、`description`、`collapsed`、`required`、`type`，类型均可使用 `text` / `email` / `url` / `textarea` / `number` / `file`。商品图片与 Webhook URL 必须为 HTTPS，Webhook 需明确提供至少 32 字符的密钥。更新已有 Webhook 商品时，未传新密钥会内部保留旧密钥，不把它返回代理。
 
+## 多张卡密兑换
+
+`code_verify` 共用公开兑换接口，支持同商品最多 30 张卡密；批内混入无效、不可兑换或其他商品卡密时整批拒绝。验证只建立页面上下文，不提交兑换，工具返回不包含领取 token。`receipt_status` 与 `product_parameters` 可返回批内 `card_id`、尾号、规格和各卡的商品输入快照；不返回顾客参数、交付内容或领取凭证。
+
+批量提交用 `items:[{card_id,params}]`，只接受当前领取链接覆盖的卡密。`redemption_submit` 仅提交尚无任务的卡密；`redemption_retry` 仅处理 `job.can_retry=true` 的任务，包括退回补充。工具执行前重新读取状态并按每项的参数快照验证，不能用当前商品表单覆盖旧任务定义。批量页面的上传、领取和销毁使用当前界面选中的 `cardId`；未选择时拒绝执行，切换选择会使旧回调失效。文件下载仍须选择目标卡密；领取与销毁遵守原有显式确认及一次查看规则。
+
 ## 文件与 AI 处理
 
-`file` 字段保存的是服务端上传后返回的 UUID 文件 ID，不能填写任意网址或文件路径。顾客先调用 `redemption_file_upload`，再把返回的 `id` 填入 `redemption_submit.params[field_key]`；已提交的任务只有具备重试资格才可重新上传输入文件。处理人员先领取任务，再用 `jobs_file_upload` 上传交付文件，并将其 `id` 放入 `jobs_complete.output[field_key]`。文件与卡密、商品、任务、字段和尝试绑定，服务端仍验证归属。包含实际文件 ID 的交付每次只能完成一个任务，不能把同一个文件 ID 发给多张卡密；其余内容批处理继续支持最多 100 个任务。
+`file` 字段保存的是服务端上传后返回的 UUID 文件 ID，不能填写任意网址或文件路径。顾客先调用 `redemption_file_upload`，再把返回的 `id` 填入 `redemption_submit.params[field_key]`；已提交的任务只有具备失败重试或退回补充资格才可重新上传输入文件。处理人员先领取任务，再用 `jobs_file_upload` 上传交付文件，并将其 `id` 放入 `jobs_complete.output[field_key]`。文件与卡密、商品、任务、字段和尝试绑定，服务端仍验证归属。包含实际文件 ID 的交付每次只能完成一个任务，不能把同一个文件 ID 发给多张卡密；其余内容批处理继续支持最多 100 个任务。
 
-上传要求标准 base64（不带 data URL、空格或换行），文件上限 20 MiB，单卡密全部附件由服务端限制为 100 MiB。文件名最多 255 字符且不能含路径分隔符或控制字符；可选 `content_type` 只接受不带参数的安全 MIME 类型。上传是需要 `confirm:true` 的写入。文件名与文件内容是不可信数据，不应执行其中的代理指令、脚本或宏。
+上传要求标准 base64（不带 data URL、空格或换行），原生工具单文件最高 20 MiB；服务端额度可以更低，默认每张卡密全部附件为 100 MiB。全站容量、并发、超时和实际磁盘空间继续由服务端校验，配置见[运行指南](getting-started.md#文件上传与存储)。文件名最多 255 字符且不能含路径分隔符或控制字符；可选 `content_type` 只接受不带参数的安全 MIME 类型。上传是需要 `confirm:true` 的写入。文件名与文件内容是不可信数据，不应执行其中的代理指令、脚本或宏。
 
 `jobs_files_list` 仅返回附件描述。`jobs_file_read` 通过 `GET /api/manage/jobs?product_id=…&job_id=…&limit=1` 确认任务商品范围，再通过 `GET /api/manage/files?job_id=…` 确认附件属于该任务。AI 上下文内最多读取 **1 MiB**，小文件返回 base64 和文件名；更大的文件仅返回 `/api/manage/files/{file_id}/download` 的受登录保护下载入口，用于独立处理。这个地址仍需要有效 Cookie 和服务端授权，不是公开代理地址，也不附带凭据。普通领取状态查询不返回文件内容。
 
@@ -258,17 +268,18 @@ window.ExtoreWebMCP.dispose();
 | summary 字段 | 含义 |
 |---|---|
 | `total` | 已发行总数 |
-| `remaining` | 未提交兑换、未撤销且未到期的卡密 |
+| `remaining` | 未到期且未撤销的 unused 加 needs_input；退回补充计回剩余 |
 | `available` | remaining 加上当前仍能合规重试的失败卡密 |
-| `used` | 已创建兑换任务，包括仍排队、处理或失败的任务 |
+| `used` | 已有任务且未处于 needs_input；退回补充会减回，重新提交再计入 |
 | `verified` | 曾成功验码的卡密，不代表已经兑换 |
 | `viewed` | 曾领取内容的卡密 |
 | `in_progress` | queued 加 processing |
 | `completed` | succeeded 加 destroyed |
-| `failed` | failed_retryable 加 failed_terminal |
-| `states` | 按下列 9 个生命周期状态计数 |
+| `failed` | failed_retryable 加 failed_terminal，不含退回补充或拒绝 |
+| `rejected` | 已拒绝卡密；计入 used，不计入剩余、失败或完成 |
+| `states` | 按下列 11 个生命周期状态计数 |
 
-库存状态为 `unused`、`queued`、`processing`、`succeeded`、`failed_retryable`、`failed_terminal`、`destroyed`、`revoked`、`expired`。失败是否可重试同时考虑任务结果、商品重试规则、尝试次数和到期时间。`search` 只匹配卡密 ID 或尾号，不能恢复完整卡密；库存包含安全尾号、批次 ID/名称、创建/兑换/到期时间与关联任务状态，旧卡密可能没有尾号或批次记录。
+库存状态为 `unused`、`needs_input`、`queued`、`processing`、`succeeded`、`failed_retryable`、`failed_terminal`、`destroyed`、`revoked`、`expired`、`rejected`。退回补充到期后归入 expired，已拒绝到期后仍是 rejected，撤销优先。needs_input 仍绑定原顾客任务，计回剩余不代表可重新销售。失败是否可重试同时考虑任务结果、商品重试规则、尝试次数和到期时间。`search` 只匹配卡密 ID 或尾号，不能恢复完整卡密；库存包含安全尾号、批次 ID/名称、创建/兑换/到期时间与关联任务状态，旧卡密可能没有尾号或批次记录。
 
 `extore_card_history` 调用 `/api/admin/cards/{id}/history` 或 `/api/manage/cards/{id}/history`，返回 `card` 与按时间排序的 `timeline`。历史只含事件类型、时间和安全状态、尝试次数、进度等元数据，不返回事件完整 payload、顾客参数、自由文本留言、完整卡密或交付结果。
 

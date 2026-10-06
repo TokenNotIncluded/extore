@@ -312,7 +312,17 @@ async def loop():
                 busy = False
             await asyncio.sleep(0.1 if busy else 1)
 
-    await asyncio.gather(pump(job_once), pump(outbox_once))
+    async def maintenance():
+        from .storage import maintenance_once
+
+        while True:
+            try:
+                await asyncio.to_thread(maintenance_once)
+            except Exception as exc:
+                print("Storage maintenance error:", type(exc).__name__, flush=True)
+            await asyncio.sleep(60)
+
+    await asyncio.gather(pump(job_once), pump(outbox_once), maintenance())
 
 
 def main():

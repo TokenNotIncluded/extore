@@ -4,6 +4,7 @@
   let active = null;
   const labels = {
     unused: "未兑换",
+    needs_input: "需重试",
     queued: "排队中",
     processing: "处理中",
     succeeded: "已完成",
@@ -12,6 +13,7 @@
     destroyed: "已销毁",
     revoked: "已撤销",
     expired: "已过期",
+    rejected: "已拒绝",
   };
   const escape = (value) =>
     String(value ?? "").replace(
@@ -39,7 +41,7 @@
   const variantLabel = (variant) =>
     `${variant.name}${variant.price != null ? ` · ${variant.currency || "CNY"} ${variant.price}` : ""}${variant.enabled === false ? tr(" · 已停用", " · Disabled") : ""}`;
   const status = (value) => {
-    const style = value.startsWith("failed")
+    const style = value.startsWith("failed") || value === "rejected"
       ? "failed"
       : ["destroyed", "revoked", "expired"].includes(value)
         ? "destroyed"
@@ -237,13 +239,13 @@
       const metrics = [
         ["总发行", "total"],
         ["剩余未兑换", "remaining"],
-        ["已提交兑换", "used"],
+        ["已使用", "used"],
         ["正在处理", "in_progress"],
       ];
       node("#cards-stats").innerHTML =
         `<div class="grid cards-summary">${metrics.map(([label, key]) => `<div class="panel cards-metric"><p class="caption">${label}</p><h2>${count(summary[key])}</h2></div>`).join("")}</div>
-        <p class="caption">剩余未兑换：尚未提交兑换且未到期。已提交后失败、可重试的卡密 ${count(summary.states?.failed_retryable)} 张另行统计，不计入未兑换数量。</p>
-        <p class="caption">已验码 ${count(summary.verified)} · 已领取 ${count(summary.viewed)} · 已完成 ${count(summary.completed)} · 失败 ${count(summary.failed)} · 已撤销 ${count(summary.states?.revoked)} · 已过期 ${count(summary.states?.expired)}</p>`;
+        <p class="caption">剩余未兑换包含未提交及退回后需重试的有效卡密（${count(summary.states?.needs_input)} 张），已退回的卡密不计入已使用。处理失败、可重试的卡密 ${count(summary.states?.failed_retryable)} 张另行统计，不计入未兑换数量。</p>
+        <p class="caption">已验码 ${count(summary.verified)} · 已领取 ${count(summary.viewed)} · 已完成 ${count(summary.completed)} · 失败 ${count(summary.failed)} · 已拒绝 ${count(summary.rejected)} · 已撤销 ${count(summary.states?.revoked)} · 已过期 ${count(summary.states?.expired)}</p>`;
       if (Array.isArray(stats.variants) && stats.variants.length) {
         const total = stats.variants.reduce(
           (sum, variant) => sum + Number(variant.summary?.total || 0),
@@ -261,7 +263,7 @@
       const items = Array.isArray(inventory.items) ? inventory.items : [];
       const total = Number(inventory.total || 0);
       node("#cards-inventory").innerHTML = items.length
-        ? `<div class="table-wrap"><table class="card-inventory-table"><thead><tr><th>卡密 / 尾号</th><th>批次</th><th>状态</th><th>时间</th><th>操作</th></tr></thead><tbody>${items.map((item) => `<tr><td class="mono" data-label="卡密 / 尾号">${escape(item.id)}<div class="caption">${item.code_suffix ? "····" + escape(item.code_suffix) : "旧卡密无尾号记录"}</div><div class="caption">${tr("规格", "Variant")}：${escape(item.variant_name || tr("默认规格", "Default variant"))}</div></td><td data-label="批次">${escape(item.batch_label || "—")}<div class="mono muted">${escape(item.batch_id || "")}</div></td><td data-label="状态">${status(String(item.status || ""))}${item.attempt ? `<p class="caption">第 ${count(item.attempt)} 次尝试</p>` : ""}</td><td data-label="时间"><div>发行 ${escape(date(item.created))}</div>${item.used_at ? `<div>兑换 ${escape(date(item.used_at))}</div>` : ""}${item.expires ? `<div class="caption">截止 ${escape(date(item.expires))}</div>` : '<div class="caption">无兑换截止时间</div>'}</td><td data-label="操作"><div class="row-tools"><button class="secondary" data-card-history="${escape(item.id)}">使用记录</button>${item.status === "unused" ? `<button class="danger" data-card-revoke="${escape(item.id)}">撤销</button>` : ""}</div></td></tr>`).join("")}</tbody></table></div>`
+        ? `<div class="table-wrap"><table class="card-inventory-table"><thead><tr><th>卡密 / 尾号</th><th>批次</th><th>状态</th><th>时间</th><th>操作</th></tr></thead><tbody>${items.map((item) => `<tr><td class="mono" data-label="卡密 / 尾号">${escape(item.id)}<div class="caption">${item.code_suffix ? "····" + escape(item.code_suffix) : "旧卡密无尾号记录"}</div><div class="caption">${tr("规格", "Variant")}：${escape(item.variant_name || tr("默认规格", "Default variant"))}</div></td><td data-label="批次">${escape(item.batch_label || "—")}<div class="mono muted">${escape(item.batch_id || "")}</div></td><td data-label="状态">${status(String(item.status || ""))}${item.attempt ? `<p class="caption">第 ${count(item.attempt)} 次尝试</p>` : ""}</td><td data-label="时间"><div>发行 ${escape(date(item.created))}</div>${item.used_at ? `<div>首次提交 ${escape(date(item.used_at))}</div>` : ""}${item.expires ? `<div class="caption">截止 ${escape(date(item.expires))}</div>` : '<div class="caption">无兑换截止时间</div>'}</td><td data-label="操作"><div class="row-tools"><button class="secondary" data-card-history="${escape(item.id)}">使用记录</button>${["unused", "needs_input"].includes(item.status) ? `<button class="danger" data-card-revoke="${escape(item.id)}">撤销</button>` : ""}</div></td></tr>`).join("")}</tbody></table></div>`
         : '<div class="empty">没有符合条件的卡密。</div>';
       node("#cards-page").textContent = total
         ? `${offset + 1}–${Math.min(offset + items.length, total)} / ${count(total)} 张`
@@ -605,6 +607,8 @@
         "fulfillment.progress": "更新处理进度",
         "fulfillment.succeeded": "兑换完成",
         "fulfillment.failed": "兑换失败",
+        "fulfillment.needs_input": "退回，请补充信息后重试",
+        "fulfillment.rejected": "拒绝兑换",
         "delivery.viewed": "领取内容",
         "delivery.revealed": "领取内容",
         "delivery.destroyed": "销毁内容",

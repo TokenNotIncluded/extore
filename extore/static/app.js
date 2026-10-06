@@ -8,6 +8,7 @@ let lang = preferences.resolved.language,
   batchSelection = "",
   batchRetryOnly = false,
   currentProduct = null,
+  currentJob = null,
   currentVariant = null,
   receiptViewKey = "",
   receiptMotion = null,
@@ -20,6 +21,9 @@ let lang = preferences.resolved.language,
   managementName = "",
   managementExpires = null,
   managementMaxUses = 1,
+  managementMaxCLIUses = 1,
+  managementRemainingCLIUses = 1,
+  managementLinkId = null,
   tab = "products",
   products = [],
   cardProductId = "",
@@ -27,6 +31,8 @@ let lang = preferences.resolved.language,
   queueView = "active",
   queueProduct = null,
   queueLoadId = 0;
+let uploadLimitPromise = null;
+let maxUploadFileBytes = 20 * 1024 * 1024;
 const esc = (s) =>
   String(s ?? "").replace(
     /[&<>"']/g,
@@ -52,6 +58,8 @@ const states = {
   processing: "处理中",
   succeeded: "已完成",
   failed: "未完成",
+  needs_input: "需补充信息",
+  rejected: "已拒绝",
   destroyed: "已销毁",
 };
 const stateEn = {
@@ -59,6 +67,8 @@ const stateEn = {
   processing: "Processing",
   succeeded: "Completed",
   failed: "Failed",
+  needs_input: "More details needed",
+  rejected: "Rejected",
   destroyed: "Destroyed",
 };
 const status = (j) =>
@@ -123,14 +133,14 @@ function batchPending() {
     return currentBatch.items.filter((item) => item.card_id === batchSelection);
   return currentBatch.items.filter((item) => !item.job);
 }
-function parameterFields(idPrefix, field) {
+function parameterFields(idPrefix, field, value = "") {
   const id = idPrefix + field.key;
   const label = `${esc(localized(field.label))}${field.required ? " *" : ""}`;
   const control = field.type === "file"
-    ? `<input id="${id}" type="file" ${field.required ? "required" : ""}><p class="caption">${tr("每个文件最多 20 MiB；提交后处理者可以下载。", "Up to 20 MiB per file. The operator can download it after submission.")}</p>`
+    ? `<input id="${id}" type="file" ${field.required && !value ? "required" : ""}>${value ? `<input id="${id}-retained" type="hidden" value="${esc(value)}"><p class="caption">${tr("已保留上次上传的文件，可重新选择替换。", "Your previous upload is retained. Choose a new file to replace it.")}</p>` : ""}<p class="caption" data-upload-limit>${uploadLimitCaption()}</p>`
     : field.type === "textarea"
-      ? `<textarea id="${id}" ${field.required ? "required" : ""} maxlength="10000"></textarea>`
-      : `<input id="${id}" type="${field.type}" ${field.type === "number" ? 'step="any"' : ""} ${field.required ? "required" : ""} maxlength="10000">`;
+      ? `<textarea id="${id}" ${field.required ? "required" : ""} maxlength="10000">${esc(value)}</textarea>`
+      : `<input id="${id}" type="${field.type}" value="${esc(value)}" ${field.type === "number" ? 'step="any"' : ""} ${field.required ? "required" : ""} maxlength="10000">`;
   const help = localized(field.description)
     ? `<details ${field.collapsed ? "" : "open"}><summary>${tr("填写说明", "Instructions")}</summary><div class="markdown">${md(localized(field.description))}</div></details>`
     : "";
@@ -149,6 +159,7 @@ function batchItemButton(item) {
 function openBatchCard(item) {
   selectBatchCard(item.card_id, !item.job);
   currentProduct = batchProduct(item);
+  currentJob = item.job || null;
   currentVariant = item.variant || item.job?.variant || null;
   if (!item.job) {
     redemptionForm();
@@ -196,12 +207,27 @@ async function fileResponse(path, options = {}) {
   return response;
 }
 async function uploadMultipart(path, fields, file, options = {}) {
-  if (!file || file.size > 20 * 1024 * 1024)
-    throw new Error(tr("每个文件最多 20 MiB。", "Each file can be at most 20 MiB."));
+  const limit = await uploadFileLimit();
+  if (!file || file.size > limit)
+    throw new Error(uploadLimitCaption());
   const body = new FormData();
   for (const [key, value] of Object.entries(fields)) body.append(key, value);
   body.append("file", file, file.name || "attachment");
   return (await fileResponse(path, { method: "POST", body, signal: options.signal })).json();
+}
+function uploadLimitCaption() {
+  const amount = Math.round(maxUploadFileBytes / (1024 * 1024) * 100) / 100;
+  return tr(`每个文件最多 ${amount} MiB。`, `Each file can be at most ${amount} MiB.`);
+}
+function uploadFileLimit() {
+  if (!uploadLimitPromise) uploadLimitPromise = api("/upload-limits").then((limits) => {
+    if (Number.isSafeInteger(limits.max_file_bytes) && limits.max_file_bytes > 0)
+      maxUploadFileBytes = Math.min(maxUploadFileBytes, limits.max_file_bytes);
+  }).catch(() => {}).then(() => {
+    document.querySelectorAll("[data-upload-limit]").forEach((node) => { node.textContent = uploadLimitCaption(); });
+    return maxUploadFileBytes;
+  });
+  return uploadLimitPromise;
 }
 async function selectedJobForFile(definition, options = {}) {
   if (tab !== "jobs" || queueProductId !== definition.product_id || !permitted("queue.view"))
@@ -357,6 +383,7 @@ async function home() {
   batchSelection = "";
   batchRetryOnly = false;
   currentProduct = null;
+  currentJob = null;
   currentVariant = null;
   const list = await api("/products");
   app.innerHTML = `<section class="intro home-paper-stack"><section class="intro-copy public-card" data-home-paper="products" tabindex="0" aria-label="${tr("公开商品", "Public products")}"><h1>${list.length ? tr("公开商品", "Public products") : tr("暂无公开商品", "No public products")}</h1><div class="paper-divider" aria-hidden="true"></div>${list.length ? `<p class="caption">${tr("选择商品了解详情，兑换需有效卡密。", "Browse the details. A valid code is required to redeem.")}</p><div class="home-product-list" tabindex="0" role="region" aria-label="${tr("公开商品列表，可上下滚动", "Public product list, scroll vertically")}">${list.map((p, i) => `<article class="product-row">${p.logo ? `<img src="${esc(p.logo)}" alt="">` : `<div class="product-icon">${icon}</div>`}<div class="product-info"><h3>${esc(p.name)}</h3><p>${tr(p.delivery === "service" ? "服务兑换" : "商品领取", p.delivery === "service" ? "Service" : "Digital delivery")} · ${tr(p.mode === "manual" ? "队列处理" : "自动处理", p.mode === "manual" ? "Queue processing" : "Automatic")}</p></div><button class="secondary" data-product="${i}">${tr("查看详情", "Details")}</button></article>`).join("")}</div>` : ""}</section><section class="exchange" data-home-paper="redeem" tabindex="0" aria-label="${tr("卡密兑换", "Redeem a code")}"><h2>${tr("开始兑换", "Redeem your code")}</h2><p>${tr("请使用购买商品时获得的卡密。", "Use the code you received with your purchase.")}</p><form id="form"><div class="field"><label for="code">${tr("兑换卡密", "Redemption code")}</label><div class="code-entry"><textarea class="code" id="code" rows="2" placeholder="XXXXXXXX-XXXXXXXX-XXXXXXXX-XXXXXXXX" required autocomplete="off" spellcheck="false" maxlength="8000"></textarea><button id="paste-code" class="secondary paste-code" type="button">${tr("粘贴", "Paste")}</button></div><p id="code-count" class="caption"></p><p class="caption">${tr("多张卡密请换行，或用空格、逗号分开。验证后仍得到一个领取链接。", "Separate extra codes with new lines, spaces, or commas. You still get one receipt link.")}</p></div><button type="submit" class="full">${tr("验证并继续", "Verify and continue")} →</button><div id="error" class="error" role="alert"></div></form><div class="footnote">${tr("已有领取链接？直接打开即可查看处理进度。", "Already have a receipt link? Open it to check progress.")}</div></section></section>`;
@@ -399,16 +426,19 @@ function receiptRequestContext(options = {}) {
 function openBatch(data) {
   currentBatch = data;
   currentProduct = data.product;
+  currentJob = null;
   if (batchSelection) {
     const item = data.items.find((entry) => entry.card_id === batchSelection);
     if (item?.job && !batchRetryOnly) {
       currentProduct = batchProduct(item);
+      currentJob = item.job;
       currentVariant = item.variant || item.job.variant || null;
       renderReceipt(item.job);
       return;
     }
     if (item && (batchRetryOnly || !item.job)) {
       currentProduct = batchProduct(item);
+      currentJob = item.job || null;
       currentVariant = item.variant || item.job?.variant || null;
       redemptionForm();
       return;
@@ -428,6 +458,7 @@ async function exchangeCode(code, options = {}) {
     if (!context.active()) return;
     currentToken = data.token;
     currentProduct = data.product;
+    currentJob = data.job || null;
     currentVariant = data.variant || data.job?.variant || data.items?.[0]?.variant || null;
     currentBatch = data.batch ? data : null;
     batchSelection = "";
@@ -466,6 +497,7 @@ async function readReceipt(options = {}) {
   );
   if (context.active()) {
     currentProduct = result.product;
+    currentJob = result.job || null;
     currentVariant = result.variant || result.job?.variant || result.items?.[0]?.variant || null;
     if (result.batch) {
       currentBatch = result;
@@ -562,9 +594,10 @@ function redemptionForm() {
         const copy = index === 0 && pending.length > 1 && itemProduct.parameters.some((field) => field.type !== "file")
           ? `<button type="button" class="secondary" id="copy-params">${tr("填到其余卡密", "Copy to the other codes")}</button>`
           : "";
-        return `<section class="batch-card"><h3>${tr("卡密", "Code")} ···${esc(item.suffix || "")}${variant}</h3>${copy}${itemProduct.parameters.map((field) => parameterFields(`param-${item.card_id}-`, field)).join("")}</section>`;
+        const saved = item.job?.state === "needs_input" ? item.job.params || {} : {};
+        return `<section class="batch-card"><h3>${tr("卡密", "Code")} ···${esc(item.suffix || "")}${variant}</h3>${item.job?.state === "needs_input" ? `<p class="error">${esc(item.job.message)}</p>` : ""}${copy}${itemProduct.parameters.map((field) => parameterFields(`param-${item.card_id}-`, field, saved[field.key] || "")).join("")}</section>`;
       }).join("")
-    : p.parameters.map((field) => parameterFields(`param-`, field)).join("");
+    : p.parameters.map((field) => parameterFields(`param-`, field, currentJob?.state === "needs_input" ? currentJob.params?.[field.key] || "" : "")).join("");
   const started = currentBatch
     ? currentBatch.items.filter((item) => item.job && !pending.some((row) => row.card_id === item.card_id))
     : [];
@@ -594,6 +627,7 @@ function redemptionForm() {
     toast(tr("已填到其余卡密。文件仍需分别上传。", "Copied to the other codes. Files still need their own upload."));
   });
   bindBatchItems(started);
+  if ((pending ? pending.some((item) => batchProduct(item).parameters.some((field) => field.type === "file")) : p.parameters.some((field) => field.type === "file"))) void uploadFileLimit();
   form(async () => {
     const context = receiptRequestContext();
     if (!pending) {
@@ -602,7 +636,7 @@ function redemptionForm() {
         const input = document.getElementById("param-" + field.key);
         if (field.type === "file") {
           const file = input.files[0];
-          params[field.key] = file ? (await uploadMultipart("/files/upload", { token: context.token, field_key: field.key }, file)).id : "";
+          params[field.key] = file ? (await uploadMultipart("/files/upload", { token: context.token, field_key: field.key }, file)).id : document.getElementById("param-" + field.key + "-retained")?.value || "";
         } else params[field.key] = input.value;
         if (!context.active()) return;
       }
@@ -618,7 +652,7 @@ function redemptionForm() {
           const file = input.files[0];
           params[field.key] = file
             ? (await uploadMultipart("/files/upload", { token: context.token, field_key: field.key, card_id: item.card_id }, file)).id
-            : "";
+            : document.getElementById(`param-${item.card_id}-${field.key}-retained`)?.value || "";
         } else params[field.key] = input.value;
         if (!context.active()) return;
       }
@@ -690,7 +724,7 @@ function renderBatch(data) {
   stopPoll();
   window.ExtoreWebMCP?.refresh();
   const items = data.items || [];
-  const finished = items.filter((item) => ["succeeded", "failed", "destroyed"].includes(item.job?.state)).length;
+  const finished = items.filter((item) => ["succeeded", "failed", "rejected", "destroyed"].includes(item.job?.state)).length;
   const mean = items.length ? Math.round(items.reduce((sum, item) => sum + batchProgress(item), 0) / items.length) : 0;
   const viewKey = JSON.stringify(["batch", currentToken, lang, items.map((item) => [item.card_id, item.suffix, item.job?.state, item.job?.progress, item.job?.message, item.job?.queue_position])]);
   if (receiptViewKey === viewKey && $("#batch-list")) {
@@ -712,6 +746,7 @@ function renderBatch(data) {
   pollBatch(data);
 }
 function renderReceipt(j) {
+  currentJob = j;
   stopPoll();
   window.ExtoreWebMCP?.refresh();
   const p = currentProduct;
@@ -729,7 +764,7 @@ function renderReceipt(j) {
   const batchItem = currentBatch?.items?.find((item) => item.card_id === batchSelection);
   const batchBack = batchItem ? `<button id="batch-back" class="secondary" type="button">← ${tr("全部卡密", "All codes")}</button>` : "";
   const suffixLine = batchItem ? `<p class="caption">${tr("卡密尾号", "Code ending")} ···${esc(batchItem.suffix || "")}</p>` : "";
-  app.innerHTML = `<div class="narrow ${waiting ? "receipt-waiting" : ""}">${batchBack}<h1>${esc(p.name)}</h1>${suffixLine}${variant?.name ? `<p class="caption">${tr("规格：", "Variant: ")}${esc(variant.name)}</p>` : ""}<div class="steps"><div class="step active">${tr("卡密已验证", "Code verified")}</div><div class="step active">${tr("信息已提交", "Details submitted")}</div><div class="step ${j.state === "succeeded" ? "active" : ""}">${tr("领取商品", "Collect")}</div></div><section class="panel receipt-panel">${waiting ? '<div class="paper-divider waiting-top" aria-hidden="true"></div>' : ""}<div class="section-head"><h2>${tr("兑换进度", "Redemption progress")}</h2>${status(j)}</div><p id="customer-message"></p><p id="queue-position" class="caption"></p><div id="fulfillment-steps"></div>${waiting ? `<div class="progress" role="progressbar" aria-label="${tr("处理进度", "Processing progress")}" aria-valuemin="0" aria-valuemax="100" aria-valuenow="${j.progress}"><span></span></div><p id="progress-label" class="caption"></p>${window.ExtoreMotion?.waitingMarkup(lang) || ""}<button id="motion-toggle" class="secondary motion-toggle" aria-pressed="${waitingAnimationPaused}">${waitingAnimationPaused ? tr("播放动画", "Play animation") : tr("暂停动画", "Pause animation")}</button>${reminderMarkup(j)}` : ""}<div id="content"></div><div class="actions">${j.state === "succeeded" && j.delivery === "content" ? `<button id="reveal">${tr(j.view_policy === "once" ? "领取内容（仅一次）" : "查看交付内容", j.view_policy === "once" ? "Reveal once" : "View your goods")}</button>` : ""}${j.can_retry ? `<button id="retry">${tr("重新填写并重试", "Update details and retry")}</button>` : ""}${j.state === "succeeded" ? `<button id="destroy" class="danger">${tr("立即销毁", "Destroy now")}</button>` : ""}</div><div id="error" class="error" role="alert"></div>${j.state === "destroyed" ? `<p class="caption">${tr("内容已永久删除，此链接无法再领取。", "The content has been deleted. This link can no longer reveal it.")}</p>` : ""}${waiting ? '<div class="paper-divider waiting-bottom" aria-hidden="true"></div>' : ""}</section><div class="receipt-link"><strong>${tr("保存领取链接", "Save your receipt link")}</strong><p>${esc(location.origin + "/receipt#" + currentToken)}</p><button id="copy" class="secondary">${tr("复制链接", "Copy link")}</button><p class="caption">${batchItem ? tr("这个链接包含全部卡密，有效期 30 天，请勿转发给他人。", "This link covers every code. Valid for 30 days. Do not forward it.") : tr("有效期 30 天。链接是领取凭证，请勿转发给他人。", "Valid for 30 days. Anyone with this link can access the receipt.")}</p></div></div>`;
+  app.innerHTML = `<div class="narrow ${waiting ? "receipt-waiting" : ""}">${batchBack}<h1>${esc(p.name)}</h1>${suffixLine}${variant?.name ? `<p class="caption">${tr("规格：", "Variant: ")}${esc(variant.name)}</p>` : ""}<div class="steps"><div class="step active">${tr("卡密已验证", "Code verified")}</div><div class="step active">${tr("信息已提交", "Details submitted")}</div><div class="step ${j.state === "succeeded" ? "active" : ""}">${tr("领取商品", "Collect")}</div></div><section class="panel receipt-panel">${waiting ? '<div class="paper-divider waiting-top" aria-hidden="true"></div>' : ""}<div class="section-head"><h2>${tr("兑换进度", "Redemption progress")}</h2>${status(j)}</div><p id="customer-message"></p><p id="queue-position" class="caption"></p><div id="fulfillment-steps"></div>${waiting ? `<div class="progress" role="progressbar" aria-label="${tr("处理进度", "Processing progress")}" aria-valuemin="0" aria-valuemax="100" aria-valuenow="${j.progress}"><span></span></div><p id="progress-label" class="caption"></p>${window.ExtoreMotion?.waitingMarkup(lang) || ""}<button id="motion-toggle" class="secondary motion-toggle" aria-pressed="${waitingAnimationPaused}">${waitingAnimationPaused ? tr("播放动画", "Play animation") : tr("暂停动画", "Pause animation")}</button>${reminderMarkup(j)}` : ""}<div id="content"></div><div class="actions">${j.state === "succeeded" && j.delivery === "content" ? `<button id="reveal">${tr(j.view_policy === "once" ? "领取内容（仅一次）" : "查看交付内容", j.view_policy === "once" ? "Reveal once" : "View your goods")}</button>` : ""}${j.can_retry ? `<button id="retry">${tr(j.state === "needs_input" ? "补充需求并重新提交" : "重新填写并重试", j.state === "needs_input" ? "Add details and resubmit" : "Update details and retry")}</button>` : ""}${j.state === "succeeded" ? `<button id="destroy" class="danger">${tr("立即销毁", "Destroy now")}</button>` : ""}</div><div id="error" class="error" role="alert"></div>${j.state === "destroyed" ? `<p class="caption">${tr("内容已永久删除，此链接无法再领取。", "The content has been deleted. This link can no longer reveal it.")}</p>` : ""}${waiting ? '<div class="paper-divider waiting-bottom" aria-hidden="true"></div>' : ""}</section><div class="receipt-link"><strong>${tr("保存领取链接", "Save your receipt link")}</strong><p>${esc(location.origin + "/receipt#" + currentToken)}</p><button id="copy" class="secondary">${tr("复制链接", "Copy link")}</button><p class="caption">${batchItem ? tr("这个链接包含全部卡密，有效期 30 天，请勿转发给他人。", "This link covers every code. Valid for 30 days. Do not forward it.") : tr("有效期 30 天。链接是领取凭证，请勿转发给他人。", "Valid for 30 days. Anyone with this link can access the receipt.")}</p></div></div>`;
   updateReceiptView(j);
   if (waiting && window.ExtoreMotion) {
     receiptMotion = window.ExtoreMotion.mount(app);
@@ -859,6 +894,9 @@ function acceptAuth(auth) {
   managementName = auth.link_name || "";
   managementExpires = auth.link_expires || null;
   managementMaxUses = auth.max_uses || 1;
+  managementMaxCLIUses = auth.max_cli_uses ?? 1;
+  managementRemainingCLIUses = auth.remaining_cli_uses ?? Math.max(0, managementMaxCLIUses - (auth.cli_uses || 0));
+  managementLinkId = auth.link_id || auth.staff_id || null;
 }
 const permitted = (permission) =>
   role === "admin" || permissions.includes(permission);
@@ -942,6 +980,19 @@ async function copyManagementLink(url, input, isCurrent = () => true) {
   }
   return false;
 }
+async function copyCLIPrompt(options, host, isCurrent = () => true) {
+  const prompt = window.ExtoreCliPrompts.build({ language: lang, ...options });
+  if (!isCurrent()) return;
+  host.innerHTML = `<div class="field"><label for="cli-ai-prompt">${tr("给 AI 的 CLI 提示词", "CLI prompt for AI")}</label><textarea id="cli-ai-prompt" readonly spellcheck="false" rows="12">${esc(prompt)}</textarea></div><p class="caption">${tr("包含授权链接时请私下交付，不要公开发布。", "Share authorization prompts privately; do not publish them.")}</p>`;
+  const input = $("#cli-ai-prompt");
+  const copied = await writeClipboard(prompt);
+  if (!isCurrent()) return;
+  if (!copied) {
+    input.focus();
+    input.select();
+  }
+  toast(copied ? tr("AI 提示词已复制", "AI prompt copied") : tr("复制失败，已选中提示词，请手动复制。", "Could not copy. The prompt is selected; copy it manually."));
+}
 function productUIContext() {
   const loadId = queueLoadId;
   const pathname = location.pathname;
@@ -1002,9 +1053,12 @@ async function renderJobs(filter = "", requestedProductId = queueProductId, requ
   if (!active()) return;
   const manual = selectedProduct.mode === "manual";
   const canProcess = manual && permitted("queue.process");
+  let batchDialogGeneration = 0;
+  const dialogCurrent = (generation) => active() && generation === batchDialogGeneration;
+  const closeBatchDialog = () => { batchDialogGeneration++; $("#batch-form").innerHTML = ""; };
   $("#workspace").innerHTML = `
     <div class="field queue-picker"><label for="queue-product">选择商品队列</label><select id="queue-product" ${role === "staff" ? "disabled" : ""}>${available.map((p) => `<option value="${esc(p.id)}" ${p.id === productId ? "selected" : ""}>${esc(p.name)}</option>`).join("")}</select></div>
-    <div class="queue-heading"><h2>${esc(selectedProduct.name)} · 处理队列</h2><p class="caption">${manual ? "本队列只处理这个商品。先领取任务，再更新进度或提交结果。" : "本商品由程序自动处理，这里查看进度与处理记录。"}</p></div>
+    <div class="queue-heading"><h2>${esc(selectedProduct.name)} · 处理队列</h2><button id="copy-queue-ai" class="secondary">复制给 AI 的提示词</button><p class="caption">${manual ? "本队列只处理这个商品。先领取任务，再更新进度或提交结果。" : "本商品由程序自动处理，这里查看进度与处理记录。"}</p>${role === "staff" ? `<p class="caption">CLI 剩余绑定次数：${managementRemainingCLIUses}。${managementRemainingCLIUses ? "复制提示词会生成五分钟有效的 CLI 绑定票据。" : "请使用已绑定的 CLI 设备；不会创建新的授权票据。"}</p>` : ""}</div><div id="queue-ai-prompt"></div>
     <div class="toolbar"><select id="job-view" aria-label="队列视图"><option value="active" ${view === "active" ? "selected" : ""}>待处理</option><option value="processed" ${view === "processed" ? "selected" : ""}>已处理</option><option value="all" ${view === "all" ? "selected" : ""}>全部</option></select><select id="job-state" aria-label="任务状态"><option value="">全部状态</option>${Object.entries(
       states,
     )
@@ -1014,11 +1068,22 @@ async function renderJobs(filter = "", requestedProductId = queueProductId, requ
       )
       .join(
         "",
-      )}</select><button id="refresh" class="secondary">刷新</button>${canProcess ? '<button id="claim">领取选中任务</button><button id="progress-update" class="secondary">更新进度</button><button id="complete" class="secondary">批量完成</button><button id="fail" class="secondary">标记失败</button>' : ""}${role === "admin" ? '<button id="release" class="secondary">核实后允许重试</button>' : ""}</div>
+      )}</select><button id="refresh" class="secondary">刷新</button>${canProcess ? '<button id="claim">领取选中任务</button><button id="progress-update" class="secondary">更新进度</button><button id="complete" class="secondary">批量完成</button><button id="fail" class="secondary">标记失败</button><button id="request-changes" class="secondary">要求补充信息</button><button id="reject" class="danger">永久拒绝</button>' : ""}${role === "admin" ? '<button id="release" class="secondary">核实后允许重试</button>' : ""}</div>
     ${manual ? '<p class="caption">批量操作只作用于当前商品，全部成功才提交。批量完成会给所选任务相同的交付内容。</p>' : ""}
     ${rows.length ? `<div class="table-wrap"><table><thead><tr><th><input id="all" type="checkbox" aria-label="选择当前商品的全部任务"></th><th>任务</th><th>用户参数</th><th>状态 / 进度</th><th>尝试</th></tr></thead><tbody>${rows.map((j) => `<tr><td><input type="checkbox" name="job" value="${esc(j.id)}" aria-label="选择 ${esc(j.id)}"></td><td class="mono">${esc(j.id)}${j.variant?.name ? `<p class="caption">${esc(j.variant.name)}</p>` : ""}${j.queue_position ? `<p class="caption">队列第 ${j.queue_position} 位</p>` : ""}</td><td><pre>${esc(JSON.stringify(j.params, null, 2))}</pre>${(j.files || []).filter((file) => file.kind === "input").map((file) => `<p><a href="/api/manage/files/${encodeURIComponent(file.id)}/download">↓ ${esc(file.filename)}</a> <span class="caption">${Math.ceil(file.size / 1024)} KiB</span></p>`).join("")}</td><td>${status(j)}<p>${j.progress}% · ${esc(j.message)}</p>${j.steps?.length ? `<p class="caption">${j.steps.filter((step) => step.done).length} / ${j.steps.length} 步已完成</p>` : ""}</td><td>${j.attempt}</td></tr>`).join("")}</tbody></table></div>` : '<div class="empty">这个商品暂无符合条件的任务。</div>'}
     <div id="batch-form"></div><div id="error" class="error" role="alert"></div>`;
   window.ExtoreWebMCP?.refresh();
+  on("#copy-queue-ai", async () => {
+    if (!active()) return;
+    let authorization = { origin: location.origin };
+    if (role === "staff" && managementRemainingCLIUses > 0) {
+      const ticket = await api("/manage/cli-ticket", {});
+      if (!active()) return;
+      if (ticket.product_id !== productId) throw new Error("授权票据不属于当前商品。");
+      authorization = { origin: ticket.origin, link: ticket.origin + "/cli#" + ticket.token, expires: ticket.expires };
+    }
+    await copyCLIPrompt({ ...authorization, product: selectedProduct, permissions: role === "staff" ? permissions : [], reuseDevice: role === "staff" && managementRemainingCLIUses === 0 }, $("#queue-ai-prompt"), active);
+  });
   $("#queue-product").addEventListener("change", () =>
     perform(() => renderJobs("", $("#queue-product").value, view)),
   );
@@ -1056,43 +1121,103 @@ async function renderJobs(filter = "", requestedProductId = queueProductId, requ
     await executeBatch({ ids: ids(), action: "retry" });
     await refreshQueue();
   });
-  function finish(action) {
+  function disposition(action) {
     const selected = ids();
+    const actor = role === "admin" ? "owner" : managementLinkId;
     const selectedRows = rows.filter((row) => selected.includes(row.id));
-    const outputFields = selectedRows[0]?.outputs || selectedProduct.outputs || [];
+    if (!canProcess || selectedRows.length !== selected.length || selectedRows.some((row) => row.state !== "processing" || row.claimed_by !== actor))
+      throw new Error("只能处理你已领取的处理中任务。");
+    const generation = ++batchDialogGeneration;
+    const rejecting = action === "reject";
+    $("#batch-form").innerHTML = `<div class="panel"><h2>${rejecting ? "永久拒绝" : "要求补充信息"} · ${selected.length} 个任务</h2><div class="field"><label for="disposition-reason">${rejecting ? "拒绝原因" : "需要顾客补充的内容"} *</label><textarea id="disposition-reason" required maxlength="1000"></textarea></div><p class="caption">${rejecting ? "顾客将看到原因，这张卡密不能再次提交。" : "顾客将看到原因，并可保留已有信息后重新提交。"}</p><div class="actions"><button id="disposition-submit" class="${rejecting ? "danger" : ""}">确认提交</button><button id="batch-cancel" class="secondary">取消</button></div></div>`;
+    on("#batch-cancel", closeBatchDialog);
+    on("#disposition-submit", async () => {
+      if (!dialogCurrent(generation)) return;
+      const message = $("#disposition-reason").value.trim();
+      if (!message || message.length > 1000) throw new Error("请填写原因，最多 1000 字。");
+      if (rejecting && !confirm("永久拒绝这些任务并让卡密无法再次提交？顾客会看到拒绝原因。")) return;
+      await executeBatch({ ids: selected, action, message });
+      if (dialogCurrent(generation)) await refreshQueue();
+    });
+  }
+  on("#request-changes", () => disposition("request_changes"));
+  on("#reject", () => disposition("reject"));
+  async function finish(action) {
+    const generation = ++batchDialogGeneration;
+    const selected = ids();
+    let selectedRows = rows.filter((row) => selected.includes(row.id));
+    if (selectedRows.length !== selected.length) throw new Error("任务不属于当前显示的商品队列，请刷新后重新选择。");
+    let outputFields = selectedRows[0]?.outputs || selectedProduct.outputs || [];
     if (action === "succeed") {
       if (selectedRows.some((row) => JSON.stringify(row.outputs || selectedProduct.outputs || []) !== JSON.stringify(outputFields)))
         throw new Error("所选任务的交付定义不同，请分别交付。");
       if (selected.length > 1 && outputFields.some((field) => field.type === "file"))
         throw new Error("包含交付文件的任务请逐个完成，文件只属于自己的任务。");
+      if (outputFields.some((field) => field.type === "file")) {
+        const query = new URLSearchParams({ product_id: productId, job_id: selected[0], limit: "1" });
+        const fresh = await api("/manage/jobs?" + query);
+        if (!dialogCurrent(generation)) return;
+        const current = fresh.find((row) => row.id === selected[0] && row.product_id === productId);
+        if (!current) throw new Error("任务不属于当前商品队列。");
+        selectedRows = [current];
+        outputFields = current.outputs || selectedProduct.outputs || [];
+      }
     }
+    if (!dialogCurrent(generation)) return;
+    const uploadedOutputs = (field) => (selectedRows[0]?.files || []).filter((file) =>
+      file.job_id === selected[0] && file.kind === "output" && file.field_key === field.key &&
+      !file.consumed && file.available !== false && (file.attempt == null || file.attempt === selectedRows[0].attempt));
+    const fileField = (field, index) => {
+      const attachments = uploadedOutputs(field);
+      return `${attachments.length ? `<label for="batch-uploaded-${index}">已上传附件</label><select id="batch-uploaded-${index}"><option value="">选择已上传附件，或选择新文件</option>${attachments.map((file) => `<option value="${esc(file.id)}">${esc(file.filename)} · ${Math.ceil(file.size / 1024)} KiB</option>`).join("")}</select><p id="batch-uploaded-id-${index}" class="caption mono"></p>${attachments.map((file) => `<p class="caption"><a href="/api/manage/files/${encodeURIComponent(file.id)}/download">检查附件：${esc(file.filename)}</a> · ${esc(file.id)}</p>`).join("")}` : ""}<input id="batch-output-${index}" type="file" ${field.required ? "required" : ""}><p class="caption" data-upload-limit>${uploadLimitCaption()}</p><p class="caption">文件只交付给此任务。选择新文件将替代已上传附件。</p>`;
+    };
     $("#batch-form").innerHTML =
-      `<div class="panel"><h2>${action === "succeed" ? "批量完成" : "标记失败"} · ${esc(selectedProduct.name)} · ${selected.length} 个任务</h2>${textarea("batch-message", "处理说明")}${action === "succeed" ? outputFields.map((output, i) => `<div class="field"><label for="batch-output-${i}">${esc(localized(output.label))}${output.required ? " *" : ""}</label>${output.type === "file" ? `<input id="batch-output-${i}" type="file" ${output.required ? "required" : ""}><p class="caption">文件最多 20 MiB，只交付给此任务。</p>` : output.type === "textarea" ? `<textarea id="batch-output-${i}" maxlength="100000" ${output.required ? "required" : ""}></textarea>` : `<input id="batch-output-${i}" type="${output.type}" ${output.type === "number" ? 'step="any"' : ""} maxlength="100000" ${output.required ? "required" : ""}>`}</div>${localized(output.description) ? `<details ${output.collapsed ? "" : "open"}><summary>交付说明</summary><div class="markdown">${md(localized(output.description))}</div></details>` : ""}`).join("") || '<p class="caption">此商品只交付服务状态，无需填写内容。</p>' : '<div class="checks"><label><input id="batch-retry" type="checkbox">已确认未交付，允许顾客重试</label></div>'}<div class="actions"><button id="batch-submit">确认提交</button><button id="batch-cancel" class="secondary">取消</button></div></div>`;
-    on("#batch-cancel", () => ($("#batch-form").innerHTML = ""));
+      `<div class="panel"><h2>${action === "succeed" ? "批量完成" : "标记失败"} · ${esc(selectedProduct.name)} · ${selected.length} 个任务</h2>${textarea("batch-message", "处理说明")}${action === "succeed" ? outputFields.map((output, i) => `<div class="field"><label for="batch-output-${i}">${esc(localized(output.label))}${output.required ? " *" : ""}</label>${output.type === "file" ? fileField(output, i) : output.type === "textarea" ? `<textarea id="batch-output-${i}" maxlength="100000" ${output.required ? "required" : ""}></textarea>` : `<input id="batch-output-${i}" type="${output.type}" ${output.type === "number" ? 'step="any"' : ""} maxlength="100000" ${output.required ? "required" : ""}>`}</div>${localized(output.description) ? `<details ${output.collapsed ? "" : "open"}><summary>交付说明</summary><div class="markdown">${md(localized(output.description))}</div></details>` : ""}`).join("") || '<p class="caption">此商品只交付服务状态，无需填写内容。</p>' : '<div class="checks"><label><input id="batch-retry" type="checkbox">已确认未交付，允许顾客重试</label></div>'}<div class="actions"><button id="batch-submit">确认提交</button><button id="batch-cancel" class="secondary">取消</button></div></div>`;
+    on("#batch-cancel", closeBatchDialog);
+    for (const [index, field] of outputFields.entries()) {
+      if (action !== "succeed" || field.type !== "file") continue;
+      const input = $("#batch-output-" + index);
+      const existing = $("#batch-uploaded-" + index);
+      const updateSelection = () => {
+        input.required = !!field.required && !existing?.value;
+        const label = $("#batch-uploaded-id-" + index);
+        if (label) label.textContent = existing?.value ? "已选择附件 ID：" + existing.value : "";
+      };
+      existing?.addEventListener("change", updateSelection);
+      input.addEventListener("change", updateSelection);
+      updateSelection();
+    }
+    if (action === "succeed" && outputFields.some((field) => field.type === "file")) void uploadFileLimit();
     on("#batch-submit", async () => {
+      if (!dialogCurrent(generation)) return;
       const output = {};
+      const message = $("#batch-message").value;
       if (action === "succeed") {
         for (const [i, definition] of outputFields.entries()) {
           const input = $("#batch-output-" + i);
           if (!input.reportValidity()) return;
           if (definition.type === "file") {
             const file = input.files[0];
-            output[definition.key] = file ? (await uploadMultipart("/manage/files/upload", { job_id: selected[0], field_key: definition.key }, file)).id : "";
+            const existing = $("#batch-uploaded-" + i)?.value || "";
+            if (existing && !uploadedOutputs(definition).some((candidate) => candidate.id === existing))
+              throw new Error("附件不属于此任务、字段或当前尝试，请刷新后重新选择。");
+            output[definition.key] = file ? (await uploadMultipart("/manage/files/upload", { job_id: selected[0], field_key: definition.key }, file)).id : existing;
           } else output[definition.key] = input.value;
-          if (!active()) return;
+          if (!dialogCurrent(generation)) return;
         }
       }
       await executeBatch({
         ids: selected,
         action,
-        message: $("#batch-message").value,
+        message,
         output: action === "succeed" ? output : undefined,
         retryable: $("#batch-retry")?.checked || false,
       });
-      await refreshQueue();
+      if (dialogCurrent(generation)) await refreshQueue();
     });
   }
   on("#progress-update", () => {
+    const generation = ++batchDialogGeneration;
     const selected = ids();
     const selectedRows = rows.filter((row) => selected.includes(row.id));
     const plans = selectedRows.map((row) => row.steps || []);
@@ -1103,9 +1228,9 @@ async function renderJobs(filter = "", requestedProductId = queueProductId, requ
     const done = new Set(plans.flatMap((steps) => steps.filter((step) => step.done).map((step) => step.id)));
     const defaultSteps = selectedProduct.progress_steps || [];
     $("#batch-form").innerHTML = `<div class="panel"><h2>更新进度 · ${esc(selectedProduct.name)} · ${selected.length} 个任务</h2>${plan.length ? `<fieldset class="progress-checks"><legend>已完成的步骤</legend>${plan.map((step, i) => `<label><input type="checkbox" name="completed-step" value="${esc(step.id)}" ${done.has(step.id) ? "checked disabled" : ""}>${i + 1}. ${esc(localized(step.label))}</label>`).join("")}</fieldset><p class="caption">已完成的步骤不能取消。进度按完成步骤数自动计算。</p>` : `${textarea("batch-step-names", "定义步骤（每行一个，可留空）", defaultSteps.map((step) => localized(step.label)).join("\n"))}${field("batch-completed-count", "已完成前几步", 0, "number")}<p class="caption">设置后绑定到这些任务，后续只需勾选完成的步骤。</p>${field("batch-progress", "未定义步骤时的进度（0–99）", selectedRows[0]?.progress || 0, "number")}`}${textarea("batch-message", "给顾客的一句话", selectedRows.length === 1 ? selectedRows[0].message : "")}<div class="actions"><button id="batch-submit">更新进度</button><button id="batch-cancel" class="secondary">取消</button></div></div>`;
-    on("#batch-cancel", () => ($("#batch-form").innerHTML = ""));
+    on("#batch-cancel", closeBatchDialog);
     on("#batch-submit", async () => {
-      if (!active()) return;
+      if (!dialogCurrent(generation)) return;
       const body = { ids: selected, action: "progress", message: $("#batch-message").value };
       if (plan.length) {
         body.completed_steps = [...document.querySelectorAll('[name="completed-step"]')].filter((input) => input.checked).map((input) => input.value);
@@ -1129,7 +1254,7 @@ async function renderJobs(filter = "", requestedProductId = queueProductId, requ
         }
       }
       await executeBatch(body);
-      await refreshQueue();
+      if (dialogCurrent(generation)) await refreshQueue();
     });
   });
 
@@ -1185,11 +1310,15 @@ async function renderStaff() {
   const defaultDays =
     role === "staff" ? Math.min(7, Math.floor(remainingDays * 100) / 100) : 7;
   $("#workspace").innerHTML =
-    `<h2>商品管理链接</h2><p class="caption">一条链接只授权一个商品。可以分别授予队列、商品配置、卡密等权限；店长可获得该商品的完整管理权限。默认只能登录一次，已登录的会话可继续使用。链接是登录凭证，请私下交给管理者。</p>${role === "staff" ? '<p class="caption">你只能创建权限比自己更小的下级链接，有效期也不能超过自己的链接。</p>' : ""}<form id="form"><div class="grid">${field("staff-name", "管理者或链接名称")}<div class="field"><label for="staff-product">授权商品</label><select id="staff-product" ${role === "staff" ? "disabled" : ""}>${productOptions()}</select></div>${field("staff-days", "有效天数", defaultDays, "number")}${field("staff-max-uses", "可登录次数", 1, "number")}</div><fieldset class="permission-fields"><legend>权限范围</legend><div class="permission-presets"><button type="button" id="preset-view" class="secondary">只看队列</button><button type="button" id="preset-process" class="secondary">处理任务</button>${role === "admin" ? '<button type="button" id="preset-manager" class="secondary">店长：完全管理商品</button>' : ""}</div><div class="permission-grid">${availablePermissions.map((key) => `<label><input type="checkbox" name="link-permission" value="${key}" ${["queue.view", "queue.process"].includes(key) ? "checked" : ""}>${permissionLabels[key]}</label>`).join("")}</div><p class="caption">“创建下级管理链接”允许继续委派。下级必须少至少一项权限，不能扩大商品范围或有效期。撤销上级链接会同时撤销全部下级。</p></fieldset><button type="submit" class="full" ${products.length ? "" : "disabled"}>创建管理链接</button><div id="error" class="error" role="alert"></div></form><div id="staff-link"></div><div class="form-divider table-wrap"><table><thead><tr><th>管理链接</th><th>商品</th><th>权限</th><th>有效期</th><th>登录次数</th><th></th></tr></thead><tbody>${links.map((link) => `<tr><td>${esc(link.name)}${link.parent_id ? '<div class="caption">下级链接</div>' : ""}</td><td>${esc(products.find((p) => p.id === link.product_id)?.name || link.product_id)}</td><td>${(link.permissions || []).map((key) => esc(permissionLabels[key] || key)).join("<br>")}</td><td>${link.revoked ? "已撤销" : new Date(link.expires * 1000).toLocaleString()}</td><td>${link.uses || 0} / ${link.max_uses || 1}<p class="caption">剩余 ${link.remaining_uses ?? Math.max(0, (link.max_uses || 1) - (link.uses || 0))} 次</p></td><td>${!link.revoked ? `<button data-revoke="${esc(link.id)}" class="danger">撤销</button>` : ""}</td></tr>`).join("")}</tbody></table></div>`;
+    `<h2>商品管理链接</h2><p class="caption">一条链接只授权一个商品。可以分别授予队列、商品配置、卡密等权限；店长可获得该商品的完整管理权限。默认可绑定浏览器一次、CLI 一次；已登录的会话可继续使用。链接是登录凭证，请私下交给管理者。</p>${role === "staff" ? '<p class="caption">你只能创建权限比自己更小的下级链接，有效期也不能超过自己的链接。</p>' : ""}<form id="form"><div class="grid">${field("staff-name", "管理者或链接名称")}<div class="field"><label for="staff-product">授权商品</label><select id="staff-product" ${role === "staff" ? "disabled" : ""}>${productOptions()}</select></div>${field("staff-days", "有效天数", defaultDays, "number")}${field("staff-max-uses", "浏览器绑定次数", 1, "number")}${field("staff-max-cli-uses", "CLI 绑定次数", 1, "number")}</div><fieldset class="permission-fields"><legend>权限范围</legend><div class="permission-presets"><button type="button" id="preset-view" class="secondary">只看队列</button><button type="button" id="preset-process" class="secondary">处理任务</button>${role === "admin" ? '<button type="button" id="preset-manager" class="secondary">店长：完全管理商品</button>' : ""}</div><div class="permission-grid">${availablePermissions.map((key) => `<label><input type="checkbox" name="link-permission" value="${key}" ${["queue.view", "queue.process"].includes(key) ? "checked" : ""}>${permissionLabels[key]}</label>`).join("")}</div><p class="caption">“创建下级管理链接”允许继续委派。下级必须少至少一项权限，不能扩大商品范围或有效期。撤销上级链接会同时撤销全部下级。</p></fieldset><button type="submit" class="full" ${products.length ? "" : "disabled"}>创建管理链接</button><div id="error" class="error" role="alert"></div></form><div id="staff-link"></div><div class="form-divider table-wrap"><table><thead><tr><th>管理链接</th><th>商品</th><th>权限</th><th>有效期</th><th>登录次数</th><th></th></tr></thead><tbody>${links.map((link) => `<tr><td>${esc(link.name)}${link.parent_id ? '<div class="caption">下级链接</div>' : ""}</td><td>${esc(products.find((p) => p.id === link.product_id)?.name || link.product_id)}</td><td>${(link.permissions || []).map((key) => esc(permissionLabels[key] || key)).join("<br>")}</td><td>${link.revoked ? "已撤销" : new Date(link.expires * 1000).toLocaleString()}</td><td>浏览器 ${link.uses || 0} / ${link.max_uses || 1}<p class="caption">剩余 ${link.remaining_uses ?? Math.max(0, (link.max_uses || 1) - (link.uses || 0))} 次</p>CLI ${link.cli_uses || 0} / ${link.max_cli_uses || 1}<p class="caption">剩余 ${link.remaining_cli_uses ?? Math.max(0, (link.max_cli_uses || 1) - (link.cli_uses || 0))} 次</p></td><td>${!link.revoked ? `<button data-revoke="${esc(link.id)}" class="danger">撤销</button>` : ""}</td></tr>`).join("")}</tbody></table></div>`;
   $("#staff-max-uses").required = true;
   $("#staff-max-uses").min = "1";
   $("#staff-max-uses").max = String(role === "staff" ? managementMaxUses : 1000);
   $("#staff-max-uses").step = "1";
+  $("#staff-max-cli-uses").required = true;
+  $("#staff-max-cli-uses").min = "1";
+  $("#staff-max-cli-uses").max = String(role === "staff" ? managementMaxCLIUses : 1000);
+  $("#staff-max-cli-uses").step = "1";
   $("#staff-days").step = "0.01";
   $("#staff-days").min = "0.01";
   $("#staff-days").max = String(role === "staff" ? remainingDays : 90);
@@ -1242,22 +1371,25 @@ async function renderStaff() {
     if (!selected.length) throw new Error("请至少选择一项权限");
     if (role === "staff" && selected.length === permissions.length)
       throw new Error("下级链接必须比你的权限更小，请至少取消一项权限");
+    const productDefinition = products.find((p) => p.id === $("#staff-product").value);
     const result = await api(endpoint, {
       name: $("#staff-name").value,
       product_id: $("#staff-product").value,
       days: +$("#staff-days").value,
       max_uses: Number($("#staff-max-uses").value),
+      max_cli_uses: Number($("#staff-max-cli-uses").value),
       permissions: selected,
     });
     if (!active()) return;
     await renderStaff();
     if (!active()) return;
     $("#staff-link").innerHTML =
-      `<div class="field"><label for="created-management-link">${tr("商品管理链接", "Product management link")}</label><input id="created-management-link" type="text" value="${esc(result.url)}" readonly autocomplete="off" spellcheck="false"></div><button id="copy-management-link" type="button" class="secondary">${tr("复制链接", "Copy link")}</button><p class="caption">${tr("链接只显示一次。请现在保存并私下交付。", "This link is shown once. Save it now and share it privately.")}</p>`;
+      `<div class="field"><label for="created-management-link">${tr("商品管理链接", "Product management link")}</label><input id="created-management-link" type="text" value="${esc(result.url)}" readonly autocomplete="off" spellcheck="false"></div><button id="copy-management-link" type="button" class="secondary">${tr("复制链接", "Copy link")}</button><button id="copy-link-ai" type="button" class="secondary">${tr("复制给 AI 的提示词", "Copy prompt for AI")}</button><p class="caption">${tr("链接只显示一次。请现在保存并私下交付。", "This link is shown once. Save it now and share it privately.")}</p><div id="link-ai-prompt"></div>`;
     const input = $("#created-management-link");
     on("#copy-management-link", () =>
       copyManagementLink(result.url, input, () => active() && input.isConnected),
     );
+    on("#copy-link-ai", () => copyCLIPrompt({ origin: new URL(result.url).origin, link: result.url, product: productDefinition, permissions: selected, expires: result.expires }, $("#link-ai-prompt"), () => active() && input.isConnected));
   });
   document.querySelectorAll("[data-revoke]").forEach((b) =>
     b.addEventListener("click", () =>
@@ -1288,13 +1420,23 @@ async function renderEvents() {
 async function renderSessions() {
   const generation = queueLoadId;
   const viewRole = role;
-  const active = () => generation === queueLoadId && role === viewRole && tab === "sessions";
+  const pathname = location.pathname;
+  const active = () => generation === queueLoadId && role === viewRole && tab === "sessions" && location.pathname === pathname;
   const prefix = role === "admin" ? "/admin" : "/manage";
-  const [sessions, entries] = await Promise.all([api(prefix + "/sessions"), api(prefix + "/audit?limit=200")]);
+  const [sessions, entries, devices] = await Promise.all([api(prefix + "/sessions"), api(prefix + "/audit?limit=200"), api(prefix + "/cli-devices")]);
   if (!active()) return;
   const date = (value) => value ? new Date(value * 1000).toLocaleString() : "—";
-  $("#workspace").innerHTML = `<div class="section-head"><div><h2>会话管理</h2><p class="caption">${role === "admin" ? "查看全店会话，按需注销单个设备。" : permitted("links.delegate") ? "查看自己的会话和下级链接的会话，只限授权商品。" : "查看与注销自己的会话。"} 链接次数耗尽不会结束已有会话。</p></div><button id="sessions-refresh" class="secondary">刷新</button></div><div class="table-wrap"><table><thead><tr><th>登录来源</th><th>设备 / 地址</th><th>登录 / 最近活动</th><th>到期</th><th>状态</th><th></th></tr></thead><tbody>${sessions.map((session) => `<tr><td>${esc(session.link_name || (session.role === "admin" ? "商家 Passkey" : session.role === "bootstrap" ? "首次登录" : "商品管理链接"))}${session.product_name ? `<p class="caption">${esc(session.product_name)}</p>` : ""}${session.current ? '<p class="caption">当前会话</p>' : ""}</td><td class="session-client">${esc(session.ua || "未记录设备")}<p class="caption mono">${esc(session.ip || "—")}</p></td><td>${date(session.created)}<p class="caption">${date(session.last_seen)}</p></td><td>${date(session.expires)}</td><td>${session.revoked ? "已注销" : session.active ? "有效" : "已到期"}</td><td>${session.active ? `<button class="danger" data-end-session="${esc(session.id)}">${session.current ? "退出此会话" : "注销"}</button>` : ""}</td></tr>`).join("")}</tbody></table></div><h2 class="form-divider">访问审计</h2><p class="caption">最近 200 条登录、链接使用、委派和注销记录。记录中不包含卡密或授权凭证。</p><div class="table-wrap"><table><thead><tr><th>时间</th><th>操作</th><th>操作者</th><th>目标</th></tr></thead><tbody>${entries.map((entry) => `<tr><td>${date(entry.created)}</td><td>${esc(entry.action)}</td><td class="mono">${esc(entry.actor)}</td><td class="mono">${esc(entry.target)}</td></tr>`).join("")}</tbody></table></div><div id="error" class="error" role="alert"></div>`;
+  const deviceMarkup = `<h2 class="form-divider">CLI 设备</h2><p class="caption">撤销设备会结束它的 CLI 会话，并阻止它再次申请会话；浏览器会话不受影响。已用绑定次数不会退还。</p>${devices.length ? `<div class="table-wrap"><table><thead><tr><th>设备 / 指纹</th><th>商品 / 管理链接</th><th>绑定 / 最近使用</th><th>状态</th><th></th></tr></thead><tbody>${devices.map((device) => `<tr><td>${esc(device.client_name || "未命名 CLI 设备")}<p class="caption mono">${esc(device.fingerprint || "—")}</p><p class="caption mono">${esc(device.id)}</p></td><td>${esc(device.product_name || device.product_id)}<p class="caption">${esc(device.link_name || "商品管理链接")}</p></td><td>${date(device.created)}<p class="caption">${date(device.last_seen)}</p></td><td>${device.revoked ? "已撤销" : device.active ? "有效" : "授权已失效"}</td><td>${!device.revoked ? `<button class="danger" data-revoke-device="${esc(device.id)}">撤销设备</button>` : ""}</td></tr>`).join("")}</tbody></table></div>` : '<p class="caption">暂无 CLI 设备。</p>'}`;
+  $("#workspace").innerHTML = `<div class="section-head"><div><h2>会话管理</h2><p class="caption">${role === "admin" ? "查看全店会话，按需注销单个设备。" : permitted("links.delegate") ? "查看自己的会话和下级链接的会话，只限授权商品。" : "查看与注销自己的会话。"} 链接次数耗尽不会结束已有会话。</p></div><button id="sessions-refresh" class="secondary">刷新</button></div><div class="table-wrap"><table><thead><tr><th>登录来源</th><th>设备 / 地址</th><th>登录 / 最近活动</th><th>到期</th><th>状态</th><th></th></tr></thead><tbody>${sessions.map((session) => `<tr><td>${esc(session.link_name || (session.role === "admin" ? "商家 Passkey" : session.role === "bootstrap" ? "首次登录" : "商品管理链接"))}${session.product_name ? `<p class="caption">${esc(session.product_name)}</p>` : ""}<p class="caption">${session.channel === "cli" ? "CLI" : "浏览器"}${session.client_name ? " · " + esc(session.client_name) : ""}</p>${session.current ? '<p class="caption">当前会话</p>' : ""}</td><td class="session-client">${esc(session.ua || "未记录设备")}<p class="caption mono">${esc(session.ip || "—")}</p>${session.device_id ? `<p class="caption mono">设备 ${esc(session.device_id)}</p>` : ""}${session.fingerprint ? `<p class="caption mono">${esc(session.fingerprint)}</p>` : ""}</td><td>${date(session.created)}<p class="caption">${date(session.last_seen)}</p></td><td>${date(session.expires)}</td><td>${session.revoked ? "已注销" : session.active ? "有效" : "已到期"}</td><td>${session.active ? `<button class="danger" data-end-session="${esc(session.id)}">${session.current ? "退出此会话" : "注销"}</button>` : ""}</td></tr>`).join("")}</tbody></table></div>${deviceMarkup}<h2 class="form-divider">访问审计</h2><p class="caption">最近 200 条登录、链接使用、委派和注销记录。记录中不包含卡密或授权凭证。</p><div class="table-wrap"><table><thead><tr><th>时间</th><th>操作</th><th>操作者</th><th>目标</th></tr></thead><tbody>${entries.map((entry) => `<tr><td>${date(entry.created)}</td><td>${esc(entry.action)}${entry.channel ? `<p class="caption">${entry.channel === "cli" ? "CLI" : "浏览器"}${entry.client_name ? " · " + esc(entry.client_name) : ""}</p>` : ""}${entry.fingerprint ? `<p class="caption mono">${esc(entry.fingerprint)}</p>` : ""}</td><td class="mono">${esc(entry.actor)}</td><td class="mono">${esc(entry.target)}</td></tr>`).join("")}</tbody></table></div><div id="error" class="error" role="alert"></div>`;
   on("#sessions-refresh", renderSessions);
+  document.querySelectorAll("[data-revoke-device]").forEach((button) => button.addEventListener("click", () => perform(async () => {
+    if (!active()) return;
+    const device = devices.find((item) => item.id === button.dataset.revokeDevice);
+    if (!device || device.revoked) return;
+    if (!confirm("撤销这个 CLI 设备并结束它的全部 CLI 会话？绑定次数不会退还。")) return;
+    await api(prefix + "/cli-devices/" + encodeURIComponent(device.id), undefined, "DELETE");
+    if (active()) await renderSessions();
+  }, button)));
   document.querySelectorAll("[data-end-session]").forEach((button) => button.addEventListener("click", () => perform(async () => {
     if (!active()) return;
     const session = sessions.find((item) => item.id === button.dataset.endSession);
@@ -1397,6 +1539,8 @@ window.ExtoreWebMCP?.configure({
     cardProductId,
     queueProductId,
     queueView,
+    batch: Boolean(currentBatch),
+    cardId: batchSelection || "",
     queueProduct,
     permissions,
     productId: managedProductId,

@@ -331,6 +331,7 @@ test("owner and delegated creation both expose a copy button without changing li
     p.node("#staff-product").value = product.id;
     p.node("#staff-days").value = "3";
     p.node("#staff-max-uses").value = "1";
+    p.node("#staff-max-cli-uses").value = "1";
     await p.node("#form").emit("submit");
     await flush();
     const creation = p.requests.find((request) => request.method === "POST");
@@ -340,6 +341,7 @@ test("owner and delegated creation both expose a copy button without changing li
       product_id: product.id,
       days: 3,
       max_uses: 1,
+      max_cli_uses: 1,
       permissions: ["queue.view", "queue.process"],
     });
     const input = p.node("#created-management-link");
@@ -371,6 +373,7 @@ test("a pending rendered copy checks its route, tab, role, generation, and origi
     p.node("#staff-name").value = "Queue worker";
     p.node("#staff-days").value = "3";
     p.node("#staff-max-uses").value = "1";
+    p.node("#staff-max-cli-uses").value = "1";
     await p.node("#form").emit("submit");
     await flush();
     const input = p.node("#created-management-link");
@@ -401,6 +404,7 @@ test("a post-creation management refresh cannot replace a different route or tab
     p.node("#staff-name").value = "Queue worker";
     p.node("#staff-days").value = "3";
     p.node("#staff-max-uses").value = "1";
+    p.node("#staff-max-cli-uses").value = "1";
     delayRefresh = true;
     await p.node("#form").emit("submit");
     await flush();

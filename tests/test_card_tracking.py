@@ -20,6 +20,8 @@ STATES = {
     "destroyed",
     "revoked",
     "expired",
+    "needs_input",
+    "rejected",
 }
 SAFE_CARD_FIELDS = {
     "variant_id",
@@ -230,7 +232,11 @@ def test_every_inventory_state_is_counted_once(owner, setup_product):
     expire(expired)
     result = stats(owner, pid)
     summary = result["summary"]
-    assert summary["states"] == dict.fromkeys(STATES, 1)
+    assert summary["states"] == {
+        **dict.fromkeys(STATES, 1),
+        "needs_input": 0,
+        "rejected": 0,
+    }
     assert sum(summary["states"].values()) == summary["total"] == 9
     assert summary["remaining"] == 1 and summary["available"] == 2
     assert summary["used"] == 6 and summary["verified"] == 6
@@ -258,6 +264,9 @@ def test_every_inventory_state_is_counted_once(owner, setup_product):
     assert card_id(unused) in expected
     for state in STATES:
         filtered = inventory(owner, pid, status=state)
+        if state in {"needs_input", "rejected"}:
+            assert filtered["total"] == 0 and filtered["items"] == []
+            continue
         assert filtered["total"] == 1 and len(filtered["items"]) == 1
         assert filtered["items"][0]["status"] == state
         assert filtered["summary"] == summary

@@ -87,8 +87,8 @@ def init():
         from .link_access import init_schema as init_link_access
 
         init_link_access(c)
-        if c.execute("PRAGMA user_version").fetchone()[0] < 8:
-            c.execute("PRAGMA user_version=8")
+        if c.execute("PRAGMA user_version").fetchone()[0] < 9:
+            c.execute("PRAGMA user_version=9")
     # WAL is set outside a transaction.
     with sqlite3.connect(DATA / "extore.sqlite3") as c:
         c.execute("PRAGMA journal_mode=WAL")

@@ -24,6 +24,7 @@ class ProductLinkInput(BaseModel):
     name: str = Field(min_length=1, max_length=100)
     days: float | None = Field(default=None, gt=0, le=90)
     max_uses: int = Field(default=1, strict=True, ge=1, le=1000)
+    max_cli_uses: int = Field(default=1, strict=True, ge=1, le=1000)
     permissions: list[str] = Field(
         default_factory=lambda: list(DEFAULT_LINK_PERMISSIONS),
         min_length=1,
@@ -336,7 +337,9 @@ class BatchUpdate(BaseModel):
         default=None, min_length=1, max_length=30
     )
     ids: list[str] = Field(min_length=1, max_length=100)
-    action: Literal["claim", "progress", "succeed", "fail", "retry"]
+    action: Literal[
+        "claim", "progress", "succeed", "fail", "retry", "request_changes", "reject"
+    ]
     message: str = Field(default="", max_length=1000)
     content: str | None = Field(default=None, max_length=100000)
     output: dict[str, str] | None = None
@@ -349,6 +352,14 @@ class BatchUpdate(BaseModel):
 
     @model_validator(mode="after")
     def unique_steps(self):
+        if self.action in ("request_changes", "reject"):
+            self.message = self.message.strip()
+            if not self.message:
+                raise ValueError("退回补充或拒绝任务必须填写原因")
+            if self.output or self.content is not None:
+                raise ValueError("退回补充或拒绝任务不能同时交付结果")
+            if self.completed_steps is not None or self.progress_steps is not None:
+                raise ValueError("退回补充或拒绝任务不修改处理步骤")
         if self.action == "retry" and (
             self.completed_steps is not None or self.progress_steps is not None
         ):

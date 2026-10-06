@@ -25,8 +25,10 @@ jobs:
       - run: node --check extore/static/product-export.js
       - run: node --check extore/static/customer-motion.js
       - run: node --check extore/static/source-link.js
+      - run: node --check extore/static/cli-prompts.js
       - run: node --test tests/*.test.cjs
       - run: uv run pytest -q processors/official/tests
       - run: uv build
       - run: uv run extore --help
       - run: uv run extore --version
+      - run: uv run extore manage --help

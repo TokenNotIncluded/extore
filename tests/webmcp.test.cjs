@@ -131,8 +131,8 @@ async function harness(t, options = {}) {
       if (filters.has("state")) return selected.filter((job) => job.state === filters.get("state"));
       const view = filters.get("view") || "active";
       return selected.filter((job) => view === "all" || (view === "processed"
-        ? ["succeeded", "destroyed"].includes(job.state)
-        : ["queued", "processing", "failed"].includes(job.state)));
+        ? ["succeeded", "rejected", "destroyed"].includes(job.state)
+        : ["queued", "processing", "needs_input", "failed"].includes(job.state)));
     }
     if (url === "/manage/batch") return { updated: 1 };
     if (["/admin/cards", "/manage/cards"].includes(url) && method === "POST") return { codes: ["CODE-PRIVATE"], digest: "HASH-PRIVATE" };
@@ -724,7 +724,7 @@ test("job reads and batch writes require the selected product ID and cannot cros
 });
 
 test("queue discovery defaults to active tasks and exposes processed or all history only when requested", async (t) => {
-  const jobs = ["queued", "processing", "failed", "succeeded", "destroyed"].map((state, index) => ({
+  const jobs = ["queued", "processing", "needs_input", "failed", "succeeded", "rejected", "destroyed"].map((state, index) => ({
     id: "j" + index, product_id: "p1", state,
   }));
   jobs.push({ id: "other", product_id: "p2", state: "processing" });
@@ -735,13 +735,15 @@ test("queue discovery defaults to active tasks and exposes processed or all hist
   assert.equal(tool.inputSchema.properties.view.default, "active");
   assert.deepEqual(plain(tool.inputSchema.properties.view.enum), ["active", "processed", "all"]);
   assert.equal(tool.annotations.readOnlyHint, true);
-  assert.match(tool.description, /omitting succeeded and destroyed history/);
-  assert.deepEqual(plain((await h.call("jobs_list", { product_id: "p1" })).data).map((job) => job.state), ["queued", "processing", "failed"]);
+  assert.match(tool.description, /omitting succeeded, rejected and destroyed history/);
+  assert.deepEqual(plain((await h.call("jobs_list", { product_id: "p1" })).data).map((job) => job.state), ["queued", "processing", "needs_input", "failed"]);
   assert.ok(h.calls.some((call) => call.url === "/manage/jobs?product_id=p1&view=active"));
-  assert.deepEqual(plain((await h.call("jobs_list", { product_id: "p1", view: "processed" })).data).map((job) => job.state), ["succeeded", "destroyed"]);
-  assert.equal((await h.call("jobs_list", { product_id: "p1", view: "all" })).data.length, 5);
+  assert.deepEqual(plain((await h.call("jobs_list", { product_id: "p1", view: "processed" })).data).map((job) => job.state), ["succeeded", "rejected", "destroyed"]);
+  assert.equal((await h.call("jobs_list", { product_id: "p1", view: "all" })).data.length, 7);
   assert.deepEqual(plain((await h.call("jobs_list", { product_id: "p1", state: "succeeded" })).data).map((job) => job.state), ["succeeded"]);
   assert.deepEqual(plain((await h.call("jobs_list", { product_id: "p1", state: "queued", view: "processed" })).data).map((job) => job.state), ["queued"]);
+  assert.deepEqual(plain((await h.call("jobs_list", { product_id: "p1", state: "rejected" })).data).map((job) => job.state), ["rejected"]);
+  assert.deepEqual(plain((await h.call("jobs_list", { product_id: "p1", state: "needs_input", view: "processed" })).data).map((job) => job.state), ["needs_input"]);
   const callsBeforeInvalid = h.calls.length;
   for (const view of ["", "history", null, 1, false])
     rejected(await h.call("jobs_list", { product_id: "p1", view }));
@@ -1178,10 +1180,10 @@ test("staff only receives its product queue tools and cannot grant retries or sw
 test("delegated queue tools follow separately granted view, process, and retry permissions", async (t) => {
   const h = await harness(t, { context: staffContext({ permissions: ["queue.view"] }) });
   for (const name of ["queue_products", "queue_select", "jobs_list"]) assert.ok(h.names().includes("extore_" + name), name);
-  for (const name of ["jobs_claim", "jobs_progress", "jobs_complete", "jobs_fail", "jobs_allow_retry"]) assert.equal(h.names().includes("extore_" + name), false, name);
+  for (const name of ["jobs_claim", "jobs_progress", "jobs_complete", "jobs_fail", "jobs_request_changes", "jobs_reject", "jobs_allow_retry"]) assert.equal(h.names().includes("extore_" + name), false, name);
   h.state.permissions = ["queue.view", "queue.process"];
   await h.refresh();
-  for (const name of ["jobs_claim", "jobs_progress", "jobs_complete", "jobs_fail"]) assert.ok(h.names().includes("extore_" + name), name);
+  for (const name of ["jobs_claim", "jobs_progress", "jobs_complete", "jobs_fail", "jobs_request_changes", "jobs_reject"]) assert.ok(h.names().includes("extore_" + name), name);
   assert.equal(h.names().includes("extore_jobs_allow_retry"), false);
   h.state.permissions = ["queue.view", "queue.retry"];
   await h.refresh();
@@ -1486,7 +1488,7 @@ test("switching a selected queue to automatic delivery withdraws manual-processi
   const manual = h.tool("jobs_complete");
   h.state.queueProduct = product({ mode: "script" });
   await h.refresh();
-  for (const tool of ["jobs_claim", "jobs_progress", "jobs_complete", "jobs_fail"]) assert.equal(h.names().includes("extore_" + tool), false, tool);
+  for (const tool of ["jobs_claim", "jobs_progress", "jobs_complete", "jobs_fail", "jobs_request_changes", "jobs_reject"]) assert.equal(h.names().includes("extore_" + tool), false, tool);
   assert.ok(h.names().includes("extore_jobs_list"));
   assert.ok(h.names().includes("extore_jobs_allow_retry"));
   rejected(await manual.execute({ product_id: "p1", ids: ["j1"], content: "goods", confirm: true }), "stale_context");
@@ -2465,4 +2467,255 @@ test("revoking the current session remains successful when the subsequent UI req
   await nextTurn();
   assert.equal(h.names().includes("extore_sessions_list"), false);
   rejected(await saved.execute({}), "stale_context");
+});
+
+test("native change requests and rejection require a meaningful bounded reason and explicit confirmation", async (t) => {
+  const h = await harness(t, { context: { page: "admin", role: "admin", tab: "jobs", queueProductId: "p1", queueProduct: product() } });
+  for (const name of ["jobs_request_changes", "jobs_reject"]) {
+    assert.equal(h.tool(name).annotations.consequentialHint, true);
+    const base = { product_id: "p1", ids: ["j1"], reason: "Please supply the missing document", confirm: true };
+    for (const input of [
+      { ...base, reason: undefined }, { ...base, reason: "" }, { ...base, reason: " \n " },
+      { ...base, reason: "x".repeat(1001) }, { ...base, reason: 1 },
+      { ...base, confirm: false }, { ...base, confirm: undefined }, { ...base, message: "Bypass reason" },
+      { ...base, ids: ["j1", "j1"] },
+    ]) rejected(await h.call(name, input));
+    assert.equal((await h.call(name, base)).ok, true);
+  }
+  assert.deepEqual(mutations(h).map((call) => call.body), [
+    { product_id: "p1", ids: ["j1"], message: "Please supply the missing document", action: "request_changes" },
+    { product_id: "p1", ids: ["j1"], message: "Please supply the missing document", action: "reject" },
+  ]);
+});
+
+test("change-request and rejection tools stay within fresh processing permission and selected product scope", async (t) => {
+  const h = await harness(t, { context: staffContext({ queueProduct: product() }) });
+  const base = { product_id: "p1", ids: ["j1"], reason: "This document needs correction", confirm: true };
+  for (const name of ["jobs_request_changes", "jobs_reject"]) {
+    rejected(await h.call(name, { ...base, product_id: "p2" }), "forbidden");
+    assert.equal((await h.call(name, base)).ok, true);
+  }
+  assert.equal(h.calls.some((call) => call.url?.startsWith("/admin/")), false);
+  const revoked = await harness(t, {
+    context: staffContext({ queueProduct: product() }),
+    api: async (url) => url === "/auth/status" ? { role: "staff", product_id: "p1", permissions: ["queue.view"] } : assert.fail("Revoked operator reached a write endpoint"),
+  });
+  for (const name of ["jobs_request_changes", "jobs_reject"])
+    rejected(await revoked.call(name, base), "forbidden");
+  assert.equal(mutations(revoked).length, 0);
+});
+
+test("new card lifecycle states are available as scoped filters and safe statistical metadata", async (t) => {
+  const h = await harness(t, {
+    context: staffContext({ tab: "cards", permissions: ["cards.manage"] }),
+    api: async (url) => {
+      if (url === "/auth/status") return { role: "staff", product_id: "p1", permissions: ["cards.manage"] };
+      if (url.startsWith("/manage/card-inventory")) return { items: [], total: 0, summary: {}, offset: 0, limit: 100 };
+      if (url.startsWith("/manage/card-stats")) return { summary: { states: { needs_input: 2, rejected: 1, secret: "Never expose" } }, products: [] };
+      assert.fail("Unexpected lifecycle request: " + url);
+    },
+  });
+  for (const status of ["needs_input", "rejected"]) {
+    assert.equal((await h.call("card_inventory", { product_id: "p1", status })).ok, true);
+    assert.ok(h.calls.some((call) => call.url?.includes("status=" + status)));
+  }
+  assert.deepEqual(plain((await h.call("card_stats", { product_id: "p1" })).data.summary.states), { needs_input: 2, rejected: 1 });
+});
+
+test("code verification accepts batch-sized input while still hiding the shared receipt credential", async (t) => {
+  const code = Array.from({ length: 30 }, (_, index) => "CODE-" + index + "-" + "A".repeat(32)).join("\n");
+  const h = await harness(t, {
+    actions: { exchange: async (value) => {
+      assert.equal(value, code);
+      return { batch: true, token: "BATCH-PRIVATE", receipt_token: "BATCH-PRIVATE", product: product(), items: [{ card_id: "c1", suffix: "ABCD", product: product(), job: null }] };
+    } },
+  });
+  assert.equal(h.tool("code_verify").inputSchema.properties.code.maxLength, 8000);
+  const result = await h.call("code_verify", { code });
+  assert.equal(result.ok, true);
+  assert.equal(result.data.batch, true);
+  assert.equal(JSON.stringify(result).includes("BATCH-PRIVATE"), false);
+  rejected(await h.call("code_verify", { code: "x".repeat(8001) }));
+  assert.equal(h.calls.filter((call) => call.name === "exchange").length, 1);
+});
+
+test("batch redemption validates every selected card against its own parameter snapshot and forwards only items", async (t) => {
+  const current = product({ parameters: [outputField("phone")] });
+  const old = product({ parameters: [outputField("email", { type: "email" })] });
+  const receipt = { batch: true, product: current, items: [
+    { card_id: "c1", product: old, job: null }, { card_id: "c2", product: current, job: null },
+  ] };
+  const h = await harness(t, {
+    context: { page: "receipt", product: current, currentToken: "BATCH-PRIVATE", batch: true }, receipt,
+    actions: { redeem: async (items) => { assert.ok(Array.isArray(items)); return { ...receipt, token: "BATCH-PRIVATE" }; } },
+  });
+  const items = [{ card_id: "c1", params: { email: "old@example.test" } }, { card_id: "c2", params: { phone: "123456" } }];
+  assert.equal((await h.call("redemption_submit", { items, confirm: true })).ok, true);
+  assert.deepEqual(plain(h.calls.find((call) => call.name === "redeem").args[0]), items);
+  const submitted = h.calls.filter((call) => call.name === "redeem").length;
+  for (const selection of [
+    [{ card_id: "c1", params: { phone: "Current schema cannot replace the old one" } }],
+    [{ card_id: "c2", params: { phone: "" } }],
+    [{ card_id: "outside", params: { phone: "123456" } }],
+  ]) rejected(await h.call("redemption_submit", { items: selection, confirm: true }), selection[0].card_id === "outside" ? "forbidden" : "invalid_arguments");
+  assert.equal(h.calls.filter((call) => call.name === "redeem").length, submitted);
+  h.setReceipt({ ...receipt, items: [{ ...receipt.items[0], product: product({ id: "p2" }) }] });
+  rejected(await h.call("redemption_submit", { items: [items[0]], confirm: true }), "unavailable");
+});
+
+test("batch argument bounds, duplicates and single-versus-batch shapes are rejected before submission", async (t) => {
+  const p = product({ parameters: [] });
+  const receipt = { batch: true, product: p, items: [{ card_id: "c1", product: p, job: null }] };
+  const h = await harness(t, { context: { page: "receipt", product: p, currentToken: "BATCH-PRIVATE", batch: true }, receipt });
+  const item = { card_id: "c1", params: {} };
+  for (const input of [
+    { confirm: true }, { items: [item], params: {}, confirm: true }, { items: [], confirm: true },
+    { items: [item, item], confirm: true }, { items: Array.from({ length: 31 }, (_, index) => ({ ...item, card_id: "c" + index })), confirm: true },
+    { items: [{ ...item, extra: true }], confirm: true }, { items: [{ ...item, params: { field: 1 } }], confirm: true },
+    { items: [{ ...item, params: { field: "x".repeat(10001) } }], confirm: true },
+    { items: [item], confirm: false },
+  ]) rejected(await h.call("redemption_submit", input));
+  assert.equal(h.calls.length, 0);
+  rejected(await h.call("redemption_submit", { params: {}, confirm: true }));
+  assert.equal(h.calls.some((call) => call.name === "redeem"), false);
+  h.setReceipt({ product: p, job: null });
+  rejected(await h.call("redemption_submit", { items: [item], confirm: true }));
+});
+
+test("batch retry supports needs_input and eligible failures but never resubmits rejected or ineligible cards", async (t) => {
+  const p = product({ parameters: [outputField("email", { type: "email" })] });
+  const receipt = { batch: true, product: p, items: [
+    { card_id: "c1", product: p, job: { state: "needs_input", can_retry: true } },
+    { card_id: "c2", product: p, job: { state: "failed", can_retry: true } },
+    { card_id: "c3", product: p, job: { state: "rejected", can_retry: false } },
+  ] };
+  const h = await harness(t, { context: { page: "receipt", product: p, currentToken: "BATCH-PRIVATE", batch: true }, receipt });
+  const items = ["c1", "c2"].map((card_id) => ({ card_id, params: { email: "fixed@example.test" } }));
+  assert.equal((await h.call("redemption_retry", { items, confirm: true })).ok, true);
+  rejected(await h.call("redemption_submit", { items, confirm: true }), "invalid_state");
+  rejected(await h.call("redemption_retry", { items: [...items, { card_id: "c3", params: { email: "fixed@example.test" } }], confirm: true }), "invalid_state");
+  assert.equal(h.calls.filter((call) => call.name === "redeem").length, 1, "Eligibility failure must stop the whole batch before submission");
+});
+
+test("batch receipt discovery reveals safe item IDs and snapshots while omitting tokens, goods and customer parameter values", async (t) => {
+  const p = product({ webhook_secret: "WEBHOOK-PRIVATE" });
+  const receipt = { batch: true, product: p, token: "BATCH-PRIVATE", items: [{
+    card_id: "c1", suffix: "ABCD", product: p, token: "ITEM-PRIVATE",
+    job: { id: "j1", state: "needs_input", can_retry: true, message: "Correct the email", params: { email: "CUSTOMER-PRIVATE" }, content: "GOODS-PRIVATE", output: { password: "GOODS-PRIVATE" } },
+  }] };
+  const h = await harness(t, { context: { page: "receipt", product: p, currentToken: "BATCH-PRIVATE", batch: true }, receipt });
+  const status = await h.call("receipt_status", {});
+  assert.equal(status.data.batch, true);
+  assert.equal(status.data.items[0].card_id, "c1");
+  assert.equal(status.data.items[0].job.state, "needs_input");
+  assert.equal(status.data.items[0].product.parameters[0].key, "email");
+  const parameters = await h.call("product_parameters", {});
+  assert.equal(parameters.data.items[0].card_id, "c1");
+  for (const secret of ["BATCH-PRIVATE", "ITEM-PRIVATE", "WEBHOOK-PRIVATE", "GOODS-PRIVATE", "CUSTOMER-PRIVATE"])
+    assert.equal(JSON.stringify([status, parameters]).includes(secret), false);
+});
+
+test("batch delivery actions require a selected card and cached tools stop working after selection changes", async (t) => {
+  const p = product();
+  const receipt = { batch: true, product: p, items: [
+    { card_id: "c1", product: p, job: { state: "succeeded", delivery: "content" } },
+    { card_id: "c2", product: p, job: { state: "rejected", delivery: "content" } },
+  ] };
+  const h = await harness(t, { context: { page: "receipt", product: p, currentToken: "BATCH-PRIVATE", batch: true }, receipt });
+  rejected(await h.call("receipt_reveal", { confirm: true }), "invalid_state");
+  rejected(await h.call("receipt_destroy", { confirm: true }), "invalid_state");
+  h.state.cardId = "c1";
+  await h.refresh();
+  const saved = h.tool("receipt_reveal");
+  assert.equal((await h.call("receipt_reveal", { confirm: true })).data.content, "DELIVERY-CONTENT");
+  assert.equal((await h.call("receipt_destroy", { confirm: true })).ok, true);
+  h.state.cardId = "c2";
+  await h.refresh();
+  rejected(await saved.execute({ confirm: true }), "stale_context");
+  rejected(await h.call("receipt_reveal", { confirm: true }), "invalid_state");
+});
+
+test("management link CLI quotas have independent strict defaults and only explicitly supplied limits are sent", async (t) => {
+  const h = await harness(t, { context: { page: "admin", role: "admin", tab: "staff" } });
+  const base = { product_id: "p1", name: "CLI worker", days: 1, permissions: ["queue.view"], confirm: true };
+  assert.equal(h.tool("staff_authorize").inputSchema.properties.max_cli_uses.default, 1);
+  for (const max_cli_uses of [0, -1, 1001, 1.5, NaN, Infinity, "1", true, null])
+    rejected(await h.call("staff_authorize", { ...base, max_cli_uses }));
+  assert.equal(h.calls.length, 0);
+  assert.equal((await h.call("staff_authorize", base)).ok, true);
+  assert.equal(Object.hasOwn(mutations(h)[0].body, "max_cli_uses"), false);
+  assert.equal((await h.call("staff_authorize", { ...base, max_uses: 1, max_cli_uses: 1000 })).ok, true);
+  assert.equal(mutations(h)[1].body.max_cli_uses, 1000);
+  assert.equal(mutations(h)[1].body.max_uses, 1);
+});
+
+test("delegated CLI binding ceilings are checked against fresh parent authority independently of browser quotas", async (t) => {
+  let ceiling = 5;
+  const h = await harness(t, {
+    context: staffContext({ tab: "staff", permissions: permissionCodes }),
+    api: async (url, body, method) => {
+      if (url === "/auth/status") return { role: "staff", product_id: "p1", permissions: permissionCodes, max_uses: 2, max_cli_uses: ceiling, link_expires: Date.now() / 1000 + 86400 * 2 };
+      if (url === "/manage/links" && method === "POST") return { id: "s2", max_cli_uses: body.max_cli_uses, url: "https://extore.test/staff#issued-cli-link" };
+      assert.fail("Unexpected delegated CLI quota request: " + url);
+    },
+  });
+  const base = { product_id: "p1", name: "Child", days: 1, permissions: ["queue.view"], confirm: true };
+  rejected(await h.call("staff_authorize", { ...base, max_cli_uses: 6 }), "forbidden");
+  assert.equal((await h.call("staff_authorize", { ...base, max_uses: 2, max_cli_uses: 5 })).data.max_cli_uses, 5);
+  ceiling = 1;
+  rejected(await h.call("staff_authorize", { ...base, max_uses: 1, max_cli_uses: 2 }), "forbidden");
+  ceiling = undefined;
+  rejected(await h.call("staff_authorize", { ...base, max_cli_uses: 2 }), "forbidden");
+  assert.equal((await h.call("staff_authorize", base)).ok, true, "Missing legacy ceilings preserve the default-one bound");
+  assert.equal(mutations(h).length, 2);
+});
+
+test("management link metadata includes safe CLI counters without exposing credentials or device public keys", async (t) => {
+  const metadata = {
+    id: "s1", product_id: "p1", name: "Worker", permissions: ["queue.view"], parent_id: null,
+    max_uses: 2, uses: 1, remaining_uses: 1, max_cli_uses: 5, cli_uses: 3, remaining_cli_uses: 2,
+    public_key: "DEVICE-PUBLIC-KEY", device_public_key: "DEVICE-PUBLIC-KEY", token: "LINK-PRIVATE", digest: "LINK-DIGEST",
+  };
+  const h = await harness(t, {
+    context: { page: "admin", role: "admin", tab: "staff" },
+    api: async (url, body, method) => {
+      if (url === "/auth/status") return { role: "admin" };
+      if (url === "/admin/staff" && method === "GET") return [{ ...metadata, url: "https://extore.test/staff#existing-link" }];
+      if (url === "/admin/staff" && method === "POST") return { ...metadata, url: "https://extore.test/staff#new-link" };
+      assert.fail("Unexpected safe link metadata request: " + url);
+    },
+  });
+  const listed = await h.call("staff_list", {});
+  assert.equal(listed.data[0].max_cli_uses, 5);
+  assert.equal(listed.data[0].cli_uses, 3);
+  assert.equal(listed.data[0].remaining_cli_uses, 2);
+  assert.equal(Object.hasOwn(listed.data[0], "url"), false);
+  const created = await h.call("staff_authorize", { product_id: "p1", name: "New", days: 1, permissions: ["queue.view"], max_cli_uses: 5, confirm: true });
+  assert.equal(created.data.url, "https://extore.test/staff#new-link");
+  assert.equal(created.data.remaining_cli_uses, 2);
+  for (const secret of ["DEVICE-PUBLIC-KEY", "LINK-PRIVATE", "LINK-DIGEST", "existing-link"])
+    assert.equal(JSON.stringify([listed, created]).includes(secret), false);
+});
+
+test("safe session discovery identifies CLI channels and devices without revealing key or authentication material", async (t) => {
+  const row = {
+    id: attachmentId, role: "staff", link_id: "s1", product_id: "p1", current: false,
+    channel: "cli", client_name: "Automation client", device_id: "device-1",
+    public_key: "DEVICE-PUBLIC-KEY", device_public_key: "DEVICE-PUBLIC-KEY", fingerprint: "DEVICE-FINGERPRINT",
+    token: "CLI-PRIVATE", digest: "CLI-DIGEST", private_key: "DEVICE-PRIVATE-KEY",
+  };
+  const h = await harness(t, {
+    context: staffContext({ tab: "sessions", permissions: ["queue.view"] }),
+    api: async (url) => {
+      if (url === "/auth/status") return { role: "staff", product_id: "p1", link_id: "s1", permissions: ["queue.view"] };
+      if (url === "/manage/sessions") return [row];
+      assert.fail("Unexpected CLI session request: " + url);
+    },
+  });
+  const result = await h.call("sessions_list", {});
+  assert.equal(result.data[0].channel, "cli");
+  assert.equal(result.data[0].client_name, "Automation client");
+  assert.equal(result.data[0].device_id, "device-1");
+  for (const secret of ["DEVICE-PUBLIC-KEY", "DEVICE-FINGERPRINT", "CLI-PRIVATE", "CLI-DIGEST", "DEVICE-PRIVATE-KEY"])
+    assert.equal(JSON.stringify(result).includes(secret), false);
 });

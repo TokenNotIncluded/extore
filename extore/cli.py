@@ -75,7 +75,14 @@ def main(argv=None):
         if command == "serve":
             subparser.add_argument("--host", type=host_name, default="127.0.0.1")
             subparser.add_argument("--port", type=port_number, default=8000)
+    from .manage_client import add_parser as add_manage_parser
+
+    add_version(add_manage_parser(commands))
     args = parser.parse_args(argv)
+    if args.command == "manage":
+        from .manage_client import main as manage_main
+
+        return manage_main(args)
     if args.command == "serve":
         import uvicorn
 

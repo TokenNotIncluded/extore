@@ -1,7 +1,10 @@
 """Bounded attachment storage with card, job, field and role authorization."""
 
+import asyncio
 import json
 import re
+import sqlite3
+import tempfile
 import time
 import uuid
 from urllib.parse import quote
@@ -13,6 +16,12 @@ from starlette.datastructures import UploadFile
 from starlette.formparsers import MultiPartException, MultiPartParser
 
 from .card_tracking import ensure_card_usable
+from .config import (
+    UPLOAD_FILE_BYTES,
+    UPLOAD_JOB_BYTES,
+    UPLOAD_JOB_FILES,
+    UPLOAD_TIMEOUT_SECONDS,
+)
 from .db import db
 from .security import (
     authorize_management,
@@ -23,9 +32,9 @@ from .security import (
 )
 
 router = APIRouter()
-MAX_FILE_BYTES = 20 * 1024 * 1024
-MAX_CARD_BYTES = 100 * 1024 * 1024
-MAX_CARD_FILES = 100
+MAX_FILE_BYTES = UPLOAD_FILE_BYTES
+MAX_CARD_BYTES = UPLOAD_JOB_BYTES
+MAX_CARD_FILES = UPLOAD_JOB_FILES
 MAX_MULTIPART_BYTES = MAX_FILE_BYTES + 64 * 1024
 CHUNK_BYTES = 64 * 1024
 _METADATA = (
@@ -54,6 +63,9 @@ def init_schema(c):
     )
     c.execute("CREATE INDEX IF NOT EXISTS job_files_card ON job_files(card_id)")
     c.execute("CREATE INDEX IF NOT EXISTS job_files_job ON job_files(job_id,kind)")
+    from .storage import init_schema as init_storage_schema
+
+    init_storage_schema(c)
 
 
 def _product(c, card):
@@ -85,7 +97,7 @@ def _field(product, key, kind):
 
 
 def _descriptor(row):
-    return {
+    result = {
         key: row[key]
         for key in (
             "id",
@@ -97,8 +109,11 @@ def _descriptor(row):
             "size",
             "created",
             "consumed",
+            "attempt",
         )
     }
+    result["available"] = bool(row["available"])
+    return result
 
 
 def listfiles(c, row, kind=None):
@@ -160,7 +175,76 @@ def _output_scope(c, s, jid, field_key):
     return row
 
 
-async def _multipart(request, expected, optional=()):
+class _QuotaParser(MultiPartParser):
+    spool_max_size = CHUNK_BYTES
+
+    def __init__(self, *args, reservation, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.reservation = reservation
+        self.file_bytes = 0
+
+    def on_headers_finished(self):
+        super().on_headers_finished()
+        if self._current_part.file is not None:
+            from .storage import _directory
+
+            # Keep spools on the same checked filesystem as the SQLite database.
+            # Replacing Starlette's empty spool here is instance-local and leaves
+            # no named temporary payload behind if a worker crashes.
+            old = self._current_part.file.file
+            spool = tempfile.SpooledTemporaryFile(
+                max_size=self.spool_max_size, dir=_directory()
+            )
+            self._current_part.file.file = spool
+            self._files_to_close_on_error.remove(old)
+            self._files_to_close_on_error.append(spool)
+            old.close()
+
+    def on_part_data(self, data, start, end):
+        if self._current_part.file is not None:
+            self.file_bytes += end - start
+            if self.file_bytes > MAX_FILE_BYTES:
+                raise MultiPartException("extore_upload_too_large")
+            self.reservation.grow(end - start)
+        super().on_part_data(data, start, end)
+
+    def on_header_field(self, data, start, end):
+        if len(self._current_partial_header_name) + end - start > 4096:
+            raise MultiPartException("Multipart header is too large")
+        super().on_header_field(data, start, end)
+
+    def on_header_value(self, data, start, end):
+        if len(self._current_partial_header_value) + end - start > 4096:
+            raise MultiPartException("Multipart header is too large")
+        super().on_header_value(data, start, end)
+
+
+def upload_limits():
+    return {
+        "max_file_bytes": MAX_FILE_BYTES,
+        "max_card_bytes": MAX_CARD_BYTES,
+        "max_card_files": MAX_CARD_FILES,
+    }
+
+
+@router.get("/api/upload-limits")
+def public_upload_limits():
+    return upload_limits()
+
+
+def _byte_limit(value):
+    return (
+        f"{value // (1024 * 1024)} MiB"
+        if value % (1024 * 1024) == 0
+        else f"{value} 字节"
+    )
+
+
+def file_limit_message():
+    return f"上传文件超过 {_byte_limit(MAX_FILE_BYTES)} 限制"
+
+
+async def _multipart(request, expected, reservation, optional=()):
     """Count the raw stream before the multipart parser can spool an unbounded file."""
     content_type = request.headers.get("content-type", "")
     if not content_type.lower().startswith("multipart/form-data;"):
@@ -169,7 +253,7 @@ async def _multipart(request, expected, optional=()):
     if length is not None:
         try:
             if int(length) < 0 or int(length) > MAX_MULTIPART_BYTES:
-                fail("上传文件超过 20 MiB 限制", 413)
+                fail(file_limit_message(), 413)
         except ValueError:
             fail("上传请求格式不正确")
     total = 0
@@ -181,14 +265,16 @@ async def _multipart(request, expected, optional=()):
             if total > MAX_MULTIPART_BYTES:
                 # MultiPartParser catches this class and closes its spool files.
                 raise MultiPartException("extore_upload_too_large")
-            yield chunk
+            for start in range(0, len(chunk), CHUNK_BYTES):
+                yield chunk[start : start + CHUNK_BYTES]
 
-    parser = MultiPartParser(
+    parser = _QuotaParser(
         request.headers,
         bounded(),
         max_files=1,
         max_fields=len(expected) + len(optional) - 1,
         max_part_size=512,
+        reservation=reservation,
     )
     try:
         form = await parser.parse()
@@ -199,31 +285,39 @@ async def _multipart(request, expected, optional=()):
             spool.close()
         too_large = getattr(exc, "message", "") == "extore_upload_too_large"
         fail(
-            "上传文件超过 20 MiB 限制" if too_large else "上传请求格式不正确",
+            file_limit_message() if too_large else "上传请求格式不正确",
             413 if too_large else 400,
         )
+    except BaseException:
+        # Keep cleanup explicit for quota failures, cancellation and timeouts,
+        # independently of the parser version's own error cleanup guarantees.
+        for spool in getattr(parser, "_files_to_close_on_error", ()):
+            spool.close()
+        raise
     allowed = set(expected) | set(optional)
     if not set(expected) <= set(form) <= allowed or any(
         len(form.getlist(key)) != 1 for key in form
     ):
-        await form.close()
+        await _close_form(form)
         fail("上传请求包含重复或未定义的字段")
     text_keys = [key for key in (*expected, *optional) if key != "file" and key in form]
     if not isinstance(form["file"], UploadFile) or any(
         not isinstance(form[key], str) for key in text_keys
     ):
-        await form.close()
+        await _close_form(form)
         fail("上传请求格式不正确")
     return form
 
 
-async def _contents(upload):
-    result = bytearray()
-    while chunk := await upload.read(CHUNK_BYTES):
-        if len(result) + len(chunk) > MAX_FILE_BYTES:
-            fail("上传文件超过 20 MiB 限制", 413)
-        result.extend(chunk)
-    return bytes(result)
+async def _close_form(form):
+    try:
+        await form.close()
+    finally:
+        # A second cancellation during the asynchronous close must not retain
+        # an anonymous disk spool or its file descriptor.
+        for _, item in form.multi_items():
+            if isinstance(item, UploadFile):
+                item.file.close()
 
 
 def _filename(value):
@@ -242,22 +336,24 @@ def _content_type(value):
     )
 
 
-def _store(c, card_id, product_id, job_id, attempt, key, kind, upload, content):
-    # Unselected drafts have no long-lived retention claim.
-    c.execute(
-        "DELETE FROM job_files WHERE bound=0 AND created<?", (time.time() - 86400,)
-    )
+def _store(c, card_id, product_id, job_id, attempt, key, kind, upload, reservation):
+    from .storage import check_storage_quota, require_disk_space
+
+    size = upload.size
+    if size is None or size < 0 or size > MAX_FILE_BYTES:
+        fail(file_limit_message(), 413)
     inventory = c.execute(
         "SELECT COALESCE(SUM(size),0) AS size,COUNT(*) AS count FROM job_files WHERE card_id=? AND content IS NOT NULL",
         (card_id,),
     ).fetchone()
-    if inventory["size"] + len(content) > MAX_CARD_BYTES:
-        fail("此卡密的文件总量超过 100 MiB 限制", 413)
+    if inventory["size"] + size > MAX_CARD_BYTES:
+        fail(f"此卡密的文件总量超过 {_byte_limit(MAX_CARD_BYTES)} 限制", 413)
     if inventory["count"] >= MAX_CARD_FILES:
-        fail("此卡密的文件数量超过 100 个限制", 413)
+        fail(f"此卡密的文件数量超过 {MAX_CARD_FILES} 个限制", 413)
+    check_storage_quota(c, size, reservation_id=reservation.id)
     fid = str(uuid.uuid4())
-    c.execute(
-        "INSERT INTO job_files(id,card_id,product_id,job_id,field_key,kind,attempt,filename,content_type,size,content,created) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+    cursor = c.execute(
+        "INSERT INTO job_files(id,card_id,product_id,job_id,field_key,kind,attempt,filename,content_type,size,content,created) VALUES (?,?,?,?,?,?,?,?,?,?,zeroblob(?),?)",
         (
             fid,
             card_id,
@@ -268,68 +364,103 @@ def _store(c, card_id, product_id, job_id, attempt, key, kind, upload, content):
             attempt,
             _filename(upload.filename),
             _content_type(upload.content_type),
-            len(content),
-            content,
+            size,
+            size,
             time.time(),
         ),
     )
+    # Incremental SQLite I/O avoids two whole-file copies in Python memory.
+    # The transaction serializes quota accounting with all other upload commits.
+    upload.file.seek(0)
+    if size:
+        with c.blobopen("job_files", "content", cursor.lastrowid) as blob:
+            written = 0
+            while chunk := upload.file.read(CHUNK_BYTES):
+                if written + len(chunk) > size:
+                    fail("上传文件大小发生变化，请重试", 409)
+                require_disk_space(size - written)
+                blob.write(chunk)
+                written += len(chunk)
+            if written != size:
+                fail("上传文件不完整，请重新上传", 400)
+    elif upload.file.read(1):
+        fail("上传文件大小发生变化，请重试", 409)
+    reservation.finish(c)
     return _descriptor(_file(c, fid))
 
 
 @router.post("/api/files/upload")
 async def upload_input(request: Request):
+    from .storage import receiving_upload, translate_storage_error
+
     rate_limit(request, "files-upload", 60, 60)
-    form = await _multipart(
-        request, ("token", "field_key", "file"), optional=("card_id",)
-    )
     try:
-        with db() as c:
-            card = resolve_customer_card(c, form["token"], form.get("card_id") or None)
-            _input_scope(c, card, form["field_key"])
-        content = await _contents(form["file"])
-        with db() as c:
-            card = resolve_customer_card(c, form["token"], form.get("card_id") or None)
-            _, row = _input_scope(c, card, form["field_key"])
-            return _store(
-                c,
-                card["id"],
-                card["product_id"],
-                None,
-                row["attempt"] if row else 1,
-                form["field_key"],
-                "input",
-                form["file"],
-                content,
-            )
-    finally:
-        await form.close()
+        with receiving_upload() as reservation:
+            async with asyncio.timeout(UPLOAD_TIMEOUT_SECONDS):
+                form = await _multipart(
+                    request,
+                    ("token", "field_key", "file"),
+                    reservation,
+                    optional=("card_id",),
+                )
+                try:
+                    with db() as c:
+                        card = resolve_customer_card(
+                            c, form["token"], form.get("card_id") or None
+                        )
+                        _, row = _input_scope(c, card, form["field_key"])
+                        return _store(
+                            c,
+                            card["id"],
+                            card["product_id"],
+                            None,
+                            row["attempt"] if row else 1,
+                            form["field_key"],
+                            "input",
+                            form["file"],
+                            reservation,
+                        )
+                finally:
+                    await _close_form(form)
+    except TimeoutError:
+        fail("上传超时，请重新上传", 408)
+    except (OSError, sqlite3.Error) as exc:
+        translate_storage_error(exc)
 
 
 @router.post("/api/manage/files/upload")
 async def upload_output(request: Request):
+    from .storage import receiving_upload, translate_storage_error
+
     rate_limit(request, "files-upload", 20, 60)
     s = session(request, ("admin", "staff"))
-    form = await _multipart(request, ("job_id", "field_key", "file"))
     try:
-        with db() as c:
-            _output_scope(c, s, form["job_id"], form["field_key"])
-        content = await _contents(form["file"])
-        s = session(request, ("admin", "staff"))
-        with db() as c:
-            row = _output_scope(c, s, form["job_id"], form["field_key"])
-            return _store(
-                c,
-                row["card_id"],
-                row["product_id"],
-                row["id"],
-                row["attempt"],
-                form["field_key"],
-                "output",
-                form["file"],
-                content,
-            )
-    finally:
-        await form.close()
+        with receiving_upload() as reservation:
+            async with asyncio.timeout(UPLOAD_TIMEOUT_SECONDS):
+                form = await _multipart(
+                    request, ("job_id", "field_key", "file"), reservation
+                )
+                try:
+                    s = session(request, ("admin", "staff"))
+                    with db() as c:
+                        row = _output_scope(c, s, form["job_id"], form["field_key"])
+                        return _store(
+                            c,
+                            row["card_id"],
+                            row["product_id"],
+                            row["id"],
+                            row["attempt"],
+                            form["field_key"],
+                            "output",
+                            form["file"],
+                            reservation,
+                        )
+                finally:
+                    await _close_form(form)
+    except TimeoutError:
+        fail("上传超时，请重新上传", 408)
+    except (OSError, sqlite3.Error) as exc:
+        translate_storage_error(exc)
 
 
 def validate_input_files(c, card, p, params):

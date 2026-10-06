@@ -11,10 +11,10 @@ from fastapi import APIRouter, Query, Request
 from .db import audit, db
 from .security import (
     authorize_management,
-    digest,
     fail,
     link_descendant_ids,
     session,
+    session_credential_digest,
     staff_authorization,
 )
 
@@ -29,6 +29,10 @@ AUDIT_ACTIONS = (
     "session.bootstrap_complete",
     "session.auth_reset",
     "link.consume",
+    "link.cli_consume",
+    "cli.device.create",
+    "cli.device.revoke",
+    "cli.ticket.create",
     "staff.create",
     "staff.revoke",
 )
@@ -73,6 +77,9 @@ def init_schema(c):
             (now,),
         )
         c.execute("UPDATE staff SET max_uses=max(1,uses)")
+    from .cli_auth import init_schema as init_cli_schema
+
+    init_cli_schema(c)
 
 
 def augment_link_view(row):
@@ -83,15 +90,25 @@ def augment_link_view(row):
         "max_uses": maximum,
         "uses": used,
         "remaining_uses": max(0, maximum - used),
+        "max_cli_uses": row.get("max_cli_uses", 1),
+        "cli_uses": row.get("cli_uses", 0),
+        "remaining_cli_uses": max(
+            0, row.get("max_cli_uses", 1) - row.get("cli_uses", 0)
+        ),
     }
 
 
-def consume_link(c, row, request=None):
+def consume_link(c, row, request=None, channel="browser"):
     """Consume one successful new login inside the caller's IMMEDIATE transaction."""
     # Resolve the current row under the write transaction. A stale row passed
     # by a caller must not reset a quota or bypass ancestor revocation.
     current = staff_authorization(c, row["id"])
-    maximum, used = current["max_uses"], current["uses"]
+    if channel not in ("browser", "cli"):
+        raise ValueError("Unknown link admission channel")
+    maximum_column, used_column = (
+        ("max_uses", "uses") if channel == "browser" else ("max_cli_uses", "cli_uses")
+    )
+    maximum, used = current[maximum_column], current[used_column]
     if (
         not isinstance(maximum, int)
         or maximum < 1
@@ -102,14 +119,19 @@ def consume_link(c, row, request=None):
     if used >= maximum:
         fail("此商品管理链接已达到使用次数上限，请申请新的链接", 409)
     result = c.execute(
-        "UPDATE staff SET uses=uses+1 WHERE id=? AND uses=? AND uses<max_uses "
+        f"UPDATE staff SET {used_column}={used_column}+1 WHERE id=? AND {used_column}=? AND {used_column}<{maximum_column} "
         "AND revoked=0 AND expires>?",
         (current["id"], used, time.time()),
     )
     if result.rowcount != 1:
         fail("此商品管理链接已达到使用次数上限，请申请新的链接", 409)
-    audit(c, current["id"], "link.consume", current["id"])
-    current["uses"] = used + 1
+    audit(
+        c,
+        current["id"],
+        "link.consume" if channel == "browser" else "link.cli_consume",
+        current["id"],
+    )
+    current[used_column] = used + 1
     return current
 
 
@@ -161,6 +183,9 @@ def _release_last_staff_session(c, staff_id):
 
 
 def revoke_staff_sessions(c, staff_id, actor="owner"):
+    from .cli_auth import revoke_devices
+
+    revoke_devices(c, staff_id, actor)
     rows = c.execute(
         "SELECT digest FROM sessions WHERE staff_id=? AND revoked=0", (staff_id,)
     ).fetchall()
@@ -170,6 +195,9 @@ def revoke_staff_sessions(c, staff_id, actor="owner"):
 
 
 def revoke_all_sessions(c, actor="owner", action="session.auth_reset"):
+    from .cli_auth import revoke_devices
+
+    revoke_devices(c, actor=actor)
     rows = c.execute("SELECT digest FROM sessions WHERE revoked=0").fetchall()
     for row in rows:
         revoke_session(c, row["digest"], actor, action)
@@ -217,9 +245,11 @@ def _link_scope(c, s):
 def _session_rows(c, scope):
     sql = (
         "SELECT sessions.*,staff.name AS link_name,staff.product_id AS product_id,"
-        "products.config AS product_config FROM sessions "
+        "products.config AS product_config,cli_devices.fingerprint AS device_fingerprint,"
+        "cli_devices.revoked AS device_revoked FROM sessions "
         "LEFT JOIN staff ON staff.id=sessions.staff_id "
         "LEFT JOIN products ON products.id=staff.product_id"
+        " LEFT JOIN cli_devices ON cli_devices.id=sessions.device_id"
     )
     values = ()
     if scope is not None:
@@ -235,6 +265,10 @@ def _session_rows(c, scope):
 
 def _session_view(c, row, current_digest):
     active = not row["revoked"] and row["expires"] > time.time()
+    if row["channel"] == "cli" and (
+        row["device_revoked"] is None or row["device_revoked"]
+    ):
+        active = False
     if active and row["role"] == "staff":
         from fastapi import HTTPException
 
@@ -263,6 +297,10 @@ def _session_view(c, row, current_digest):
         "active": bool(active),
         "ip": row["ip"][:100],
         "ua": row["ua"][:300],
+        "channel": row["channel"],
+        "client_name": row["client_name"],
+        "device_id": row["device_id"],
+        "fingerprint": row["device_fingerprint"],
     }
 
 
@@ -270,7 +308,7 @@ def _list_sessions(request, roles):
     s = session(request, roles)
     with db() as c:
         scope = _link_scope(c, s)
-        current_digest = digest(request.cookies.get("extore_session", ""))
+        current_digest, _ = session_credential_digest(request)
         return [
             _session_view(c, row, current_digest) for row in _session_rows(c, scope)
         ]
@@ -287,7 +325,7 @@ def _revoke_session_by_id(session_id, request, roles):
         ):
             fail("登录会话不存在", 404)
         current = hmac.compare_digest(
-            row["digest"], digest(request.cookies.get("extore_session", ""))
+            row["digest"], session_credential_digest(request)[0]
         )
         revoke_session(c, row["digest"], session_actor(s))
         return {"ok": True, "id": row["id"], "current": current}
@@ -305,7 +343,12 @@ def _list_audit(request, roles, limit):
         values = list(AUDIT_ACTIONS)
         if scope is not None:
             session_ids = {r["id"] for r in _session_rows(c, scope)}
-            targets = scope | session_ids
+            device_ids = {
+                r["id"]
+                for r in c.execute("SELECT id,staff_id FROM cli_devices")
+                if r["staff_id"] in scope
+            }
+            targets = scope | session_ids | device_ids
             if not targets:
                 return []
             sql += " AND target IN (" + ",".join("?" for _ in targets) + ")"
@@ -317,8 +360,12 @@ def _list_audit(request, roles, limit):
         # arbitrary string inserted into the common audit table by other code.
         safe_targets = {r["id"] for r in c.execute("SELECT id FROM sessions")}
         safe_targets |= {r["id"] for r in c.execute("SELECT id FROM staff")}
+        safe_targets |= {r["id"] for r in c.execute("SELECT id FROM cli_devices")}
         return [
-            {k: row[k] for k in ("id", "actor", "action", "target", "created")}
+            {
+                **{k: row[k] for k in ("id", "actor", "action", "target", "created")},
+                **_audit_metadata(c, row),
+            }
             for row in rows
             if row["target"] in safe_targets
             and (
@@ -328,6 +375,31 @@ def _list_audit(request, roles, limit):
                 ).fetchone()
             )
         ]
+
+
+def _audit_metadata(c, row):
+    # Reconstruct safe metadata through opaque targets; never serialize the
+    # credential or free-form contents of the common audit table.
+    target = c.execute(
+        "SELECT sessions.channel,sessions.client_name,cli_devices.fingerprint "
+        "FROM sessions LEFT JOIN cli_devices ON cli_devices.id=sessions.device_id "
+        "WHERE sessions.id=?",
+        (row["target"],),
+    ).fetchone()
+    if target is not None:
+        return dict(target)
+    target = c.execute(
+        "SELECT client_name,fingerprint FROM cli_devices WHERE id=?", (row["target"],)
+    ).fetchone()
+    if target is not None:
+        return {"channel": "cli", **dict(target)}
+    return {
+        "channel": "cli"
+        if row["action"] in ("link.cli_consume", "cli.ticket.create")
+        else "browser",
+        "client_name": None,
+        "fingerprint": None,
+    }
 
 
 @router.get("/admin/sessions")

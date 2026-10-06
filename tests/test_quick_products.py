@@ -64,6 +64,9 @@ def assert_config_link(result, started, finished):
     product = result["product"]
     link = result["management_link"]
     assert set(link) == {
+        "max_cli_uses",
+        "cli_uses",
+        "remaining_cli_uses",
         "max_uses",
         "uses",
         "remaining_uses",

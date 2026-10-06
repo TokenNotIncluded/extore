@@ -68,6 +68,9 @@ def status(request: Request):
             max_uses=s["max_uses"],
             uses=s["uses"],
             remaining_uses=s["remaining_uses"],
+            max_cli_uses=s["max_cli_uses"],
+            cli_uses=s["cli_uses"],
+            remaining_cli_uses=s["remaining_cli_uses"],
         )
     return result
 
@@ -91,11 +94,11 @@ def password(body: PasswordInput, request: Request, response: Response):
 @router.post("/logout")
 def logout(request: Request, response: Response):
     with db() as c:
-        revoke_session(
-            c,
-            digest(request.cookies.get("extore_session", "")),
-            action="session.logout",
-        )
+        previous = digest(request.cookies.get("extore_session", ""))
+        if c.execute(
+            "SELECT 1 FROM sessions WHERE digest=? AND channel='browser'", (previous,)
+        ).fetchone():
+            revoke_session(c, previous, action="session.logout")
     response.delete_cookie("extore_session", path="/")
     return {"ok": True}
 

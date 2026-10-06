@@ -12,10 +12,12 @@ from fastapi.staticfiles import StaticFiles
 
 from . import auth
 from .card_tracking import router as card_tracking_router
+from .cli_auth import router as cli_auth_router
 from .config import ORIGIN, check_config
 from .db import audit, db, event, init, setting
 from .files import (
     MAX_MULTIPART_BYTES,
+    file_limit_message,
     purge_job_files,
     release_output_files,
 )
@@ -48,6 +50,7 @@ from .security import (
     grant,
     link_descendant_ids,
     rate_limit,
+    require_cli_bearer,
     resolve_customer_card,
     session,
     split_codes,
@@ -79,16 +82,34 @@ async def lifespan(app):
     yield
 
 
-app = FastAPI(title="Extore API", version="0.4.0", lifespan=lifespan)
+app = FastAPI(title="Extore API", version="0.5.0", lifespan=lifespan)
 app.include_router(auth.router)
 app.include_router(card_tracking_router)
 app.include_router(files_router)
 app.include_router(source_router)
 app.include_router(link_access_router)
+app.include_router(cli_auth_router)
 
 
 @app.middleware("http")
 async def guard(request: Request, call_next):
+    cli_handshake = request.method == "POST" and request.url.path in {
+        "/api/cli/authorize",
+        "/api/cli/challenge",
+        "/api/cli/session",
+    }
+    cli_authenticated = False
+    if (
+        request.url.path.startswith("/api/")
+        and request.headers.get("authorization") is not None
+        and not cli_handshake
+        and not request.url.path.startswith(("/api/callbacks/", "/api/integrations/"))
+    ):
+        try:
+            require_cli_bearer(request)
+            cli_authenticated = True
+        except HTTPException as exc:
+            return JSONResponse({"detail": exc.detail}, status_code=exc.status_code)
     if (
         request.method not in ("GET", "HEAD", "OPTIONS")
         and request.url.path.startswith("/api/")
@@ -96,7 +117,10 @@ async def guard(request: Request, call_next):
         and not request.url.path.startswith("/api/integrations/")
     ):
         if request.headers.get("origin") != ORIGIN:
-            return JSONResponse({"detail": "请求来源不匹配"}, status_code=403)
+            if request.headers.get("origin") is not None or not (
+                cli_handshake or cli_authenticated
+            ):
+                return JSONResponse({"detail": "请求来源不匹配"}, status_code=403)
     # Streaming bounded read prevents unbounded webhook / JSON memory usage.
     upload = request.url.path in ("/api/files/upload", "/api/manage/files/upload")
     if (
@@ -104,7 +128,7 @@ async def guard(request: Request, call_next):
         and request.headers.get("content-length", "").isdigit()
         and int(request.headers["content-length"]) > MAX_MULTIPART_BYTES
     ):
-        return JSONResponse({"detail": "上传文件超过 20 MiB 限制"}, status_code=413)
+        return JSONResponse({"detail": file_limit_message()}, status_code=413)
     if request.method not in ("GET", "HEAD") and not upload:
         body = bytearray()
         async for chunk in request.stream():
@@ -133,6 +157,15 @@ def health():
     with db() as c:
         c.execute("SELECT 1")
     return {"status": "ok"}
+
+
+@app.get("/api/admin/storage")
+def storage_status(request: Request):
+    session(request)
+    from .storage import storage_usage
+
+    with db() as c:
+        return storage_usage(c)
 
 
 @app.get("/api/products")
@@ -610,10 +643,12 @@ def create_product_link(c, body, s):
     parent_id = s["staff_id"] if s["role"] == "staff" else None
     if parent_id:
         parent = c.execute(
-            "SELECT max_uses FROM staff WHERE id=?", (parent_id,)
+            "SELECT max_uses,max_cli_uses FROM staff WHERE id=?", (parent_id,)
         ).fetchone()
         if body.max_uses > parent["max_uses"]:
             fail("下级链接可用次数不能超过当前链接的上限", 403)
+        if body.max_cli_uses > parent["max_cli_uses"]:
+            fail("下级链接 CLI 绑定次数不能超过当前链接的上限", 403)
         if not set(body.permissions) < set(s["permissions"]):
             fail("下级权限必须是当前商品管理权限的严格子集", 403)
         parent_expires = s["link_expires"]
@@ -629,7 +664,7 @@ def create_product_link(c, body, s):
     sid = str(uuid.uuid4())
     value = token()
     c.execute(
-        "INSERT INTO staff(id,digest,product_id,name,expires,permissions,parent_id,created,max_uses) VALUES (?,?,?,?,?,?,?,?,?)",
+        "INSERT INTO staff(id,digest,product_id,name,expires,permissions,parent_id,created,max_uses,max_cli_uses) VALUES (?,?,?,?,?,?,?,?,?,?)",
         (
             sid,
             digest(value),
@@ -640,6 +675,7 @@ def create_product_link(c, body, s):
             parent_id,
             now,
             body.max_uses,
+            body.max_cli_uses,
         ),
     )
     audit(c, parent_id or "owner", "staff.create", sid)
@@ -762,6 +798,7 @@ def jobs(
     limit: int = 100,
     job_id: str = "",
     view: Literal["active", "processed", "all"] = "active",
+    compact: bool = False,
 ):
     s = session(request, ("admin", "staff"))
     with db() as c:
@@ -775,9 +812,11 @@ def jobs(
             values.append(state)
         elif not job_id:
             if view == "active":
-                conditions.append("state IN ('queued','processing','failed')")
+                conditions.append(
+                    "state IN ('queued','processing','failed','needs_input')"
+                )
             elif view == "processed":
-                conditions.append("state IN ('succeeded','destroyed')")
+                conditions.append("state IN ('succeeded','destroyed','rejected')")
         if job_id:
             conditions.append("id=?")
             values.append(job_id)
@@ -788,7 +827,45 @@ def jobs(
             + " ORDER BY created,id LIMIT ?",
             values,
         ).fetchall()
-        return [job_view(c, r, True) for r in rows]
+        if not compact:
+            return [job_view(c, r, True) for r in rows]
+        summaries = []
+        keys = (
+            "id",
+            "product_id",
+            "state",
+            "message",
+            "progress",
+            "attempt",
+            "created",
+            "updated",
+            "variant",
+            "steps",
+            "completed_steps",
+            "queue_position",
+            "queue_ahead",
+            "can_retry",
+        )
+        for row in rows:
+            details = job_view(c, row)
+            summary = {key: details[key] for key in keys if key in details}
+            summary["claimed_by"] = row["claimed_by"]
+            summary["attachments"] = {
+                kind: {
+                    "count": metadata["count"],
+                    "bytes": metadata["bytes"],
+                }
+                for kind in ("input", "output")
+                for metadata in [
+                    c.execute(
+                        "SELECT COUNT(*) AS count,COALESCE(SUM(size),0) AS bytes "
+                        "FROM job_files WHERE job_id=? AND kind=? AND content IS NOT NULL",
+                        (row["id"], kind),
+                    ).fetchone()
+                ]
+            }
+            summaries.append(summary)
+        return summaries
 
 
 @app.post("/api/manage/batch")
@@ -851,6 +928,10 @@ def batch(body: BatchUpdate, request: Request):
                         retryable=body.retryable,
                     ),
                 )
+            elif body.action in ("request_changes", "reject"):
+                from .task_outcomes import apply_queue_outcome
+
+                apply_queue_outcome(c, jid, body.action, body.message, actor)
             elif body.action == "retry":
                 if r["state"] != "failed":
                     fail("只能放行失败的任务", 409)

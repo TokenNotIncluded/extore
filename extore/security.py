@@ -82,12 +82,11 @@ def create_session(c, response: Response, role, staff_id=None, request=None):
         staff_id if role == "staff" else ("owner" if role == "admin" else "bootstrap")
     )
     if request is not None:
-        revoke_session(
-            c,
-            digest(request.cookies.get("extore_session", "")),
-            actor,
-            "session.replace",
-        )
+        previous = digest(request.cookies.get("extore_session", ""))
+        if c.execute(
+            "SELECT 1 FROM sessions WHERE digest=? AND channel='browser'", (previous,)
+        ).fetchone():
+            revoke_session(c, previous, actor, "session.replace")
     cleanup_sessions(c, now)
     sid = str(uuid.uuid4())
     ip, ua = request_metadata(request)
@@ -119,11 +118,41 @@ def create_session(c, response: Response, role, staff_id=None, request=None):
     return value
 
 
+def session_credential_digest(request):
+    """Select one explicit channel; an invalid bearer never falls back to cookies."""
+    authorization = request.headers.get("authorization")
+    cookie = request.cookies.get("extore_session", "")
+    if authorization is not None:
+        if cookie:
+            fail("不能混用浏览器与 CLI 登录凭证", 401)
+        parts = authorization.split(" ")
+        if len(parts) != 2 or parts[0].lower() != "bearer" or not parts[1]:
+            fail("CLI 登录凭证无效", 401)
+        permitted = request.url.path.startswith("/api/manage/") or (
+            (request.method, request.url.path)
+            in (("GET", "/api/cli/status"), ("DELETE", "/api/cli/session"))
+        )
+        if not permitted:
+            fail("此接口不接受 CLI 登录凭证", 401)
+        return digest(parts[1]), "cli"
+    return digest(cookie), "browser"
+
+
+def require_cli_bearer(request):
+    if request.headers.get("authorization") is None:
+        fail("请使用 CLI 登录凭证", 401)
+    result = session(request, ("staff",))
+    if result["channel"] != "cli":
+        fail("CLI 登录凭证无效", 401)
+    return result
+
+
 def session(request: Request, roles=("admin",)):
+    credential, channel = session_credential_digest(request)
     with db() as c:
         row = c.execute(
-            "SELECT * FROM sessions WHERE digest=? AND expires>? AND revoked=0",
-            (digest(request.cookies.get("extore_session", "")), time.time()),
+            "SELECT * FROM sessions WHERE digest=? AND expires>? AND revoked=0 AND channel=?",
+            (credential, time.time(), channel),
         ).fetchone()
         if not row or row["role"] not in roles:
             fail("请先登录", 401)
@@ -137,6 +166,8 @@ def session(request: Request, roles=("admin",)):
             result["last_seen"] = now
         if row["role"] == "staff":
             authorize_management(c, result)
+        elif channel != "browser":
+            fail("CLI 登录凭证无效", 401)
         return result
 
 
@@ -209,15 +240,30 @@ def authorize_management(c, s, permission=None):
     from .models import LINK_PERMISSIONS
 
     current = c.execute(
-        "SELECT role,staff_id FROM sessions WHERE digest=? AND revoked=0 AND expires>?",
+        "SELECT role,staff_id,channel,device_id FROM sessions WHERE digest=? AND revoked=0 AND expires>?",
         (s.get("digest", ""), time.time()),
     ).fetchone()
     if (
         current is None
         or current["role"] != s["role"]
         or current["staff_id"] != s.get("staff_id")
+        or current["channel"] != s.get("channel", "browser")
+        or current["device_id"] != s.get("device_id")
     ):
         fail("请先登录", 401)
+    if current["channel"] == "cli":
+        device = c.execute(
+            "SELECT * FROM cli_devices WHERE id=? AND staff_id=? AND revoked=0",
+            (current["device_id"], current["staff_id"]),
+        ).fetchone()
+        if device is None or s["role"] != "staff":
+            fail("CLI 设备授权已失效", 401)
+        s["client_name"] = device["client_name"]
+        if time.time() - device["last_seen"] >= 30:
+            c.execute(
+                "UPDATE cli_devices SET last_seen=? WHERE id=?",
+                (time.time(), device["id"]),
+            )
     if s["role"] == "admin":
         s["permissions"] = list(LINK_PERMISSIONS)
     elif s["role"] == "staff":
@@ -231,6 +277,9 @@ def authorize_management(c, s, permission=None):
             max_uses=staff["max_uses"],
             uses=staff["uses"],
             remaining_uses=max(0, staff["max_uses"] - staff["uses"]),
+            max_cli_uses=staff["max_cli_uses"],
+            cli_uses=staff["cli_uses"],
+            remaining_cli_uses=max(0, staff["max_cli_uses"] - staff["cli_uses"]),
         )
     else:
         fail("请先登录", 401)

@@ -1,6 +1,6 @@
 # 协议 v1
 
-所有 JSON 使用 UTF-8。API 错误为 `{"detail":"说明"}`，HTTP 400/422 是输入错误，401/403 是认证或权限，404 是不存在，409 是状态冲突，410 是领取已失效，429 是限流。外部平台不访问商家会话接口。
+所有 JSON 使用 UTF-8。API 错误为 `{"detail":"说明"}`，HTTP 400/422 是输入错误，401/403 是认证或权限，404 是不存在，409 是状态冲突，410 是凭证、卡密或领取已失效，408 是上传超时，413 是上传大小或数量超限，429 是限流，507 是服务器文件存储额度或磁盘空间不足。外部平台不访问商家会话接口。
 
 ## 任务状态
 
@@ -12,13 +12,18 @@ stateDiagram-v2
   queued --> failed: 平台明确失败
   processing --> succeeded: 交付完成
   processing --> failed: 明确失败 / 超时待核实
+  processing --> needs_input: 退回补充并说明原因
+  needs_input --> queued: 顾客修改后重新提交
+  processing --> rejected: 拒绝并说明原因
   failed --> queued: 允许重试且未超过次数
   succeeded --> destroyed: 顾客销毁
 ```
 
-任务 ID 在重试时保持不变，`attempt` 从 1 递增。平台必须以稳定任务 ID 去重外部交付，以 `(task_id, attempt)` 区分状态回调。旧尝试的回调 HTTP 409。终态不能覆盖；同一终态的重复完成请求返回当前结果，不修改内容。有步骤计划时，进度由已完成步骤计算，处理中最高 99%，成功强制为 100%；没有步骤计划时保留原来的百分比接口，处理中进度不能倒退。
+任务 ID 在失败重试或退回补充后保持不变，`attempt` 从 1 递增。平台必须以稳定任务 ID 去重外部交付，以 `(task_id, attempt)` 区分状态回调。旧尝试的回调 HTTP 409。终态不能覆盖；外部回调重复报告相同的成功或失败终态时返回当前结果，不修改内容。有步骤计划时，进度由已完成步骤计算，处理中最高 99%，成功强制为 100%；没有步骤计划时保留原来的百分比接口，处理中进度不能倒退。
 
 商品规则 `allow_retry`、`max_attempts` 与失败结果 `retryable` 必须同时满足，才能重试。没有确认未交付的失败不能标记为可重试。Webhook 或队列超过 1 小时未更新，以及自动处理器中断，都会进入不可自动重试的失败状态；商家在核实后可放行。过期尝试的待投递 `redemption.requested` 会取消，不继续启动旧任务。
+
+队列审核另有两种结果，均要求说明原因：`needs_input` 让顾客补充或修改资料，卡密回到 `ready`；它不是发货失败，不受 `allow_retry` 或 `max_attempts` 限制。顾客重新提交时沿用任务的输入输出、规格和步骤快照，增加 `attempt`，重置进度和已完成步骤。卡密过期或撤销后仍不能提交。`rejected` 为拒绝终态，卡密同时变为 `rejected`，不能重新兑换或领取内容；已有领取链接仍可查看拒绝原因。
 
 ## 支付平台生成卡密
 
@@ -53,7 +58,7 @@ Content-Type: application/json
 
 三个查询均有对应 `/api/admin/...` 接口。库存 `offset` 从 0 开始，`limit` 为 1–500；`search` 只匹配内部卡密 ID 或末 6 位。列表保留批次 ID 与名称、到期时间、首次验码时间、任务状态、尝试次数及领取记录，不返回完整卡密或摘要。旧卡没有可恢复的尾号时，`code_suffix` 为 `null`；尾号不保证唯一，内部 ID 才用于精确定位。
 
-库存 `state` 保留原卡密生命周期值 `ready`、`reserved`、`used` 或 `revoked`；`status` 是结合任务与到期信息计算的展示状态，用于筛选。旧卡的批次、尾号与首次验码不会凭空回填；新验码记录从启用跟踪后开始，已有任务与领取记录仍计入统计。
+库存 `state` 保留原卡密生命周期值 `ready`、`reserved`、`used`、`rejected` 或 `revoked`；`status` 是结合任务与到期信息计算的展示状态，用于筛选。旧卡的批次、尾号与首次验码不会凭空回填；新验码记录从启用跟踪后开始，已有任务与领取记录仍计入统计。
 
 库存项带 `variant_id` 与发行时的 `variant_name`。统计商品中的 `variants` 数组按规格列出 `variant_id`、名称、描述、参考价格、币种、启用状态及 `summary`；指定商品时也返回该商品规格统计。旧卡计入默认规格，停用或历史规格仍计入商品总数。
 
@@ -62,20 +67,21 @@ Content-Type: application/json
 | 字段 | 含义 |
 |---|---|
 | `total` | 已发行总数 |
-| `remaining` | 尚未提交、未撤销且未过期的新库存 |
-| `available` | 新库存加符合重试条件的原顾客卡密；可重试卡密不能当作新库存再次销售 |
-| `used` | 已创建任务的卡密数，重试不重复计数 |
+| `remaining` | 未到期、未撤销的 `unused` 加 `needs_input`；退回补充计回剩余 |
+| `available` | `remaining` 加符合重试条件的失败卡密；已有任务的卡密仍归原顾客使用 |
+| `used` | 已有任务且任务不处于 `needs_input` 的卡密数；退回补充会减回，重提后计入 |
 | `verified` | 已记录至少一次成功验码的卡密数 |
 | `viewed` | 至少领取过一次内容的卡密数 |
 | `in_progress` | 排队或处理中的卡密数 |
 | `completed` | 已成功或已销毁的卡密数 |
-| `failed` | 当前失败任务的卡密数 |
+| `failed` | 当前失败任务的卡密数，不含退回补充或拒绝 |
+| `rejected` | 已拒绝的卡密数，计入 `used`，不计入剩余、失败或完成 |
 
-`summary.states` 的状态互斥：`unused`、`queued`、`processing`、`succeeded`、`failed_retryable`、`failed_terminal`、`destroyed`、`revoked`、`expired`，可作为库存 `status` 筛选值。库存响应的 `summary` 始终统计整个权限范围，不随状态、批次或搜索过滤改变；`total` 是筛选后的条数。
+`summary.states` 的状态互斥：`unused`、`needs_input`、`queued`、`processing`、`succeeded`、`failed_retryable`、`failed_terminal`、`destroyed`、`revoked`、`expired`、`rejected`，可作为库存 `status` 筛选值。库存响应的 `summary` 始终统计整个权限范围，不随状态、批次或搜索过滤改变；`total` 是筛选后的条数。
 
-`expired` 表示未提交且已到期；失败任务到期后归入 `failed_terminal`。一次领取只增加领取记录，任务仍为 `succeeded`，不会自动变成 `destroyed`。
+`expired` 表示未提交或退回补充且已到期；失败任务到期后归入 `failed_terminal`。已拒绝的任务到期后仍为 `rejected`，撤销状态优先。`needs_input` 虽计回剩余，仍绑定原任务，不能当作从未使用的卡密再次销售。一次领取只增加领取记录，任务仍为 `succeeded`，不会自动变成 `destroyed`。
 
-到期限制尚未兑换卡密的新提交和失败任务的重试；已经成功的交付仍按查看规则领取，到期不会销毁已有结果。历史包含发行、验码、提交、重试、进度、成功、失败、领取、销毁与撤销记录，不返回参数、消息、交付结果、私密领取链接、原卡密或摘要。
+到期限制尚未兑换卡密的新提交、失败重试及退回补充后的重提；已经成功的交付仍按查看规则领取，到期不会销毁已有结果。历史包含发行、验码、提交、重试、进度、成功、失败、退回补充、拒绝、领取、销毁与撤销记录，不返回参数、消息、交付结果、私密领取链接、原卡密或摘要。
 
 ## 商品配置
 
@@ -194,10 +200,12 @@ Content-Type: application/json
 
 | type | 触发时机 | data |
 |---|---|---|
-| `redemption.requested` | 首次提交或合规重试 | 任务状态字段及 `params` |
+| `redemption.requested` | 首次提交、合规失败重试或补充后重提 | 任务状态字段及 `params` |
 | `fulfillment.progress` | 领取任务、自动处理开始、进度更新 | 任务状态字段 |
 | `fulfillment.succeeded` | 首次成功交付 | 任务状态字段 |
 | `fulfillment.failed` | 明确失败、超时或中断 | 任务状态字段 |
+| `fulfillment.needs_input` | 已领取的队列任务退回顾客补充 | 任务状态字段，`message` 为原因 |
+| `fulfillment.rejected` | 已领取的队列任务被拒绝 | 任务状态字段，`message` 为原因 |
 | `delivery.viewed` | 内容成功领取，每次重复查看也产生事件 | 任务状态字段 |
 | `delivery.destroyed` | 顾客首次销毁 | 任务状态字段，`state=destroyed` |
 
@@ -256,8 +264,8 @@ Content-Type: application/json
 |---|---|---|
 | `GET /api/products` | 无 | 仅公开商品及输入输出说明，无处理器秘密配置和密钥 |
 | `POST /api/exchange` | `{code}` | 30 天兑换凭证、指定商品、发行规格 `variant`、已有任务 |
-| `POST /api/redeem` | `{token,params}` | 创建或合规重试任务，返回状态 |
-| `POST /api/receipt` | `{token}` | 商品、发行规格 `variant` 与状态，不返回私密交付结果 |
+| `POST /api/redeem` | `{token,params}` | 创建、合规失败重试或补充后重提任务，返回状态 |
+| `POST /api/receipt` | `{token}` | 商品、发行规格 `variant` 与状态；退回补充时包含原 `params` 供顾客修改，不返回交付结果 |
 | `POST /api/receipt/reveal` | `{token,card_id?}` | 显式领取 `{output,content,files?}`；`content` 为兼容可读文本，一次领取原子消费 |
 | `POST /api/receipt/destroy` | `{token,card_id?}` | 永久关闭应用内交付内容 |
 
@@ -265,7 +273,7 @@ Content-Type: application/json
 
 ### 多张卡密共用领取链接
 
-`POST /api/exchange` 的 `code` 可包含最多 30 张同商品卡密，用换行、空格、逗号或分号分隔，重复卡密只计一次。完整输入最多 8000 字符；原来单张卡密用空格替代连字符的格式保持兼容。混入其他商品、无效或不可兑换的卡密时整批拒绝，不创建领取链接。
+`POST /api/exchange` 的 `code` 可包含最多 30 张同商品卡密，用换行、空格、逗号或分号分隔，重复卡密只计一次。完整输入最多 8000 字符；原来单张卡密用空格替代连字符的格式保持兼容。原生 WebMCP 的 `extore_code_verify` 也支持同一批量输入。混入其他商品、无效或不可兑换的卡密时整批拒绝，不创建领取链接。
 
 多张卡密响应为 `{token,batch:true,product,items}`；`POST /api/receipt` 返回相同的批量状态结构。每项包含 `card_id`、末尾 `suffix`、发行规格 `variant`、自己的 `product` 定义与已有 `job`。未提交的卡密使用当前商品输入定义，已有任务和重试使用自己的结构快照。一个链接覆盖这批卡密，有效期 30 天，不返回原卡密。
 
@@ -277,13 +285,19 @@ Content-Type: application/json
 
 | 接口 | 认证与请求 | 结果 |
 |---|---|---|
-| `POST /api/files/upload` | multipart：`token,field_key,file` | 输入附件描述，`id` 填入 `params[field_key]` |
+| `GET /api/admin/storage` | 商家会话 | `stored_bytes,uploading_bytes,limit_bytes,disk_free_bytes,disk_reserve_bytes,active_uploads,upload_concurrency` |
+| `GET /api/upload-limits` | 无认证 | `{max_file_bytes,max_card_bytes,max_card_files}`，不返回磁盘用量 |
+| `POST /api/files/upload` | multipart：`token,card_id?,field_key,file` | 输入附件描述，`id` 填入 `params[field_key]` |
 | `POST /api/manage/files/upload` | 管理会话，`queue.process`；multipart：`job_id,field_key,file` | 输出附件描述，`id` 填入成功请求 `output[field_key]` |
 | `GET /api/manage/files?job_id=...` | 管理会话，`queue.view`，同商品 | 任务附件描述列表，不含内容或下载凭证 |
 | `GET /api/manage/files/{file_id}/download` | 管理会话，`queue.view`，同商品 | 有权访问任务的附件下载，不消费顾客一次下载额度 |
-| `POST /api/files/download` | JSON：`{token,file_id}` | 已显式领取的输出附件下载 |
+| `POST /api/files/download` | JSON：`{token,file_id,card_id?}` | 已显式领取的输出附件下载 |
 
-上传只能包含表中规定的字段和一个文件。单文件最多 20 MiB，每张卡密现存附件合计最多 100 MiB、最多 100 个；超限返回 413。输入文件必须属于这张卡密及对应输入字段；提交后不能替换，只有允许重试时才能上传或重用输入。输出文件必须属于当前任务、尝试和对应输出字段，只有领取了该队列任务的处理者可上传。成功提交后绑定所选附件，未选草稿会清理；新尝试删除旧输出，保留可重用输入直到重新绑定。
+上传只能包含表中规定的字段和一个文件。默认单文件 20 MiB、每张卡密现存附件合计 100 MiB、最多 100 个，可通过服务器环境变量降低或调整相应额度；当前单文件最高 20 MiB。超限返回 413。输入文件必须属于这张卡密及对应输入字段；提交后不能替换，只有允许失败重试或处于退回补充时才能上传或重用输入。输出文件必须属于当前任务、尝试和对应输出字段，只有领取了该队列任务的处理者可上传。成功提交后绑定所选附件，未选草稿会清理；新尝试删除旧输出，保留可重用输入直到重新绑定。
+
+全站附件逻辑容量默认 5 GiB，计入保留的 BLOB 与正在接收的实际文件字节；同时最多 4 个上传，单次接收期限 5 分钟，实际磁盘至少保留 512 MiB 并另留写入空间。额度或磁盘不足返回 507，并发超限返回 429，接收超时返回 408。临时文件与数据库位于同一受检查的文件系统；所有容量和期限配置见[运行指南](getting-started.md#文件上传与存储)。
+
+未绑定草稿默认 24 小时到期，由 worker 分轮清理；当前处理中尝试的输出草稿与已经绑定的附件不会因年龄被删。每 60 秒维护一轮，最多清理 100 条、20 MiB，并在清理事务后以 100 毫秒等待尝试截断 WAL；活跃读者或锁冲突时下轮重试。删除释放逻辑额度，SQLite BLOB 所在页可复用，数据库文件本身不自动缩小。
 
 `reveal` 只释放本次结果实际引用的输出附件，返回文件描述（含 `id,field_key,filename,content_type,size` 等）。顾客下载还必须提交有效兑换凭证；文件 ID 本身没有下载权限。凭证只放在 POST JSON 或 multipart 请求体，不能拼成 GET 下载链接或 URL 查询参数。管理者 GET 下载依赖其 HttpOnly 会话，不使用顾客凭证。
 
@@ -304,7 +318,7 @@ Content-Type: application/json
 | 权限 | 允许的操作 |
 |---|---|
 | `queue.view` | 查看该商品任务、参数和处理进度 |
-| `queue.process` | 人或 AI 领取队列任务，更新、完成或标记自己领取的任务失败；须同时有 `queue.view` |
+| `queue.process` | 人或 AI 领取队列任务，更新、完成、标记失败、退回补充或拒绝自己领取的任务；须同时有 `queue.view` |
 | `queue.retry` | 核实失败任务后放行重试；须同时有 `queue.view` |
 | `product.edit` | 查看与编辑商品展示信息和顾客参数；单独授予时不能读取签名密钥或更改发货、查看与重试规则 |
 | `fulfillment.configure` | 读取与配置该商品发货方式、输出结构、查看与重试规则、官方处理器和签名密钥；须同时有 `product.edit` |
@@ -325,7 +339,7 @@ Content-Type: application/json
 
 登录使用链接片段中的凭证提交 `POST /api/staff/login`，请求为 `{token}`。`/staff`、`/api/admin/staff` 和认证角色 `staff` 为兼容保留，界面统一称为商品管理链接。原始链接只在创建时返回，列表不包含凭证或数据库摘要。
 
-`GET /api/auth/status` 的链接会话返回 `role="staff"`、`product_id`、`permissions`、`link_id`、`link_name`、`link_expires`、`parent_id`、`max_uses`、`uses` 与 `remaining_uses`。`link_expires` 是当前链接与全部祖先中最早的到期时间，使用 Unix 秒。权限与祖先有效性在每次操作时重新校验，不能只信任前端缓存的认证状态。
+`GET /api/auth/status` 的链接会话返回 `role="staff"`、`product_id`、`permissions`、`link_id`、`link_name`、`link_expires`、`parent_id`、`max_uses`、`uses`、`remaining_uses`、`max_cli_uses`、`cli_uses` 与 `remaining_cli_uses`。`link_expires` 是当前链接与全部祖先中最早的到期时间，使用 Unix 秒。权限与祖先有效性在每次操作时重新校验，不能只信任前端缓存的认证状态。
 
 商家创建店长链接：
 
@@ -347,11 +361,11 @@ Content-Type: application/json
 {"name":"资料处理","days":1,"permissions":["queue.view","queue.process"]}
 ```
 
-`name` 长 1–100 字符；`days` 为大于 0、最多 90 的天数，可使用小数。商家省略 `days` 时有效 7 天；下级省略时为 7 天与父链接剩余有效期的较短者。显式期限超过父链接、权限相同或扩大，均返回 403。`permissions` 省略时使用默认的队列查看与处理权限，重复权限会去重。`max_uses` 为 1–1000 的整数，默认 1；子链接不能超过父链接配置的上限。
+`name` 长 1–100 字符；`days` 为大于 0、最多 90 的天数，可使用小数。商家省略 `days` 时有效 7 天；下级省略时为 7 天与父链接剩余有效期的较短者。显式期限超过父链接、权限相同或扩大，均返回 403。`permissions` 省略时使用默认的队列查看与处理权限，重复权限会去重。`max_uses` 是浏览器新登录额度，`max_cli_uses` 是新 CLI 设备绑定额度，均为 1–1000 的整数、默认 1；两项独立计数，子链接分别不能超过父链接配置的上限。
 
-一次额度用于创建一个新的成功登录会话，事务内计数，耗尽后新登录返回 409。同一个有效会话重复提交同一链接不会再扣次数；耗尽不会自动注销已有会话，权限仍受链接期限和撤销约束。获取 `/staff#...` 页面或读取认证状态不消费额度，登录需要明确提交 `POST /api/staff/login`。更换浏览器、退出后重新登录等新会话需要剩余额度。
+一次浏览器额度用于创建一个新的成功浏览器登录会话，事务内计数，耗尽后新登录返回 409。同一个有效会话重复提交同一链接不会再扣次数；耗尽不会自动注销已有会话，权限仍受链接期限和撤销约束。获取 `/staff#...` 页面或读取认证状态不消费额度，登录需要明确提交 `POST /api/staff/login`。更换浏览器、退出后重新登录等新会话需要剩余额度。
 
-创建响应包含 `id`、`product_id`、`name`、`permissions`、`parent_id`、`created`、`expires`、`revoked`、`max_uses`、`uses`、`remaining_uses` 和一次性返回的 `url`。列表省略 `url`。撤销返回 `{ok:true,revoked_count}`，数量包括被撤销的链接及后代。商家兼容接口 `POST /api/admin/staff` 使用相同创建字段，但 `product_id` 必填；`GET /api/admin/staff` 查看全店管理链接，`POST /api/admin/staff/{id}/revoke` 撤销指定分支。
+创建响应包含 `id`、`product_id`、`name`、`permissions`、`parent_id`、`created`、`expires`、`revoked`、`max_uses`、`uses`、`remaining_uses`、`max_cli_uses`、`cli_uses`、`remaining_cli_uses` 和一次性返回的 `url`。列表省略 `url`。撤销返回 `{ok:true,revoked_count}`，数量包括被撤销的链接及后代。商家兼容接口 `POST /api/admin/staff` 使用相同创建字段，但 `product_id` 必填；`GET /api/admin/staff` 查看全店管理链接，`POST /api/admin/staff/{id}/revoke` 撤销指定分支。
 
 ## 按商品管理接口
 
@@ -369,24 +383,68 @@ Content-Type: application/json
 | `GET /api/manage/events` | `events.manage` | 当前商品的事件及投递状态，不含完整参数、内容或签名密钥 |
 | `POST /api/manage/events/{id}/retry` | `events.manage` | 仅重投当前商品 `dead` 的事件 |
 | `GET /api/manage/links` | `links.delegate` | 商家查看当前商品全部链接；管理者只查看自己的后代 |
-| `POST /api/manage/links` | `links.delegate` | `{product_id?,name,days?,permissions?,max_uses?}`；创建同商品的更小权限链接 |
+| `POST /api/manage/links` | `links.delegate` | `{product_id?,name,days?,permissions?,max_uses?,max_cli_uses?}`；创建同商品的更小权限链接 |
 | `POST /api/manage/links/{id}/revoke` | `links.delegate` | 级联撤销当前商品内有权管理的链接分支 |
 
 商品更新时，`webhook_secret` 留空表示保留原值，合并后再验证完整配置。没有 `fulfillment.configure` 的管理者提交隐藏的空处理器配置时保留原值，不能更改 `mode`、`delivery`、`view_policy`、`script`、`webhook_url`、`webhook_secret`、`allow_retry`、`max_attempts`、`processor_id`、`processor_config` 或输出字段结构，修改返回 403。拥有此权限仍受前文的已发卡冻结与官方预设限制。商品管理链接不能安装程序、创建新商品或调用全店 `/api/admin/*` 接口。
 
 商家 `POST /api/admin/cards` 同样返回 `{codes,batch_id}`，用于定位本次发行的批次；支付平台制卡接口保持 `{codes}` 响应。
 
+## CLI 设备授权
+
+CLI 使用 Ed25519 设备密钥，与浏览器 Cookie 会话分开。一个设备授权仍只有一个商品管理链接的权限；多个商品的聚合只在客户端完成。安装和命令用法见 [CLI 文档](cli.md)。
+
+| 接口 | 认证与请求 | 结果 |
+| --- | --- | --- |
+| `POST /api/cli/authorize` | 无 Cookie / Bearer；`{token,public_key,client_name,signature}` | 绑定设备，返回 `device_id,product_id,client_name,fingerprint,permissions,expires,already_authorized,max_cli_uses,cli_uses,remaining_cli_uses` |
+| `POST /api/cli/challenge` | 无 Cookie / Bearer；`{device_id}` | `challenge_id,challenge,expires,expires_in`，最多有效 5 分钟 |
+| `POST /api/cli/session` | 无 Cookie / Bearer；`{device_id,challenge_id,signature}` | `access_token,token_type,expires,expires_in,device_id,session_id,product_id,permissions` |
+| `GET /api/cli/status` | CLI Bearer | 当前商品、链接、设备、会话与独立额度元数据，不返回凭据 |
+| `DELETE /api/cli/session` | CLI Bearer | 退出当前会话，保留设备授权 |
+| `POST /api/manage/cli-ticket` | 商家或商品管理会话；`{staff_id?}` | `token,origin,expires,expires_in,staff_id,product_id`，用于短期 CLI 绑定 |
+| `GET /api/admin/cli-devices` | 商家会话 | 全店设备安全元数据 |
+| `GET /api/manage/cli-devices` | 商品管理会话 | 自己及有权管理的下级设备 |
+| `DELETE /api/admin/cli-devices/{id}` | 商家会话 | 撤销设备及其 CLI 会话 |
+| `DELETE /api/manage/cli-devices/{id}` | 商品管理会话，服务端限定链接范围 | 撤销有权管理的设备及其会话 |
+
+`public_key` 是 32 字节 Ed25519 公钥的无填充 base64url（43 字符），`signature` 是 64 字节签名的同种编码（86 字符）。`client_name` 为去除首尾空白后 1–100 字符的设备名称。`token` 由官方客户端提交完整 `/staff#…` 管理链接或 `/cli#…` 专用票据链接。绑定签名使用 UTF-8，字段之间为单个换行，末尾没有换行：
+
+```text
+extore-cli-bind-v1
+EXTORE_ORIGIN
+token（与请求字段完全一致）
+public_key
+```
+
+服务器先验签再消耗 CLI 绑定额度；同链接、同公钥重复绑定返回同一个设备，不再次扣减。CLI 额度耗尽不终止已绑定设备。私钥丢失后新设备需要剩余额度或新管理链接，撤销设备不会自动退还已用额度。
+
+续签同样以 UTF-8 签名下列文本：
+
+```text
+extore-cli-session-v1
+EXTORE_ORIGIN
+device_id
+challenge_id
+challenge
+```
+
+挑战只可成功消费一次。Bearer 有效期为 8 小时与链接及祖先剩余有效期的较短者；每次请求重新检查设备、链接、祖先和权限。可用设备通过新挑战续签，不再次消耗管理链接额度。CLI Bearer 用于 `/api/cli/status`、退出及获授权的 `/api/manage/*` 操作，不授予全店 `/api/admin/*` 权限，也不混用浏览器 Cookie。
+
+CLI 专用票据最多有效 5 分钟，不能超过授权剩余期限。商家生成时指定目标 `staff_id`；商品管理会话只能为自己的链接生成，不能借此给其他链接授权。票据首次绑定消耗 CLI 额度，不消费浏览器额度；只能绑定一个公钥，已绑定公钥的重复请求可在有效期内恢复响应。票据不能用于 `POST /api/staff/login`。网页把该票据与操作范围组成机器人接入提示词，只在明确生成时显示，不提供历史明文查询。
+
+设备列表包含不透明 ID、链接/商品名称及 ID、设备名称、公钥指纹、创建/最近活动、撤销与有效标记；不返回私钥、票据或 Bearer。设备撤销同时结束该设备会话；链接及祖先撤销或过期会阻止设备访问和续签。单纯退出或撤销一条会话不等于撤销设备授权。
+
 ### 登录会话与审计
 
 `GET /api/admin/sessions` 返回全店登录会话；`DELETE /api/admin/sessions/{id}` 撤销指定会话。商品管理链接使用 `/api/manage/sessions` 与 `/api/manage/sessions/{id}`，默认只查看与撤销本链接的会话；有 `links.delegate` 时包含同商品内自己的后代，不包含其他分支或商家会话。
 
-会话字段包括不透明 `id`、角色、商品与链接名称、创建/最后访问/到期时间、`active`、`revoked`、`current`、IP 和 User-Agent，不返回 Cookie、凭证或摘要。撤销最后一个有效链接会话时，其未完成队列任务放回原商品队列并保留已有步骤、文件和参数。`GET /api/admin/audit` 与 `GET /api/manage/audit` 查看对应范围的链接和会话审计，`limit` 为 1–200；记录会话创建、替换、退出、撤销及链接消费等动作，不记录原始秘密凭证。
+会话字段包括不透明 `id`、角色、`channel`（browser / cli）、`device_id`、`client_name`、商品与链接名称、创建/最后访问/到期时间、`active`、`revoked`、`current`、IP 和 User-Agent，不返回 Cookie、凭证或摘要。撤销最后一个有效链接会话时，其未完成队列任务放回原商品队列并保留已有步骤、文件和参数。`GET /api/admin/audit` 与 `GET /api/manage/audit` 查看对应范围的链接和会话审计，`limit` 为 1–200；记录会话创建、替换、退出、撤销、分渠道链接消费、CLI 票据生成及设备创建/撤销等动作，不记录原始秘密凭证。
 
 ## 商品队列
 
-队列按商品分开。`GET /api/manage/products` 返回有权管理的商品概要；商品管理链接只得到授权商品。商家查询 `GET /api/manage/jobs?product_id=<商品 UUID>` 必须指定商品，链接持有人可省略并默认使用授权商品；查看队列需要 `queue.view`。任务列表包含各任务冻结的输入输出定义、规格、步骤及安全附件描述，不应使用商品当前表单去填写旧任务结果。
+队列按商品分开。`GET /api/manage/products` 返回有权管理的商品概要；商品管理链接只得到授权商品。商家查询 `GET /api/manage/jobs?product_id=<商品 UUID>` 必须指定商品，链接持有人可省略并默认使用授权商品；查看队列需要 `queue.view`。默认任务列表包含各任务冻结的输入输出定义、规格、步骤及安全附件描述，不应使用商品当前表单去填写旧任务结果。`compact=true` 改为摘要列表，不返回顾客参数或输入输出结构，只带状态、进度、规格、步骤和附件数量/容量等处理元数据；CLI 的 queues/jobs 使用此视图。需要资料时通过 `job_id` 精确读取任务详情，省略 compact 或使用 compact=false。
 
-队列默认 `view=active`，只返回排队、处理中与失败待核实的任务。`view=processed` 返回已完成和已销毁任务，`view=all` 返回全部历史；记录保留，切换视图不会删除任务。显式 `state` 优先按指定状态查询；通过 `job_id` 精确定位时可读取历史任务，商品权限限制保持不变。网页和原生 WebMCP 的默认列表都省略已处理任务，避免重复传递历史参数。
+队列默认 `view=active`，返回排队、处理中、失败待核实与退回补充的任务。`view=processed` 返回已完成、已销毁与已拒绝任务，`view=all` 返回全部历史；记录保留，切换视图不会删除任务。显式 `state` 优先按指定状态查询；通过 `job_id` 精确定位时可读取历史任务，商品权限限制保持不变。网页和原生 WebMCP 的默认列表都省略已处理任务，避免重复传递历史参数。
 
 `queue_ahead` 统计同商品中排序在本任务前的 `queued` 与 `processing` 任务，顺序为 `(created,id)`。活跃任务的 `queue_position=queue_ahead+1`，终态为 0；其他商品不影响排位。这是当前队列位置，不估算完成时间。顾客状态同时返回 `steps=[{id,label,done}]`、`completed_steps`、`message`、`support_email` 与 `variant`。
 
@@ -396,13 +454,19 @@ Content-Type: application/json
 {"product_id":"商品 UUID","ids":["任务 UUID"],"action":"progress","completed_steps":["verify"],"message":"资料审核完成，正在准备交付"}
 ```
 
-`action`: `claim` / `progress` / `succeed` / `fail` / `retry`。`product_id` 必填，一次最多 100 个同商品任务，混入其他商品返回 403 且整批回滚。整批事务要么成功、要么回滚。`claim`、`progress`、`succeed` 与 `fail` 需要 `queue.process`；领取只接受排队任务，进度、完成和失败只接受当前管理者自己领取的队列任务。人和 AI 使用相同接口与权限。`retry` 需要 `queue.retry`，核实后允许失败任务由顾客再次提交。官方处理器和 Webhook 任务不能由队列接口覆盖交付。
+`action`: `claim` / `progress` / `succeed` / `fail` / `retry` / `request_changes` / `reject`。`product_id` 必填，一次最多 100 个同商品任务，混入其他商品返回 403 且整批回滚。整批事务要么成功、要么回滚。`claim`、`progress`、`succeed`、`fail`、`request_changes` 与 `reject` 需要 `queue.process`；领取只接受排队任务，进度、完成、失败、退回补充和拒绝只接受当前管理者自己领取的 `processing` 队列任务。人和 AI 使用相同接口与权限。`retry` 需要 `queue.retry`，核实后允许失败任务由顾客再次提交。官方处理器和 Webhook 任务不能由队列接口覆盖交付。
 
 `completed_steps` 是该尝试目前完成的完整集合，省略保留原值；不能提交未知或重复 ID，也不能撤回已完成步骤。顺序由任务计划统一规范化，进度按完成数量计算；`succeed` 自动完成全部步骤。没有计划时可继续传 `progress`（0–99）。`message` 持久化显示给顾客，最多 1000 字符，适合说明当前完成的工作。
 
 队列中或处理中的任务若计划为空且没有完成步骤，可在 `claim`、`progress`、`succeed` 或 `fail` 同次请求传 `progress_steps`（1–30 项，与商品步骤格式相同），明确绑定一次任务专用计划；已有非空计划不能替换。该操作仍需 `queue.process`，不会改变商品或其他任务的计划。
 
-`retry` 只放行重试，不创建新尝试，也不接受 `completed_steps` 或 `progress_steps`（422）。顾客实际重新提交时才增加 `attempt`、清空完成集合及进度，并保留原计划和输入输出快照。
+`request_changes` 与 `reject` 必须传非空白、最多 1000 字符的 `message` 作为顾客可见原因，不能同时交付 `content` 或 `output`。退回补充释放领取者、清除旧输出，保留输入供顾客修改；拒绝同时禁用卡密。两者都不同于真正发货失败。
+
+```json
+{"product_id":"商品 UUID","ids":["任务 UUID"],"action":"request_changes","message":"请补充账户邮箱截图，再提交一次。"}
+```
+
+`retry` 只放行失败重试，不创建新尝试，也不接受 `completed_steps` 或 `progress_steps`（422）。顾客实际重新提交时才增加 `attempt`、清空完成集合及进度，并保留原计划和输入输出快照。
 
 完成使用 `action="succeed"` 与符合商品输出结构的 `output`：
 

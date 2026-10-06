@@ -73,6 +73,7 @@ test("each card renders and submits its own parameter snapshot, including file f
   page.node("#param-A-old_file").files = [new File(["input"], "input.txt")];
   page.node("#param-B-new_email").value = "b@example.test";
   const submitting = page.node("#form").emit("submit");
+  await flush();
   assert.equal(page.requests[0].url, "/api/files/upload");
   assert.equal(page.requests[0].body.card_id, "A");
   assert.equal(page.requests[0].body.field_key, "old_file");

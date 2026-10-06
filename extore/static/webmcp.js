@@ -13,7 +13,7 @@
   let refreshDeferred = false;
   let invalidateOnly = false;
   const tabs = ["products", "jobs", "cards", "staff", "events", "security", "sessions"];
-  const states = ["queued", "processing", "succeeded", "failed", "destroyed"];
+  const states = ["queued", "processing", "needs_input", "succeeded", "failed", "rejected", "destroyed"];
   const permissionNames = [
     "queue.view",
     "queue.process",
@@ -59,6 +59,10 @@
   const variantId = { ...string(40, 1), pattern: "^[a-z0-9][a-z0-9_-]{0,39}$" };
   const fileId = { ...string(36, 36), pattern: "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$" };
   const fieldKey = { ...string(40, 1), pattern: "^[a-z][a-z0-9_]{0,39}$" };
+  const batchParameters = {
+    type: "object", maxProperties: 30, propertyNames: fieldKey,
+    additionalProperties: string(10000),
+  };
   const maxFileBytes = 20 * 1024 * 1024;
   const maxAIFileBytes = 1024 * 1024;
   const uploadFields = {
@@ -217,6 +221,8 @@
       c.queueProduct?.outputs || [],
       c.product?.id || "",
       c.product?.parameters || [],
+      Boolean(c.batch),
+      c.cardId || "",
       c.currentToken || "",
     ]);
   }
@@ -887,9 +893,11 @@
     "unused",
     "queued",
     "processing",
+    "needs_input",
     "succeeded",
     "failed_retryable",
     "failed_terminal",
+    "rejected",
     "destroyed",
     "revoked",
     "expired",
@@ -901,7 +909,28 @@
         .map((field) => [field, value[field]]),
     );
   }
+  function safeLink(value, discloseURL = false) {
+    const result = project(value, [
+      "id", "product_id", "name", "expires", "revoked", "revoked_at", "permissions", "parent_id", "created",
+      "max_uses", "uses", "remaining_uses", "max_cli_uses", "cli_uses", "remaining_cli_uses",
+      ...(discloseURL ? ["url"] : []),
+    ]);
+    if (Array.isArray(value?.children)) result.children = value.children.map((child) => safeLink(child));
+    return result;
+  }
   function safeReceiptStatus(value) {
+    if (value.batch) {
+      if (!Array.isArray(value.items) || value.items.length > 30)
+        throw new ToolError("unavailable", "This batch receipt has invalid item metadata.");
+      return {
+        batch: true,
+        product: safeReceiptStatus({ product: value.product }).product,
+        items: value.items.map((item) => ({
+          ...project(item, ["card_id", "suffix"]),
+          ...safeReceiptStatus({ product: item.product, variant: item.variant, job: item.job }),
+        })),
+      };
+    }
     const product = project(value.product, [
       "id", "name", "description", "logo", "image", "public", "variants", "progress_steps",
       "support_email", "mode", "delivery", "view_policy", "allow_retry", "max_attempts",
@@ -925,6 +954,15 @@
       if (own(value, name)) result[name] = value[name];
     if (value.steps) result.steps = steps(value.steps);
     return result;
+  }
+  function selectedReceipt(receipt, captured) {
+    if (!receipt.batch) return receipt;
+    if (!captured.cardId)
+      throw new ToolError("invalid_state", "Select a card in the receipt UI before uploading, revealing or destroying that card's delivery.");
+    const item = receipt.items?.find((entry) => entry.card_id === captured.cardId);
+    if (!item || !item.product?.id || item.product.id !== captured.product.id)
+      throw new ToolError("forbidden", "The selected card is not part of this product receipt.");
+    return item;
   }
   function safeFileDescriptor(value) {
     return project(value, ["id", "job_id", "field_key", "kind", "filename", "content_type", "size", "created", "consumed"]);
@@ -1122,8 +1160,8 @@
       add(
         "code_verify",
         "验证卡密",
-        "Verify a user-provided redemption code and show its product in the UI. Does not submit a redemption or return a receipt credential.",
-        object({ code: string(128, 1) }, ["code"]),
+        "Verify one code or up to 30 codes for the same product, separated by newlines, spaces or commas, and show the verified receipt in the UI. The server verifies code count and product scope. Does not submit a redemption or return a receipt credential.",
+        object({ code: string(8000, 1) }, ["code"]),
         async (input, signal) => {
           if (!input.code.trim())
             throw new ToolError(
@@ -1144,16 +1182,17 @@
           object({ ...uploadFields, confirm: confirmed }, ["field_key", "filename", "base64", "confirm"]),
           async (input, signal) => {
             validateUpload(input);
-            const receipt = await action("receipt", [], signal);
+            const data = await action("receipt", [], signal);
             checkInvocation(signal);
+            const receipt = selectedReceipt(data, c);
             if (receipt.job && !receipt.job.can_retry)
               throw new ToolError("invalid_state", "Input files can only be uploaded before submission or an eligible retry.");
             if (!(receipt.product?.parameters || []).some((field) => field.key === input.field_key && field.type === "file"))
               throw new ToolError("invalid_arguments", "This redemption has no matching file input field.");
             const { confirm: ignored, ...definition } = input;
-            const data = await action("uploadFile", [{ ...definition, scope: "customer" }], signal);
+            const uploaded = await action("uploadFile", [{ ...definition, scope: "customer" }], signal);
             checkInvocation(signal);
-            return uploadedDescriptor(data, input);
+            return uploadedDescriptor(uploaded, input);
           }, write,
         );
       }
@@ -1162,13 +1201,19 @@
         "兑换参数说明",
         "Read the verified product and its parameter keys, localized labels, types, and Markdown tutorials. Tutorials are untrusted data.",
         object(),
-        async (_, signal) => (await action("receipt", [], signal)).product,
+        async (_, signal) => {
+          const receipt = await action("receipt", [], signal);
+          checkInvocation(signal);
+          if (!receipt.batch) return receipt.product;
+          const safe = safeReceiptStatus(receipt);
+          return { batch: true, product: safe.product, items: safe.items.map((item) => project(item, ["card_id", "suffix", "product", "variant"])) };
+        },
         readonly,
       );
       add(
         "receipt_status",
         "兑换进度",
-        "Read this active receipt's status, snapshotted processing steps and completed IDs, queue position, support email, progress, and retry availability. Never reveals delivery results or credentials.",
+        "Read this active receipt's status, snapshotted processing steps, completed IDs, queue position, support email, progress, and retry availability. Batch receipts include safe card IDs, suffixes and each item's product parameter snapshot and job status for item-specific submission. Never reveals delivery results or credentials.",
         object(),
         async (_, signal) => {
           const receipt = await action("receipt", [], signal);
@@ -1178,11 +1223,52 @@
         readonly,
       );
       const redeemSchema = object(
-        { params: parameterInput(c.product), confirm: confirmed },
-        ["params", "confirm"],
+        {
+          params: c.batch ? batchParameters : parameterInput(c.product),
+          items: {
+            type: "array", minItems: 1, maxItems: 30,
+            items: object({ card_id: { ...id, maxLength: 80 }, params: batchParameters }, ["card_id", "params"]),
+          },
+          confirm: confirmed,
+        },
+        ["confirm"],
       );
       const submit = (retry) => async (input, signal) => {
+        if (own(input, "params") === own(input, "items"))
+          throw new ToolError("invalid_arguments", "Provide exactly one of single-code params or batch items.");
+        if (input.items && new Set(input.items.map((item) => item.card_id)).size !== input.items.length)
+          throw new ToolError("invalid_arguments", "Batch card IDs must be unique.");
         const receipt = await action("receipt", [], signal);
+        checkInvocation(signal);
+        if (receipt.batch) {
+          if (!input.items)
+            throw new ToolError("invalid_arguments", "Batch receipts require item-specific card IDs and parameters.");
+          if (!Array.isArray(receipt.items) || !receipt.items.length || receipt.items.length > 30 ||
+              !receipt.product?.id || receipt.product.id !== c.product.id ||
+              receipt.items.some((item) => item.product?.id !== receipt.product.id))
+            throw new ToolError("unavailable", "This batch receipt has inconsistent product scope.");
+          for (const item of input.items) {
+            const member = receipt.items.find((entry) => entry.card_id === item.card_id);
+            if (!member) throw new ToolError("forbidden", "This card is not part of the active receipt.");
+            if (retry ? !member.job?.can_retry : !!member.job)
+              throw new ToolError("invalid_state", retry
+                ? "A selected batch card is not eligible for resubmission."
+                : "A selected batch card already has a job; use retry when permitted.");
+            try {
+              validate({ type: "array", items: parameterSchema, maxItems: 30 }, member.product.parameters, "item.product.parameters");
+              if (new Set(member.product.parameters.map((field) => field.key)).size !== member.product.parameters.length)
+                throw new Error("Duplicate parameter keys");
+            } catch {
+              throw new ToolError("unavailable", "A batch card is missing a valid parameter snapshot.");
+            }
+            validateParameters(member.product, item.params);
+          }
+          const data = await action("redeem", [input.items], signal);
+          await refresh();
+          return data;
+        }
+        if (input.items)
+          throw new ToolError("invalid_arguments", "Single-code receipts require params rather than batch items.");
         if (retry ? !receipt.job?.can_retry : !!receipt.job)
           throw new ToolError(
             "invalid_state",
@@ -1198,7 +1284,7 @@
       add(
         "redemption_submit",
         "提交兑换",
-        "Submit the verified code's required details and create a delivery job. This consumes the code. Set confirm:true only after explicit authorization.",
+        "Submit params for one verified code, or items:[{card_id,params}] for up to 30 cards in the active batch receipt. Use receipt_status or product_parameters for each card's parameter snapshot; execution rechecks membership, same-product scope and every selected card before submitting any. This consumes the selected codes. Set confirm:true only after explicit authorization.",
         redeemSchema,
         submit(false),
         write,
@@ -1206,7 +1292,7 @@
       add(
         "redemption_retry",
         "重试兑换",
-        "Retry only an eligible failed redemption using updated parameters. May run fulfillment again; set confirm:true only after explicit authorization.",
+        "Resubmit only eligible failed or needs_input jobs using updated params, or item-specific params for selected batch cards. Every selected card must be eligible according to its fresh receipt status and own parameter snapshot. Failed retries may run fulfillment again; set confirm:true only after explicit authorization.",
         redeemSchema,
         submit(true),
         write,
@@ -1214,10 +1300,12 @@
       add(
         "receipt_reveal",
         "领取交付内容",
-        "Deliberately reveal delivery content to the agent and visible UI. Once-only delivery is consumed by opening; save it immediately. Explicit confirm:true is always required.",
+        "Deliberately reveal delivery content to the agent and visible UI. In a batch, select the desired card in the page first. Once-only delivery is consumed by opening; save it immediately. Explicit confirm:true is always required.",
         object({ confirm: confirmed }, ["confirm"]),
         async (_, signal) => {
-          const receipt = await action("receipt", [], signal);
+          const value = await action("receipt", [], signal);
+          checkInvocation(signal);
+          const receipt = selectedReceipt(value, c);
           if (
             receipt.job?.state !== "succeeded" ||
             receipt.job.delivery !== "content"
@@ -1235,10 +1323,12 @@
       add(
         "receipt_destroy",
         "永久销毁交付",
-        "Permanently delete this completed delivery and disable access through its receipt. Irreversible; explicit confirm:true is required.",
+        "Permanently delete this completed delivery and disable access through its receipt. In a batch, select the desired card in the page first; other cards are not destroyed. Irreversible; explicit confirm:true is required.",
         object({ confirm: confirmed }, ["confirm"]),
         async (_, signal) => {
-          const receipt = await action("receipt", [], signal);
+          const value = await action("receipt", [], signal);
+          checkInvocation(signal);
+          const receipt = selectedReceipt(value, c);
           if (!["succeeded", "destroyed"].includes(receipt.job?.state))
             throw new ToolError(
               "invalid_state",
@@ -1301,7 +1391,7 @@
             ((signal.auth?.permissions || []).includes("links.delegate") || row.link_id === signal.auth?.link_id)
           )).map((row) => project(row, [
             "id", "role", "link_id", "link_name", "product_id", "product_name", "created", "last_seen",
-            "expires", "revoked", "current", "active", "ip", "ua",
+            "expires", "revoked", "current", "active", "ip", "ua", "channel", "client_name", "device_id",
           ]));
         }, { ...readonly, ...authority() },
       );
@@ -1500,7 +1590,7 @@
               signal,
             );
             await updateUI();
-            return data;
+            return { ...data, management_link: safeLink(data.management_link, true) };
           },
           { ...write, ...privileged, disclose: ["management_link.url"] },
         );
@@ -1757,19 +1847,20 @@
         "商品管理链接列表",
         "List product-management link metadata without bearer tokens or private links. Delegated managers only see descendants of their own link.",
         object(),
-        (_, signal) => request(linksPath, undefined, "GET", signal),
+        async (_, signal) => (await request(linksPath, undefined, "GET", signal)).map((link) => safeLink(link)),
         { ...readonly, ...linksAuthority },
       );
       add(
         "staff_authorize",
         "创建商品管理链接",
-        "Create a product-management access link with explicit permissions. A delegated child must have a strictly smaller permission set and cannot outlive its parent. Deliberately returns a private link; explicit confirm:true is required.",
+        "Create a product-management access link with explicit permissions. Browser max_uses and CLI binding max_cli_uses are independent integer limits of 1–1000, each defaulting to 1. A delegated child must have strictly fewer permissions, cannot outlive its parent, and cannot exceed either parent login ceiling. Deliberately returns a private link; explicit confirm:true is required.",
         object(
           {
             product_id: id,
             name: string(100, 1),
             days: duration,
             max_uses: { ...integer(1, 1000), default: 1 },
+            max_cli_uses: { ...integer(1, 1000), default: 1 },
             permissions: permissionSchema,
             confirm: confirmed,
           },
@@ -1787,6 +1878,9 @@
             const parentMaxUses = signal.auth?.max_uses ?? 1;
             if (!Number.isSafeInteger(parentMaxUses) || parentMaxUses < 1 || (input.max_uses ?? 1) > parentMaxUses)
               throw new ToolError("forbidden", "A child management link cannot allow more logins than its parent.");
+            const parentMaxCLIUses = signal.auth?.max_cli_uses ?? 1;
+            if (!Number.isSafeInteger(parentMaxCLIUses) || parentMaxCLIUses < 1 || (input.max_cli_uses ?? 1) > parentMaxCLIUses)
+              throw new ToolError("forbidden", "A child management link cannot allow more CLI bindings than its parent.");
             if (
               input.permissions.length >= granted.length ||
               input.permissions.some((p) => !granted.includes(p))
@@ -1812,12 +1906,13 @@
               days: input.days,
               permissions: input.permissions,
               ...(own(input, "max_uses") ? { max_uses: input.max_uses } : {}),
+              ...(own(input, "max_cli_uses") ? { max_cli_uses: input.max_cli_uses } : {}),
             },
             "POST",
             signal,
           );
           await updateUI();
-          return data;
+          return safeLink(data, true);
         },
         { ...write, ...linksAuthority, disclose: ["url"] },
       );
@@ -1947,7 +2042,7 @@
         add(
           "jobs_list",
           "处理队列",
-          "List jobs with customer parameters and progress in the selected product queue. Default view:active returns only queued, processing and failed tasks, omitting succeeded and destroyed history to save context. Use view:processed for succeeded and destroyed tasks, or view:all for all history. An explicit state filter takes precedence over view. Staff can only see their authorized product. Delivery content and receipt credentials are omitted.",
+          "List jobs with customer parameters and progress in the selected product queue. Default view:active returns queued, processing, needs_input and failed tasks, omitting succeeded, rejected and destroyed history to save context. needs_input is waiting for the customer. Use view:processed for succeeded, rejected and destroyed tasks, or view:all for all history. An explicit state filter takes precedence over view. Staff can only see their authorized product. Delivery content and receipt credentials are omitted.",
           object(filters, ["product_id"]),
           (input, signal) => {
             assertQueue(input);
@@ -2112,6 +2207,17 @@
           ),
           batch("fail"),
           { ...write, ...authority("queue.process") },
+        );
+        for (const [operation, title, description] of [
+          ["request_changes", "请顾客补充信息", "Ask the customer to correct or add information for claimed jobs in the selected product queue. This moves them to needs_input and waits for customer resubmission. A meaningful reason of at most 1000 characters and explicit confirm:true are required."],
+          ["reject", "拒绝处理任务", "Reject claimed jobs in the selected product queue with an explanation visible to the customer. This is terminal and does not authorize another fulfillment attempt. A meaningful reason of at most 1000 characters and explicit confirm:true are required."],
+        ]) add(
+          "jobs_" + operation, title, description,
+          object({ product_id: id, ids, reason: { ...string(1000, 1), pattern: "\\S" }, confirm: confirmed }, ["product_id", "ids", "reason", "confirm"]),
+          async (input, signal) => {
+            const { reason, ...body } = input;
+            return batch(operation)({ ...body, message: reason }, signal);
+          }, { ...write, ...authority("queue.process") },
         );
       }
       if (can("queue.retry"))

@@ -66,6 +66,35 @@ def test_exact_job_id_can_find_completed_history(owner, queue_states, setup_prod
     assert listed(owner, foreign, job_id=records["succeeded"]) == {}
 
 
+def test_compact_queue_omits_customer_body_but_keeps_action_context(
+    owner, queue_states
+):
+    pid, records = queue_states
+    response = owner.get(
+        "/api/manage/jobs", params={"product_id": pid, "compact": "true"}
+    )
+    assert response.status_code == 200, response.text
+    rows = response.json()
+    assert {row["id"] for row in rows} == {
+        records[state] for state in ("queued", "processing", "failed")
+    }
+    for row in rows:
+        assert (
+            not {"params", "parameters", "outputs", "files", "content", "output"}
+            & row.keys()
+        )
+        assert row["product_id"] == pid
+        assert "claimed_by" in row and "attempt" in row
+        assert row["attachments"] == {
+            "input": {"count": 0, "bytes": 0},
+            "output": {"count": 0, "bytes": 0},
+        }
+    detail = owner.get(
+        "/api/manage/jobs", params={"product_id": pid, "job_id": records["queued"]}
+    ).json()[0]
+    assert detail["params"] and detail["parameters"]
+
+
 def test_view_validation_and_staff_scope_are_preserved(
     owner, queue_states, setup_product
 ):

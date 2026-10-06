@@ -6,12 +6,13 @@ const { File } = require("node:buffer");
 const source = fs.readFileSync(path.join(__dirname, "../extore/static/app.js"), "utf8").replace(/start\(\);\s*$/, "");
 const flush = async () => { for (let index = 0; index < 12; index++) await Promise.resolve(); };
 
-function appFixture() {
+function appFixture({ uploadLimit = 20 * 1024 * 1024 } = {}) {
   const nodes = new Map();
   const collections = new Map();
   const requests = [];
   const timers = new Map();
   const downloads = [];
+  const actions = [];
   let adapter;
   let timerId = 0;
   const node = (selector) => {
@@ -19,9 +20,15 @@ function appFixture() {
       innerHTML: "", textContent: "", value: "", style: {}, attributes: {},
       isConnected: true, checked: false, files: [], listeners: new Map(),
       addEventListener(event, callback) { this.listeners.set(event, callback); },
-      async emit(event, extra = {}) { return this.listeners.get(event)?.({ preventDefault() {}, target: this, ...extra }); },
+      async emit(event, extra = {}) {
+        const offset = actions.length;
+        const result = this.listeners.get(event)?.({ preventDefault() {}, target: this, ...extra });
+        await Promise.all([result, ...actions.slice(offset)]);
+      },
       setAttribute(name, value) { this.attributes[name] = value; },
       remove() { this.removed = true; },
+      focus() { this.focused = true; },
+      select() { this.selected = true; },
       reportValidity() { return true; },
       click() { downloads.push({ href: this.href, filename: this.download }); },
     });
@@ -62,6 +69,8 @@ function appFixture() {
     setTimeout(callback) { const id = ++timerId; timers.set(id, callback); return id; },
     clearTimeout(id) { timers.delete(id); },
     fetch(url, options) {
+      if (url === "/api/upload-limits" && uploadLimit !== null)
+        return Promise.resolve({ ok: true, json: async () => ({ max_file_bytes: uploadLimit }) });
       return new Promise((resolve, reject) => {
         const body = options.body instanceof FormData
           ? Object.fromEntries(options.body.entries())
@@ -75,6 +84,8 @@ function appFixture() {
     },
   });
   vm.runInContext(source, context);
+  const perform = context.perform;
+  context.perform = (...args) => { const result = perform(...args); actions.push(result); return result; };
   const set = (values) => {
     context.fixtureValues = values;
     for (const name of Object.keys(values)) vm.runInContext(`${name} = fixtureValues[${JSON.stringify(name)}]`, context);

@@ -15,6 +15,7 @@ from .security import authorize_management, card_digest, fail, session
 router = APIRouter()
 STATUSES = (
     "unused",
+    "needs_input",
     "queued",
     "processing",
     "succeeded",
@@ -23,10 +24,12 @@ STATUSES = (
     "destroyed",
     "revoked",
     "expired",
+    "rejected",
 )
 CardStatus = Literal[
     "",
     "unused",
+    "needs_input",
     "queued",
     "processing",
     "succeeded",
@@ -35,6 +38,7 @@ CardStatus = Literal[
     "destroyed",
     "revoked",
     "expired",
+    "rejected",
 ]
 
 
@@ -173,8 +177,12 @@ def ensure_card_usable(c, card):
     if card["state"] == "revoked":
         fail("卡密已撤销", 410)
     row = c.execute("SELECT state FROM jobs WHERE card_id=?", (card["id"],)).fetchone()
+    if card["state"] == "rejected" or (row and row["state"] == "rejected"):
+        fail("卡密已被拒绝，无法再次兑换", 410)
     # Expiry limits new work, never interrupts an accepted order or old receipt.
-    if (row is None or row["state"] == "failed") and card_expired(c, card["id"]):
+    if (row is None or row["state"] in ("failed", "needs_input")) and card_expired(
+        c, card["id"]
+    ):
         fail("卡密已过期，无法兑换或重试", 410)
 
 
@@ -190,6 +198,7 @@ WITH inventory AS (
  MAX(c.created,COALESCE(j.updated,c.created),COALESCE(m.first_verified,c.created)) AS updated,
  CASE
   WHEN c.state='revoked' THEN 'revoked'
+  WHEN c.state='rejected' OR j.state='rejected' THEN 'rejected'
   WHEN j.state='destroyed' THEN 'destroyed'
   WHEN j.state IN ('queued','processing','succeeded') THEN j.state
   WHEN j.state='failed' AND j.retryable=1
@@ -197,7 +206,8 @@ WITH inventory AS (
    AND j.attempt<COALESCE(json_extract(p.config,'$.max_attempts'),3)
    AND (m.expires IS NULL OR m.expires>:now) THEN 'failed_retryable'
   WHEN j.state='failed' THEN 'failed_terminal'
-  WHEN j.id IS NULL AND m.expires IS NOT NULL AND m.expires<=:now THEN 'expired'
+  WHEN (j.id IS NULL OR j.state='needs_input') AND m.expires IS NOT NULL AND m.expires<=:now THEN 'expired'
+  WHEN j.state='needs_input' THEN 'needs_input'
   ELSE 'unused'
  END AS status
  FROM cards c JOIN products p ON p.id=c.product_id
@@ -234,6 +244,7 @@ def _empty_summary():
         "in_progress": 0,
         "completed": 0,
         "failed": 0,
+        "rejected": 0,
         "states": dict.fromkeys(STATUSES, 0),
     }
 
@@ -241,7 +252,8 @@ def _empty_summary():
 def _summary(c, pid, now, variant_id=""):
     result = _empty_summary()
     for row in c.execute(
-        _INVENTORY + "SELECT status,COUNT(*) AS n,SUM(job_id IS NOT NULL) AS used,"
+        _INVENTORY + "SELECT status,COUNT(*) AS n,"
+        "SUM(job_id IS NOT NULL AND job_state!='needs_input') AS used,"
         "SUM(first_verified IS NOT NULL) AS verified,SUM(revealed!=0) AS viewed "
         "FROM inventory WHERE (:variant_id='' OR variant_id=:variant_id) GROUP BY status",
         {"product_id": pid, "now": now, "variant_id": variant_id},
@@ -252,11 +264,12 @@ def _summary(c, pid, now, variant_id=""):
             result[key] += row[key]
     counts = result["states"]
     result.update(
-        remaining=counts["unused"],
-        available=counts["unused"] + counts["failed_retryable"],
+        remaining=counts["unused"] + counts["needs_input"],
+        available=counts["unused"] + counts["needs_input"] + counts["failed_retryable"],
         in_progress=counts["queued"] + counts["processing"],
         completed=counts["succeeded"] + counts["destroyed"],
         failed=counts["failed_retryable"] + counts["failed_terminal"],
+        rejected=counts["rejected"],
     )
     return result
 
@@ -451,6 +464,8 @@ def _history(c, s, cid, pid):
                 "processing",
                 "succeeded",
                 "failed",
+                "needs_input",
+                "rejected",
                 "destroyed",
             ):
                 item["state"] = data["state"]
