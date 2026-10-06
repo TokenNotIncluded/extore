@@ -4,6 +4,7 @@ import os
 import secrets
 import time
 import uuid
+from importlib import metadata
 
 from argon2 import PasswordHasher
 
@@ -14,13 +15,75 @@ from .security import digest, token
 from .service import issue_cards
 
 
-def main():
-    parser = argparse.ArgumentParser(description="Extore server administration")
+class VersionAction(argparse.Action):
+    def __call__(self, parser, namespace, values, option_string=None):
+        try:
+            value = metadata.version("extore")
+        except metadata.PackageNotFoundError:
+            parser.error("Extore package metadata is unavailable; install the project")
+        print(f"extore {value}")
+        parser.exit()
+
+
+def port_number(value):
+    try:
+        port = int(value)
+    except ValueError:
+        raise argparse.ArgumentTypeError(
+            "port must be an integer from 1 to 65535"
+        ) from None
+    if not 1 <= port <= 65535:
+        raise argparse.ArgumentTypeError("port must be an integer from 1 to 65535")
+    return port
+
+
+def host_name(value):
+    if not value or any(character.isspace() for character in value):
+        raise argparse.ArgumentTypeError("host must be a non-empty address or hostname")
+    return value
+
+
+def add_version(parser):
     parser.add_argument(
-        "command",
-        choices=["init", "bootstrap", "reset-auth", "integration-key", "demo"],
+        "--version",
+        action=VersionAction,
+        nargs=0,
+        help="show installed package version",
     )
-    args = parser.parse_args()
+
+
+def main(argv=None):
+    parser = argparse.ArgumentParser(
+        prog="extore", description="Extore server and administration"
+    )
+    add_version(parser)
+    commands = parser.add_subparsers(dest="command", required=True)
+    descriptions = {
+        "init": "set the first login password interactively",
+        "bootstrap": "write a generated first login password to the data directory",
+        "reset-auth": "recover authentication through server access",
+        "integration-key": "generate or rotate the platform card-issuance key",
+        "demo": "create a local demonstration product in an empty database",
+        "serve": "run the API server in the foreground",
+        "worker": "run the fulfillment worker in the foreground",
+    }
+    for command, description in descriptions.items():
+        subparser = commands.add_parser(
+            command, help=description, description=description
+        )
+        add_version(subparser)
+        if command == "serve":
+            subparser.add_argument("--host", type=host_name, default="127.0.0.1")
+            subparser.add_argument("--port", type=port_number, default=8000)
+    args = parser.parse_args(argv)
+    if args.command == "serve":
+        import uvicorn
+
+        return uvicorn.run("extore.app:app", host=args.host, port=args.port)
+    if args.command == "worker":
+        from .worker import main as worker_main
+
+        return worker_main()
     init()
     if args.command in ("init", "bootstrap", "reset-auth"):
         with db() as c:

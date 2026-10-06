@@ -4,6 +4,7 @@
 
 Extore 面向一个商家，负责卡密验证、信息收集、任务处理与交付。支付和支付订单管理由另一平台承担，通过制卡接口、Webhook 和签名回调对接。
 
+- [从 PyPI 安装](#从-pypi-安装)
 - [本地运行](#本地运行)
 - [显示偏好](#显示偏好)
 - [基本流程](#基本流程)
@@ -13,11 +14,34 @@ Extore 面向一个商家，负责卡密验证、信息收集、任务处理与�
 - [生产运行](#生产运行)
 - [Arch Linux 原生部署](#arch-linux-原生部署)
 
-下文命令均在项目根目录运行。首次密码、平台制卡密钥、卡密、管理链接和领取链接属于凭证，请勿提交到 Git 或公开反馈中。
+首次密码、平台制卡密钥、卡密、管理链接和领取链接属于凭证，请勿提交到 Git 或公开反馈中。
+
+## 从 PyPI 安装
+
+需要 Linux、Python 3.12+ 和 [uv](https://docs.astral.sh/uv/)。安装包已包含网页、Python SDK 与固定版本的官方处理器，无需另行克隆 Git 子模块：
+
+```sh
+uv tool install extore
+export EXTORE_DATA="$HOME/.local/share/extore"
+extore init
+extore serve
+```
+
+另一个终端设置相同的 `EXTORE_DATA` 后执行 `extore worker`。默认网站地址为 `http://localhost:8000`；`extore serve --host 127.0.0.1 --port 8000` 可显式指定监听地址，更换端口或域名时需同步设置 `EXTORE_ORIGIN`。API 与 worker 在前台独立运行，生产环境应交给进程管理器。
+
+`extore --help` 列出全部命令，`extore --version` 输出安装版本。命令包括 `init`、`bootstrap`、`reset-auth`、`integration-key`、`demo`、`serve`、`worker`；原有 `python -m extore.cli` 管理命令和 `python -m extore.worker` 保持兼容。查看帮助、版本或输入无效参数不会初始化数据库。
+
+从源码构建发行包：
+
+```sh
+uv build -q
+```
 
 ## 本地运行
 
 需要 Python 3.12+、[uv](https://docs.astral.sh/uv/) 和 Linux（worker 使用文件锁与进程组）。
+
+以下源码运行命令在项目根目录执行。
 
 ```sh
 git clone --recurse-submodules https://github.com/TokenNotIncluded/extore.git

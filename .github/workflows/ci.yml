@@ -28,3 +28,5 @@ jobs:
       - run: node --test tests/*.test.cjs
       - run: uv run pytest -q processors/official/tests
       - run: uv build
+      - run: uv run extore --help
+      - run: uv run extore --version
