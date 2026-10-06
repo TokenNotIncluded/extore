@@ -5,6 +5,7 @@ CLI key; a stolen short-lived read token cannot authorize a JSON mutation.
 """
 
 import argparse
+import getpass
 import hashlib
 import json
 import math
@@ -28,6 +29,7 @@ from cryptography.hazmat.primitives.serialization import (
 
 from . import manage_client as remote
 from . import manage_commands as business
+from . import shop_commands
 from .manage_client import (
     ManageClient,
     ManageError,
@@ -75,6 +77,9 @@ def _safe_owner(owner):
             "expires",
             "role",
             "scope",
+            "shop_id",
+            "shop_name",
+            "superadmin",
         )
         if key in owner
     }
@@ -86,6 +91,36 @@ def _sign(owner, *parts):
         return _b64(key.sign("\n".join(parts).encode()))
     except (ValueError, KeyError, TypeError):
         raise ManageError("Invalid owner device key", code="invalid_profile") from None
+
+
+def _authority(owner, response, *, binding=False, merchant=False):
+    """Freeze the tenant identity; two admin roles never imply the same authority."""
+    if (
+        response.get("role") != "admin"
+        or response.get("scope") != OWNER_SCOPE
+        or "shop_id" not in response
+        or type(response.get("superadmin")) is not bool
+        or response["superadmin"] != (response["shop_id"] is None)
+        or response["shop_id"] is not None
+        and (not isinstance(response["shop_id"], str) or not response["shop_id"])
+        or merchant
+        and response["shop_id"] is None
+    ):
+        raise ManageError("Invalid owner tenant identity", code="invalid_response")
+    if "shop_id" in owner:
+        if response["shop_id"] != owner["shop_id"]:
+            raise ManageError(
+                "The server changed the authorized shop", code="invalid_response"
+            )
+    elif not binding and response["shop_id"] is not None:
+        # Profiles created before multiple shops existed can only migrate to
+        # their original platform-root identity, never to a merchant account.
+        raise ManageError(
+            "Legacy owner profile returned a different shop", code="invalid_response"
+        )
+    owner.update({key: response[key] for key in ("shop_id", "superadmin")})
+    if isinstance(response.get("shop_name"), str):
+        owner["shop_name"] = response["shop_name"]
 
 
 class OwnerClient(ManageClient):
@@ -246,6 +281,7 @@ class OwnerClient(ManageClient):
             or not math.isfinite(response["expires"])
         ):
             raise ManageError("Invalid owner session scope", code="invalid_response")
+        _authority(owner, response)
         owner.update(
             {
                 key: response[key]
@@ -284,6 +320,8 @@ class OwnerClient(ManageClient):
                 raise ManageError(
                     "Invalid owner authorization scope", code="invalid_response"
                 )
+            _authority(owner, result)
+            self.persist()
         if grant is not owner:
             grant.update(owner)
         return grant
@@ -302,6 +340,9 @@ class OwnerClient(ManageClient):
             return self._json(owner["origin"], method, path, grant=owner, **kwargs)
 
     def grant(self, *, product, origin=None, grant_id=None, permissions=()):
+        active = getattr(self, "active_owner", None)
+        if grant_id is None and active and origin in (None, active["origin"]):
+            grant_id = active.get("device_id")
         owner = self._select(origin, grant_id)
         self.session(owner)
         return {
@@ -310,15 +351,30 @@ class OwnerClient(ManageClient):
             "permissions": list(business.PERMISSIONS),
         }
 
-    def login(self, origin, client_name, *, wait=0, open_browser=False):
+    def login(
+        self,
+        origin,
+        client_name,
+        *,
+        wait=0,
+        open_browser=False,
+        email=None,
+        credentials=None,
+    ):
         name = client_name.strip()
         if not name or len(name) > 100 or any(ord(char) < 32 for char in name):
             raise ManageError(
                 "Use a printable device name of at most 100 characters",
                 code="invalid_input",
             )
+        email = email.strip().casefold() if email else None
         existing = next(
-            (item for item in self.data["owners"] if item["origin"] == origin), None
+            (
+                item
+                for item in self.data["owners"]
+                if item["origin"] == origin and item.get("login_email") == email
+            ),
+            None,
         )
         if existing and existing.get("device_id"):
             try:
@@ -370,28 +426,34 @@ class OwnerClient(ManageClient):
                 "nonce": _b64(secrets.token_bytes(32)),
                 "client_name": name,
             }
+            if email:
+                owner["login_email"] = email
             self.data["owners"].append(owner)
         # The same nonce and key recover a response lost after request creation.
         self.persist()
         if not owner.get("request_id"):
+            request_body = {
+                "public_key": owner["public_key"],
+                "client_name": owner["client_name"],
+                "nonce": owner["nonce"],
+            }
+            proof = [origin, owner["public_key"], owner["client_name"], owner["nonce"]]
+            if email:
+                request_body["target_email"] = email
+                proof.append(email)
+            request_body["signature"] = _sign(
+                owner,
+                "extore-cli-owner-request-v2"
+                if email
+                else "extore-cli-owner-request-v1",
+                *proof,
+            )
             result = _object(
                 self._json(
                     origin,
                     "POST",
                     OWNER_PREFIX + "/request",
-                    json={
-                        "public_key": owner["public_key"],
-                        "client_name": owner["client_name"],
-                        "nonce": owner["nonce"],
-                        "signature": _sign(
-                            owner,
-                            "extore-cli-owner-request-v1",
-                            origin,
-                            owner["public_key"],
-                            owner["client_name"],
-                            owner["nonce"],
-                        ),
-                    },
+                    json=request_body,
                 )
             )
             if not all(
@@ -422,6 +484,9 @@ class OwnerClient(ManageClient):
                 }
             )
             self.persist()
+        if email:
+            self.password_approve(owner, credentials)
+            return self.approval_status(owner)
         if open_browser:
             webbrowser.open(owner["approval_url"])
         deadline = time.monotonic() + wait
@@ -430,6 +495,61 @@ class OwnerClient(ManageClient):
             if status["status"] != "pending" or time.monotonic() >= deadline:
                 return status
             time.sleep(min(5, max(0, deadline - time.monotonic())))
+
+    def password_approve(self, owner, credentials):
+        if not isinstance(credentials, dict) or set(credentials) - {
+            "password",
+            "code",
+            "backup_code",
+        }:
+            raise ManageError(
+                "Provide password and optional second-factor credentials privately",
+                code="invalid_input",
+            )
+        if (
+            not isinstance(credentials.get("password"), str)
+            or not 1 <= len(credentials["password"]) <= 200
+        ):
+            raise ManageError(
+                "Password must be supplied privately", code="invalid_input"
+            )
+        body = {
+            "request_id": owner["request_id"],
+            "device_code": owner["device_code"],
+            "email": owner["login_email"],
+            **credentials,
+        }
+        options = _object(
+            self._json(
+                owner["origin"],
+                "POST",
+                "/api/auth/cli-owner/password-options",
+                json=body,
+                headers={"Origin": owner["origin"]},
+            )
+        )
+        _authority(owner, options, binding=True, merchant=True)
+        proof = options.get("approval_token")
+        if not isinstance(proof, str) or not proof:
+            raise ManageError(
+                "Invalid password approval proof", code="invalid_response"
+            )
+        self.persist()
+        approved = _object(
+            self._json(
+                owner["origin"],
+                "POST",
+                "/api/auth/cli-owner/password-approve",
+                json={
+                    "request_id": owner["request_id"],
+                    "device_code": owner["device_code"],
+                    "approval_token": proof,
+                },
+                headers={"Origin": owner["origin"]},
+            )
+        )
+        _authority(owner, approved)
+        self.persist()
 
     def approval_status(self, owner):
         if owner.get("device_id"):
@@ -460,6 +580,8 @@ class OwnerClient(ManageClient):
         )
         state = result.get("status")
         if state == "approved":
+            _authority(owner, result, binding=True)
+            self.persist()
             claim = _object(
                 self._json(
                     origin,
@@ -487,6 +609,7 @@ class OwnerClient(ManageClient):
                 raise ManageError(
                     "Invalid owner device binding", code="invalid_response"
                 )
+            _authority(owner, claim, binding=True)
             owner.update(
                 {
                     "id": claim["device_id"],
@@ -541,6 +664,26 @@ def add_parser(commands):
         "--wait", type=int, default=0, help="poll approval for at most 600 seconds"
     )
     login.add_argument("--open-browser", action="store_true")
+    login.add_argument(
+        "--email",
+        help="merchant email; approve this device with private password and optional TOTP",
+    )
+    credentials = login.add_mutually_exclusive_group()
+    credentials.add_argument(
+        "--credentials-file",
+        type=Path,
+        help="mode-600 JSON containing password and optional code/backup_code",
+    )
+    credentials.add_argument(
+        "--credentials-stdin",
+        action="store_true",
+        help="read password and optional second factor from private JSON stdin",
+    )
+    login.add_argument(
+        "--use-backup-code",
+        action="store_true",
+        help="ask privately for a recovery code instead of a TOTP",
+    )
     for name in ("login-status", "status", "logout", "storage"):
         command = sub.add_parser(name)
         _scope(command)
@@ -650,6 +793,7 @@ def add_parser(commands):
         _scope(parser)
         if operation == "revoke":
             parser.add_argument("id")
+    shop_commands.add_commands(sub)
     return admin
 
 
@@ -700,6 +844,10 @@ def _secret_output(args, prefix, callback):
 
 
 _API_ROUTES = (
+    ("GET", r"/api/admin/maintenance"),
+    ("PUT", r"/api/admin/maintenance/policy"),
+    ("POST", r"/api/admin/maintenance/cleanup"),
+    ("POST", r"/api/manage/links/cleanup"),
     ("GET", r"/api/admin/products"),
     ("POST", r"/api/admin/products(?:/quick)?"),
     ("PUT", r"/api/admin/products/[A-Za-z0-9_-]+"),
@@ -726,6 +874,29 @@ _API_ROUTES = (
     ("POST", r"/api/auth/register/(?:options|verify)"),
     ("GET", r"/api/admin/cli-owner-devices"),
     ("DELETE", r"/api/admin/cli-owner-devices/[A-Za-z0-9_-]+"),
+    ("GET", r"/api/platform/(?:settings|shops)"),
+    ("PUT", r"/api/platform/settings"),
+    ("POST", r"/api/platform/shops(?:/[A-Za-z0-9_-]+/invite)?"),
+    ("PATCH", r"/api/platform/shops/[A-Za-z0-9_-]+"),
+    ("GET", r"/api/shop/account"),
+    ("PATCH", r"/api/shop/account"),
+    (
+        "POST",
+        r"/api/auth/(?:reauth/password|password/change|totp/(?:setup|confirm|disable|backup-codes))",
+    ),
+    (
+        "GET",
+        r"/api/admin/processor-profiles(?:/[A-Za-z0-9_-]+|/bindings/[A-Za-z0-9_-]+)?",
+    ),
+    ("POST", r"/api/admin/processor-profiles"),
+    (
+        "PUT",
+        r"/api/admin/processor-profiles/(?:[A-Za-z0-9_-]+|bindings/[A-Za-z0-9_-]+)",
+    ),
+    (
+        "DELETE",
+        r"/api/admin/processor-profiles/(?:[A-Za-z0-9_-]+|bindings/[A-Za-z0-9_-]+)",
+    ),
 )
 
 
@@ -753,7 +924,24 @@ def _api(client, owner, args):
                 "Queries use unique KEY=VALUE entries", code="invalid_input"
             )
         query[key] = value
-    body = business.read_json(args)
+    if args.path.startswith("/api/platform/"):
+        shop_commands._require_identity(owner, platform=True)
+    elif args.path.startswith(
+        (
+            "/api/shop/",
+            "/api/auth/totp/",
+            "/api/auth/reauth/",
+            "/api/auth/password/change",
+        )
+    ):
+        shop_commands._require_identity(owner)
+    private_input = args.method in WRITE_METHODS and (
+        args.path == "/api/platform/settings"
+        or args.path.startswith(("/api/auth/", shop_commands.PROFILE_PREFIX))
+    )
+    body = (
+        shop_commands.private_json(args) if private_input else business.read_json(args)
+    )
     if args.product:
         if (
             query.get("product_id", args.product) != args.product
@@ -795,6 +983,16 @@ def _api(client, owner, args):
         "/api/manage/cards",
         "/api/manage/links",
     )
+    secret = secret or (args.method, args.path) in shop_commands.SECRET_RESPONSES
+    if args.path.startswith(shop_commands.PROFILE_PREFIX):
+        if query.get("shop_id"):
+            shop_commands._profile_shop(owner, query["shop_id"])
+        if body and body.get("shop_id"):
+            shop_commands._profile_shop(owner, body["shop_id"])
+        value = shop_commands.profile_metadata(
+            _owner_request(client, owner, args.method, args.path, **kwargs)
+        )
+        return business._finish(args, {"ok": True, "result": value})
     if secret or args.output:
         return _secret_output(
             args,
@@ -813,8 +1011,50 @@ def dispatch(client, args):
             raise ManageError(
                 "--wait must be between 0 and 600 seconds", code="invalid_input"
             )
+        credentials = None
+        if args.email is not None:
+            if not args.email.strip() or "@" not in args.email:
+                raise ManageError(
+                    "Provide a valid merchant email", code="invalid_input"
+                )
+            if args.open_browser:
+                raise ManageError(
+                    "Email device approval stays in the CLI", code="invalid_input"
+                )
+            if args.credentials_file or args.credentials_stdin:
+                credentials = shop_commands.private_json(
+                    argparse.Namespace(
+                        json_file=args.credentials_file,
+                        json_stdin=args.credentials_stdin,
+                    )
+                )
+            else:
+                if not sys.stdin.isatty():
+                    raise ManageError(
+                        "Noninteractive login requires --credentials-stdin or a mode-600 --credentials-file",
+                        code="invalid_input",
+                    )
+                credentials = {"password": getpass.getpass("Password: ")}
+                second = getpass.getpass(
+                    "Recovery code: "
+                    if args.use_backup_code
+                    else "TOTP code (Enter if not enabled): "
+                )
+                if second:
+                    credentials["backup_code" if args.use_backup_code else "code"] = (
+                        second
+                    )
+        elif args.credentials_file or args.credentials_stdin or args.use_backup_code:
+            raise ManageError(
+                "Private password input requires --email", code="invalid_input"
+            )
         return client.login(
-            origin, args.client_name, wait=args.wait, open_browser=args.open_browser
+            origin,
+            args.client_name,
+            wait=args.wait,
+            open_browser=args.open_browser,
+            email=args.email,
+            credentials=credentials,
         )
     if command == "login-status":
         return client.approval_status(
@@ -845,6 +1085,10 @@ def dispatch(client, args):
         return {"ok": True, "removed": removed}
     owner = client._select(origin, getattr(args, "grant", None))
     client.session(owner)
+    client.active_owner = owner
+    if command in shop_commands.COMMANDS:
+        client.session(owner, refresh_scope=True)
+        return shop_commands.dispatch(client, owner, args)
     if command == "status":
         client.session(owner, refresh_scope=True)
         return {"ok": True, "owner": _safe_owner(owner)}
@@ -952,6 +1196,7 @@ def dispatch(client, args):
             return _secret_output(args, "products", lambda: items)
         fields = (
             "id",
+            "shop_id",
             "name",
             "mode",
             "delivery",

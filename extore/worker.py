@@ -15,14 +15,22 @@ from fastapi import HTTPException
 
 from .config import DATA
 from .db import db, init
-from .models import JobUpdate
+from .models import JobUpdate, ProgressStep
 from .processors import normalize_product
 from .security import sign, token
-from .service import apply_update, job, product, progress_view
+from .service import apply_update, bootstrap_progress_plan, job, product, progress_view
 from .variants import card_variant, default_variant
 
 
 async def deliver_event(row):
+    if row.get("id"):
+        with db() as c:
+            enabled = c.execute(
+                "SELECT shops.enabled FROM events JOIN products ON products.id=events.product_id JOIN shops ON shops.id=products.shop_id WHERE events.id=?",
+                (row["id"],),
+            ).fetchone()
+            if enabled is None or not enabled["enabled"]:
+                raise ValueError("店铺已停用，不能发起处理")
     u = urlsplit(row["url"])
     # Pin the validated IP, retaining original Host and TLS SNI; no DNS rebinding.
     answers = await asyncio.to_thread(
@@ -71,6 +79,16 @@ async def outbox_once():
             return False
         row = dict(row)
         payload = json.loads(row["payload"])
+        shop = c.execute(
+            "SELECT shops.enabled FROM products JOIN shops ON shops.id=products.shop_id WHERE products.id=?",
+            (payload["product_id"],),
+        ).fetchone()
+        if shop is None or not shop["enabled"]:
+            c.execute(
+                "UPDATE outbox SET state='cancelled',finished_at=? WHERE id=?",
+                (time.time(), row["id"]),
+            )
+            return True
         if payload["type"] == "redemption.requested":
             r = c.execute(
                 "SELECT state,attempt FROM jobs WHERE id=?", (payload["data"]["id"],)
@@ -81,15 +99,16 @@ async def outbox_once():
                 or r["attempt"] != payload["data"]["attempt"]
             ):
                 c.execute(
-                    "UPDATE outbox SET state='cancelled' WHERE id=?", (row["id"],)
+                    "UPDATE outbox SET state='cancelled',finished_at=? WHERE id=?",
+                    (time.time(), row["id"]),
                 )
                 return True
     try:
         await deliver_event(row)
         with db() as c:
             c.execute(
-                "UPDATE outbox SET state='delivered',attempts=attempts+1,error='' WHERE id=?",
-                (row["id"],),
+                "UPDATE outbox SET state='delivered',attempts=attempts+1,error='',finished_at=? WHERE id=?",
+                (time.time(), row["id"]),
             )
     except Exception as exc:
         attempts = row["attempts"] + 1
@@ -97,12 +116,13 @@ async def outbox_once():
         error = str(exc) if isinstance(exc, ValueError) else type(exc).__name__
         with db() as c:
             c.execute(
-                "UPDATE outbox SET state=?,attempts=?,due=?,error=? WHERE id=?",
+                "UPDATE outbox SET state=?,attempts=?,due=?,error=?,finished_at=? WHERE id=?",
                 (
                     "dead" if attempts >= 8 else "pending",
                     attempts,
                     time.time() + min(3600, 2**attempts * 5),
                     error,
+                    time.time() if attempts >= 8 else None,
                     row["id"],
                 ),
             )
@@ -113,8 +133,26 @@ async def execute_script(row, p):
     # A product selects a catalog ID, never an arbitrary executable or filename.
     import extore_processors
 
-    p = normalize_product(p, allow_incomplete=False)
+    p = normalize_product(p)
     row = dict(row)
+    # Trust the database's issuance binding, never caller/customer metadata or
+    # the product's current account selection for an already-issued card.
+    from .processor_profiles import runtime_configuration
+
+    with db() as c:
+        trusted_job = job(c, row["id"])
+        if (
+            trusted_job["product_id"] != row["product_id"]
+            or trusted_job["attempt"] != row["attempt"]
+            or trusted_job["state"] != "processing"
+        ):
+            raise ValueError("处理任务已失效")
+        configuration, shop_context = runtime_configuration(
+            c, trusted_job, p["processor_id"]
+        )
+        row["params"] = trusted_job["params"]
+    p = {**p, "processor_config": configuration}
+    row["shop_context"] = shop_context
     # Freeze trusted issuance metadata separately from all customer parameters.
     if "variant" not in row:
         if row.get("card_id"):
@@ -161,8 +199,9 @@ async def _execute_processor(row, p, scratch, processor_package):
         "params": json.loads(row["params"]),
         "configuration": p["processor_config"],
         "variant": row["variant"],
-        "steps": row["steps"],
+        "steps": [{"id": step["id"], "label": step["label"]} for step in row["steps"]],
         "completed_steps": row.get("completed_steps", []),
+        "shop_context": row["shop_context"],
     }
     result = None
     total = 0
@@ -184,6 +223,26 @@ async def _execute_processor(row, p, scratch, processor_package):
                 raise ValueError("结果后不能继续输出")
             if value.get("kind") == "progress":
                 with db() as c:
+                    current = job(c, row["id"])
+                    if (
+                        current["attempt"] != row["attempt"]
+                        or current["state"] != "processing"
+                    ):
+                        raise ValueError("处理任务已失效")
+                    if "progress_steps" in value:
+                        raw_steps = value["progress_steps"]
+                        if (
+                            not isinstance(raw_steps, list)
+                            or not 1 <= len(raw_steps) <= 30
+                        ):
+                            raise ValueError("处理步骤数量无效")
+                        steps = [
+                            ProgressStep.model_validate(step).model_dump()
+                            for step in raw_steps
+                        ]
+                        if len({step["id"] for step in steps}) != len(steps):
+                            raise ValueError("处理步骤代码不能重复")
+                        bootstrap_progress_plan(c, current, steps)
                     apply_update(
                         c,
                         row["id"],
@@ -234,7 +293,7 @@ async def job_once():
                 ),
             )
         rows = c.execute(
-            "SELECT jobs.* FROM jobs JOIN products ON products.id=jobs.product_id WHERE jobs.state='queued' AND json_extract(products.config,'$.mode') IN ('script','webhook') ORDER BY jobs.created,jobs.id LIMIT 100"
+            "SELECT jobs.* FROM jobs JOIN products ON products.id=jobs.product_id JOIN shops ON shops.id=products.shop_id WHERE shops.enabled=1 AND jobs.state='queued' AND json_extract(products.config,'$.mode') IN ('script','webhook') ORDER BY jobs.created,jobs.id LIMIT 100"
         ).fetchall()
         selected = None
         for r in rows:
@@ -313,6 +372,7 @@ async def loop():
             await asyncio.sleep(0.1 if busy else 1)
 
     async def maintenance():
+        from .maintenance import maintenance_once as record_maintenance_once
         from .storage import maintenance_once
 
         while True:
@@ -320,9 +380,17 @@ async def loop():
                 await asyncio.to_thread(maintenance_once)
             except Exception as exc:
                 print("Storage maintenance error:", type(exc).__name__, flush=True)
+            try:
+                await asyncio.to_thread(record_maintenance_once)
+            except Exception as exc:
+                print("Record maintenance error:", type(exc).__name__, flush=True)
             await asyncio.sleep(60)
 
-    await asyncio.gather(pump(job_once), pump(outbox_once), maintenance())
+    from .mail import process_outbox_once
+
+    await asyncio.gather(
+        pump(job_once), pump(outbox_once), pump(process_outbox_once), maintenance()
+    )
 
 
 def main():

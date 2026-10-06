@@ -309,10 +309,13 @@ def test_invalid_authorization_after_parsing_cannot_leave_spooled_data(
     assert not list((DATA / "upload-tmp").iterdir())
 
 
-def test_cancelled_request_closes_spooled_data_and_releases_quota(monkeypatch):
+def test_cancelled_request_closes_spooled_data_and_releases_quota(owner, monkeypatch):
+    receipt = token(owner, product(owner))
     spools = record_spools(monkeypatch)
     boundary = "cancel-upload"
     opening = (
+        f'--{boundary}\r\nContent-Disposition: form-data; name="token"\r\n\r\n{receipt}\r\n'
+        f'--{boundary}\r\nContent-Disposition: form-data; name="field_key"\r\n\r\nsource\r\n'
         f'--{boundary}\r\nContent-Disposition: form-data; name="file"; filename="a"\r\n\r\n'
     ).encode() + b"x" * (2 * files.CHUNK_BYTES)
     calls = 0
@@ -417,6 +420,8 @@ def test_public_limits_do_not_disclose_disk_usage_or_global_capacity(client):
     "values",
     [
         {"EXTORE_UPLOAD_TOTAL_BYTES": "0"},
+        {"EXTORE_UPLOAD_SHOP_BYTES": "0"},
+        {"EXTORE_UPLOAD_SHOP_BYTES": str(2**63)},
         {"EXTORE_UPLOAD_FILE_BYTES": "-1"},
         {"EXTORE_UPLOAD_JOB_BYTES": "not-a-number"},
         {"EXTORE_UPLOAD_FILE_BYTES": str(21 * 1024 * 1024)},

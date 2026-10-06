@@ -998,13 +998,13 @@ def test_fulfillment_configuration_is_fully_validated_before_writing(owner, chan
 
 
 @pytest.mark.parametrize("processor_id,private_config", PROCESSOR_CONFIGS)
-def test_product_editor_preserves_masked_official_processor_configuration(
+def test_product_editor_preserves_encrypted_processor_configuration(
     owner, processor_id, private_config
 ):
     response = owner.post(
         "/api/admin/products",
         json={
-            "name": "官方处理器商品",
+            "name": "商品处理器商品",
             "mode": "script",
             "processor_id": processor_id,
             "processor_config": private_config,
@@ -1036,7 +1036,26 @@ def test_product_editor_preserves_masked_official_processor_configuration(
         stored = json.loads(
             c.execute("SELECT config FROM products WHERE id=?", (pid,)).fetchone()[0]
         )
-    assert stored["processor_config"] == private_config
+        bound = dict(
+            c.execute(
+                "SELECT * FROM processor_product_bindings WHERE product_id=?", (pid,)
+            ).fetchone()
+        )
+        revision = c.execute(
+            "SELECT ciphertext FROM processor_profile_revisions WHERE profile_id=? AND revision=?",
+            (bound["profile_id"], bound["revision"]),
+        ).fetchone()[0]
+        card = c.execute(
+            "SELECT id FROM cards WHERE product_id=? LIMIT 1", (pid,)
+        ).fetchone()[0]
+        from extore.processor_profiles import runtime_configuration
+
+        configuration, _ = runtime_configuration(
+            c, {"product_id": pid, "card_id": card}, processor_id
+        )
+        assert configuration == private_config
+    assert stored["processor_config"] == {}
+    assert all(value not in revision for value in private_config.values())
     assert stored["processor_id"] == processor_id
     changed_config = (
         {
@@ -1073,20 +1092,32 @@ def test_product_editor_preserves_masked_official_processor_configuration(
     login_link(owner, manager)
     response = owner.get("/api/manage/product")
     assert response.status_code == 200, response.text
-    assert response.json()["processor_config"] == private_config
+    assert response.json()["processor_config"] == {}
+    assert all(value not in response.text for value in private_config.values())
+    before = snapshot(
+        "products", "audit", "processor_product_bindings", "processor_profile_revisions"
+    )
     response = owner.put(
         "/api/manage/product",
         json={**response.json(), "processor_config": changed_config},
     )
-    assert response.status_code == 200, response.text
-    assert response.json()["processor_config"] == changed_config
+    assert response.status_code == 403, response.text
+    assert (
+        snapshot(
+            "products",
+            "audit",
+            "processor_product_bindings",
+            "processor_profile_revisions",
+        )
+        == before
+    )
 
 
 @pytest.mark.parametrize("processor_id,private_config", PROCESSOR_CONFIGS)
-def test_full_manager_selects_approved_processor_and_cannot_change_it_after_issuing_cards(
+def test_full_manager_cannot_select_processor_accounts_and_owner_freezes_issued_processor(
     owner, processor_id, private_config
 ):
-    response = owner.post("/api/admin/products", json={"name": "待选择官方处理器"})
+    response = owner.post("/api/admin/products", json={"name": "待选择商品处理器"})
     assert response.status_code == 200, response.text
     pid = response.json()["id"]
     manager = create_link(owner, pid, sorted(ALL_PERMISSIONS))
@@ -1101,28 +1132,29 @@ def test_full_manager_selects_approved_processor_and_cannot_change_it_after_issu
         if key
         not in ("parameters", "outputs", "variants", "progress_steps", "support_email")
     }
+    processor_config = {
+        **config,
+        "mode": "script",
+        "processor_id": processor_id,
+        "processor_config": private_config,
+    }
+    before = snapshot("products", "audit", "processor_product_bindings")
     response = owner.put(
         "/api/manage/product",
-        json={
-            **config,
-            "mode": "script",
-            "processor_id": processor_id,
-            "processor_config": private_config,
-        },
+        json=processor_config,
     )
+    assert response.status_code == 403, response.text
+    assert snapshot("products", "audit", "processor_product_bindings") == before
+    as_owner(owner)
+    response = owner.put("/api/admin/products/" + pid, json=processor_config)
     assert response.status_code == 200, response.text
     config = response.json()
     assert config["script"] == ""
-    assert (
-        config["processor_id"] == processor_id
-        and config["processor_config"] == private_config
-    )
+    assert config["processor_id"] == processor_id and config["processor_config"] == {}
     assert config["parameters"] == specifications[processor_id]["parameters"]
     assert config["outputs"] == specifications[processor_id]["outputs"]
     assert (
-        owner.post(
-            "/api/manage/cards", json={"product_id": pid, "count": 1}
-        ).status_code
+        owner.post("/api/admin/cards", json={"product_id": pid, "count": 1}).status_code
         == 200
     )
     other_id, other_config = next(
@@ -1130,7 +1162,7 @@ def test_full_manager_selects_approved_processor_and_cannot_change_it_after_issu
     )
     before = snapshot("products", "audit")
     response = owner.put(
-        "/api/manage/product",
+        "/api/admin/products/" + pid,
         json={
             **config,
             "processor_id": other_id,
@@ -1141,6 +1173,15 @@ def test_full_manager_selects_approved_processor_and_cannot_change_it_after_issu
     )
     assert response.status_code == 409, response.text
     assert snapshot("products", "audit") == before
+    login_link(owner, manager)
+    response = owner.get("/api/manage/product")
+    assert response.status_code == 200, response.text
+    assert response.json()["processor_config"] == {}
+    response = owner.put(
+        "/api/manage/product",
+        json={**response.json(), "processor_config": private_config},
+    )
+    assert response.status_code == 403, response.text
 
 
 @pytest.mark.parametrize(

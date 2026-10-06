@@ -1,5 +1,6 @@
 import argparse
 import getpass
+import json
 import os
 import secrets
 import time
@@ -108,13 +109,16 @@ def main(argv=None):
         with db() as c:
             exists = (
                 setting(c, "bootstrap_password")
-                or c.execute("SELECT count(*) FROM credentials").fetchone()[0]
+                or c.execute(
+                    "SELECT count(*) FROM credentials WHERE shop_id IS NULL"
+                ).fetchone()[0]
             )
         if args.command in ("init", "bootstrap") and exists:
             raise SystemExit("Already initialized; use reset-auth to recover")
         if (
             args.command == "reset-auth"
-            and input("删除所有 Passkey 并撤销全部登录会话？输入 RESET: ") != "RESET"
+            and input("删除超级管理员 Passkey 并撤销其登录会话？输入 RESET: ")
+            != "RESET"
         ):
             raise SystemExit("Cancelled")
         if args.command == "bootstrap":
@@ -131,11 +135,10 @@ def main(argv=None):
             if len(password) < 12 or password != getpass.getpass("再次输入: "):
                 raise SystemExit("Password too short or does not match")
         with db() as c:
-            c.execute("DELETE FROM credentials")
-            from .link_access import revoke_all_sessions
+            from .account_auth import revoke_shop_auth
 
-            revoke_all_sessions(c, "ssh", "session.auth_reset")
-            c.execute("DELETE FROM challenges")
+            revoke_shop_auth(c, None, "session.auth_reset")
+            c.execute("DELETE FROM credentials WHERE shop_id IS NULL")
             set_setting(c, "bootstrap_password", PasswordHasher().hash(password))
             audit(c, "ssh", "auth." + args.command, "owner")
         if args.command != "bootstrap":
@@ -163,10 +166,19 @@ def main(argv=None):
                 processor_id="personalized_text",
                 processor_config={"template": "你好，$name！\n你的欢迎函已准备好。"},
             )
+            from .shops import default_shop
+
             pid = str(uuid.uuid4())
             c.execute(
-                "INSERT INTO products VALUES (?,?,?)",
-                (pid, p.model_dump_json(), time.time()),
+                "INSERT INTO products(id,config,created,shop_id) VALUES (?,?,?,?)",
+                (pid, p.model_dump_json(), time.time(), default_shop(c)),
+            )
+            from .processor_profiles import persist_product_configuration
+
+            values = p.model_dump()
+            persist_product_configuration(c, pid, values)
+            c.execute(
+                "UPDATE products SET config=? WHERE id=?", (json.dumps(values), pid)
             )
             code = issue_cards(c, pid, 1)[0]
         print("演示卡密：", code)

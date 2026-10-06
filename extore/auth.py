@@ -21,7 +21,7 @@ from webauthn.helpers.structs import (
 
 from .config import COOKIE_SECURE, DATA, ORIGIN, RP_ID
 from .db import audit, db, set_setting, setting
-from .link_access import revoke_all_sessions, revoke_session
+from .link_access import revoke_session
 from .security import create_session, digest, fail, rate_limit, session, token
 
 router = APIRouter(prefix="/api/auth")
@@ -42,7 +42,12 @@ class CredentialInput(BaseModel):
 def status(request: Request):
     with db() as c:
         configured = bool(setting(c, "bootstrap_password"))
-        passkeys = c.execute("SELECT count(*) FROM credentials").fetchone()[0]
+        passkeys = c.execute(
+            "SELECT count(*) FROM credentials WHERE shop_id IS NULL"
+        ).fetchone()[0]
+        from .account_auth import registration_enabled
+
+        registration = registration_enabled(c)
     s = None
     try:
         s = session(request, ("admin", "bootstrap", "staff"))
@@ -57,6 +62,10 @@ def status(request: Request):
         "configured": configured or bool(passkeys),
         "password_enabled": configured and not passkeys,
         "role": role,
+        "registration_enabled": registration,
+        "session_id": s["id"] if s else None,
+        "shop_id": s.get("shop_id") if s else None,
+        "superadmin": bool(s and role == "admin" and s.get("shop_id") is None),
     }
     if role == "staff":
         result.update(
@@ -91,7 +100,9 @@ def status(request: Request):
 def password(body: PasswordInput, request: Request, response: Response):
     rate_limit(request, "login", 5, 300)
     with db() as c:
-        if c.execute("SELECT count(*) FROM credentials").fetchone()[0]:
+        if c.execute(
+            "SELECT count(*) FROM credentials WHERE shop_id IS NULL"
+        ).fetchone()[0]:
             fail("密码登录已禁用，请使用 Passkey", 403)
         hashed = setting(c, "bootstrap_password")
         try:
@@ -118,16 +129,32 @@ def logout(request: Request, response: Response):
 def challenge(c, request, response, kind, s=None):
     key = token()
     if s:
-        if s["channel"] == "browser" and time.time() - s["created"] > 600:
+        if (
+            s["channel"] == "browser"
+            and time.time() - (s.get("auth_at") or s["created"]) > 600
+        ):
             fail("添加 Passkey 前请重新登录", 401)
-        rows = c.execute("SELECT id FROM credentials").fetchall()
+        rows = c.execute(
+            "SELECT id FROM credentials WHERE shop_id IS ?", (s.get("shop_id"),)
+        ).fetchall()
         import base64
+
+        shop_id = s.get("shop_id")
+        if shop_id:
+            from .shops import shop_row
+
+            shop = shop_row(c, shop_id)
+            user_id = ("extore-shop:" + shop_id).encode()
+            user_name = shop["email"] or shop_id
+        else:
+            user_id = b"extore-owner"
+            user_name = "owner"
 
         opts = generate_registration_options(
             rp_id=RP_ID,
             rp_name="Extore · 兑所",
-            user_id=b"extore-owner",
-            user_name="owner",
+            user_id=user_id,
+            user_name=user_name,
             exclude_credentials=[
                 PublicKeyCredentialDescriptor(
                     id=base64.urlsafe_b64decode(r["id"] + "=" * (-len(r["id"]) % 4))
@@ -216,16 +243,34 @@ def register_verify(body: CredentialInput, request: Request, response: Response)
         if c.execute("SELECT 1 FROM credentials WHERE id=?", (cid,)).fetchone():
             fail("此 Passkey 已存在", 409)
         c.execute(
-            "INSERT INTO credentials VALUES (?,?,?,?,?)",
-            (cid, v.credential_public_key, v.sign_count, body.name, time.time()),
+            "INSERT INTO credentials(id,public_key,sign_count,name,created,shop_id) VALUES (?,?,?,?,?,?)",
+            (
+                cid,
+                v.credential_public_key,
+                v.sign_count,
+                body.name,
+                time.time(),
+                s.get("shop_id"),
+            ),
         )
-        set_setting(c, "bootstrap_password", "")
+        if s.get("shop_id") is None:
+            set_setting(c, "bootstrap_password", "")
         if s["role"] == "bootstrap":
-            revoke_all_sessions(c, "owner", "session.bootstrap_complete")
-            c.execute("DELETE FROM challenges")
-            create_session(c, response, "admin", request=request)
-        audit(c, "owner", "passkey.add", cid)
-    (DATA / "bootstrap-password.txt").unlink(missing_ok=True)
+            from .account_auth import revoke_shop_auth
+
+            revoke_shop_auth(c, None)
+            c.execute(
+                "DELETE FROM challenges WHERE session_digest IN (SELECT digest FROM sessions WHERE shop_id IS NULL AND role IN ('admin','bootstrap'))"
+            )
+            create_session(c, response, "admin", request=request, auth_method="passkey")
+        audit(
+            c,
+            f"shop:{s['shop_id']}" if s.get("shop_id") else "owner",
+            "passkey.add",
+            cid,
+        )
+    if s.get("shop_id") is None:
+        (DATA / "bootstrap-password.txt").unlink(missing_ok=True)
     return {"ok": True}
 
 
@@ -246,6 +291,10 @@ def login_verify(body: CredentialInput, request: Request, response: Response):
         ).fetchone()
         if not row:
             fail("Passkey 未注册", 401)
+        if row["shop_id"]:
+            from .shops import shop_row
+
+            shop_row(c, row["shop_id"])
         try:
             v = verify_authentication_response(
                 credential=body.credential,
@@ -262,25 +311,64 @@ def login_verify(body: CredentialInput, request: Request, response: Response):
             "UPDATE credentials SET sign_count=? WHERE id=?",
             (v.new_sign_count, row["id"]),
         )
-        create_session(c, response, "admin", request=request)
-    return {"role": "admin"}
+        create_session(
+            c,
+            response,
+            "admin",
+            request=request,
+            shop_id=row["shop_id"],
+            auth_method="passkey",
+        )
+    return {
+        "role": "admin",
+        "shop_id": row["shop_id"],
+        "superadmin": row["shop_id"] is None,
+    }
 
 
 @router.get("/passkeys")
 def keys(request: Request):
-    session(request)
+    s = session(request)
     with db() as c:
-        return [dict(r) for r in c.execute("SELECT id,name,created FROM credentials")]
+        return [
+            dict(r)
+            for r in c.execute(
+                "SELECT id,name,created FROM credentials WHERE shop_id IS ?",
+                (s.get("shop_id"),),
+            )
+        ]
 
 
 @router.delete("/passkeys/{cid}")
 def delete_key(cid: str, request: Request):
     s = session(request)
-    if s["channel"] == "browser" and time.time() - s["created"] > 600:
+    if (
+        s["channel"] == "browser"
+        and time.time() - (s.get("auth_at") or s["created"]) > 600
+    ):
         fail("删除 Passkey 前请重新登录", 401)
     with db() as c:
-        if c.execute("SELECT count(*) FROM credentials").fetchone()[0] <= 1:
+        row = c.execute(
+            "SELECT * FROM credentials WHERE id=? AND shop_id IS ?",
+            (cid, s.get("shop_id")),
+        ).fetchone()
+        if row is None:
+            fail("Passkey 不存在", 404)
+        count = c.execute(
+            "SELECT count(*) FROM credentials WHERE shop_id IS ?", (s.get("shop_id"),)
+        ).fetchone()[0]
+        has_password = False
+        if s.get("shop_id"):
+            from .shops import shop_row
+
+            has_password = bool(shop_row(c, s["shop_id"])["password_hash"])
+        if count <= 1 and not has_password:
             fail("不能删除最后一个 Passkey；丢失时使用服务器命令重置", 409)
         c.execute("DELETE FROM credentials WHERE id=?", (cid,))
-        audit(c, "owner", "passkey.remove", cid)
+        audit(
+            c,
+            f"shop:{s['shop_id']}" if s.get("shop_id") else "owner",
+            "passkey.remove",
+            cid,
+        )
     return {"ok": True}

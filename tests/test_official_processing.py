@@ -13,7 +13,7 @@ def create(owner, processor_id="personalized_text", configuration=None, **values
     response = owner.post(
         "/api/admin/products",
         json={
-            "name": "官方处理器商品",
+            "name": "商品处理器商品",
             "mode": "script",
             "processor_id": processor_id,
             "processor_config": configuration or {},
@@ -119,13 +119,24 @@ def test_merchant_cannot_execute_unapproved_code_or_replace_contract(owner, valu
 
 def test_incomplete_processor_can_be_saved_but_not_issued(owner):
     product = create(owner, "resource_link")
-    assert product["processor_config"]["resource_url"] == ""
+    assert product["processor_config"] == {}
+    profile = owner.get(
+        f"/api/admin/processor-profiles/bindings/{product['id']}"
+    ).json()["profile"]
+    assert profile["processor_id"] == "resource_link"
     response = owner.post(
         "/api/admin/cards", json={"product_id": product["id"], "count": 1}
     )
     assert response.status_code == 400, response.text
     with db() as c:
         assert c.execute("SELECT count(*) FROM cards").fetchone()[0] == 0
+        stored = c.execute("SELECT config FROM products").fetchone()[0]
+        assert json.loads(stored)["processor_config"] == {}
+        assert (
+            c.execute("SELECT ciphertext FROM processor_profile_revisions")
+            .fetchone()[0]
+            .startswith("v1.")
+        )
 
 
 def test_processor_input_limits_reject_before_reserving_a_card(owner):

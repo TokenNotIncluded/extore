@@ -46,7 +46,9 @@ def test_compact_catalog_avoids_tutorial_payloads_and_retains_product_scope(owne
         catalogue = staff.get("/api/manage/products", params={"compact": True})
         assert catalogue.status_code == 200
         assert [p["id"] for p in catalogue.json()] == [pid]
-        assert catalogue.json()[0] == summary
+        assert catalogue.json()[0] == {
+            key: value for key, value in summary.items() if key != "shop_id"
+        }
         detailed = staff.get("/api/manage/products").json()
         assert detailed[0]["parameters"][0]["description"]["en"].startswith(
             "A detailed customer tutorial."

@@ -975,7 +975,11 @@ def add_parser(commands):
         ("complete", "deliver a claimed task"),
         ("fail", "mark a processing failure"),
         ("retry", "allow customer retry after a failure"),
-        ("request-changes", "return a claimed task for customer input with a reason"),
+        ("request-retry", "return a claimed task for retry with a reason"),
+        (
+            "request-changes",
+            "compatibility alias for request-retry with revised inputs",
+        ),
         ("reject", "reject a claimed task with a reason"),
         ("files", "list task file metadata"),
         ("download", "download a task file to a new private local file"),
@@ -1007,9 +1011,18 @@ def add_parser(commands):
                 dest="completed_steps",
                 help="completed step ID; repeat for each completed step",
             )
-        if name in ("request-changes", "reject"):
+        if name in ("request-retry", "request-changes", "reject"):
             command.add_argument(
                 "--reason", required=True, help="mandatory customer-visible reason"
+            )
+        if name in ("request-retry", "request-changes"):
+            command.add_argument(
+                "--reason-type",
+                choices=("customer_input", "external", "processor"),
+                default="customer_input",
+            )
+            command.add_argument(
+                "--retry-mode", choices=("revise", "reuse"), default="revise"
             )
         if name == "complete":
             command.add_argument(
@@ -1192,13 +1205,16 @@ def dispatch(client, args, command, origin):
         and args.completed_steps is not None
     ):
         values["completed_steps"] = args.completed_steps
-    if command in ("request-changes", "reject"):
+    if command in ("request-retry", "request-changes", "reject"):
         if not args.reason.strip() or len(args.reason) > 1000:
             raise ManageError(
                 "A non-empty customer-visible reason of at most 1000 characters is required",
                 code="invalid_input",
             )
         values["message"] = args.reason
+        if command != "reject":
+            values["retry_mode"] = args.retry_mode
+            values["reason_type"] = args.reason_type
     if command == "complete":
         if args.output_file:
             try:
@@ -1226,9 +1242,11 @@ def dispatch(client, args, command, origin):
             values["content"] = content
     if command == "fail":
         values["retryable"] = args.retryable
-    action = {"complete": "succeed", "request-changes": "request_changes"}.get(
-        command, command
-    )
+    action = {
+        "complete": "succeed",
+        "request-changes": "request_changes",
+        "request-retry": "request_retry",
+    }.get(command, command)
     return client.batch(grant, ids, action, **values)
 
 

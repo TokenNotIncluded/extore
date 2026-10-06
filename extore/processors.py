@@ -1,4 +1,4 @@
-"""Adapter for the reviewed, version-pinned official processor catalog."""
+"""Adapter for the reviewed, version-pinned processor catalog."""
 
 
 def catalog():
@@ -29,7 +29,7 @@ def normalize_processor_product(config, *, strict_schema=True, allow_incomplete=
         for name in ("parameters", "outputs"):
             declared = config.get(name)
             if declared and _fields(declared) != _fields(spec[name]):
-                raise ValueError("顾客填写项和输出字段由官方处理器代码定义")
+                raise ValueError("顾客填写项和输出字段由商品处理器代码定义")
     configuration = validate_configuration(
         processor_id,
         config.get("processor_config", {}),

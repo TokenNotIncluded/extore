@@ -10,8 +10,8 @@ test("needs_input shows the reason, allows the server-authorized retry, and esca
   page.navigate("/receipt#single-token");
   page.context.renderReceipt(task);
   assert.equal(page.node("#customer-message").textContent, "请补充订单号");
-  assert.match(page.node("#app").innerHTML, /需补充信息/);
-  assert.match(page.node("#app").innerHTML, /补充需求并重新提交/);
+  assert.match(page.node("#app").innerHTML, /需要重试/);
+  assert.match(page.node("#app").innerHTML, /检查信息并重试/);
   await page.node("#retry").emit("click");
   const markup = page.node("#app").innerHTML;
   assert.match(markup, /value="x&quot; onfocus=&quot;alert\(1\)"/);
@@ -64,8 +64,8 @@ async function processingQueue(claimedBy = "owner") {
   return page;
 }
 
-test("request_changes and reject require a bounded reason and only affect owned processing tasks", async () => {
-  for (const [button, action] of [["#request-changes", "request_changes"], ["#reject", "reject"]]) {
+test("request_retry and reject require a bounded reason and only affect owned processing tasks", async () => {
+  for (const [button, action] of [["#request-changes", "request_retry"], ["#reject", "reject"]]) {
     const page = await processingQueue();
     await page.node(button).emit("click");
     for (const reason of ["   ", "x".repeat(1001)]) {
@@ -76,7 +76,7 @@ test("request_changes and reject require a bounded reason and only affect owned 
     }
     page.node("#disposition-reason").value = "  请提供订单号  ";
     const submitting = page.node("#disposition-submit").emit("click");
-    assert.deepEqual(page.requests[2].body, { product_id: "product", ids: ["task"], action, message: "请提供订单号" });
+    assert.deepEqual(page.requests[2].body, { product_id: "product", ids: ["task"], action, message: "请提供订单号", ...(action === "request_retry" ? { reason_type: "customer_input", retry_mode: "revise" } : {}) });
     page.requests[2].respond({ ok: true });
     await flush();
     page.requests[3].respond([product()]);
@@ -122,4 +122,39 @@ test("upload-limit lookup failure retains the advertised 20 MiB fallback", async
   page.requests[0].reject(new Error("offline"));
   await assert.rejects(uploading, /20 MiB/);
   assert.equal(page.requests.length, 1);
+});
+
+test("reuse receipts wait for an explicit click, send only the selected card, and ignore a late response", async () => {
+  const page = appFixture();
+  const a = item("A", product("A", [parameter("answer")]), { ...job("A", "needs_input"), can_retry: true, retry_mode: "reuse", params: { answer: "original-private-answer" } });
+  const b = item("B", product("B"), { ...job("B", "needs_input"), can_retry: true, retry_mode: "revise" });
+  batch(page, [a, b]); page.context.openBatchCard(a);
+  assert.match(page.node("#app").innerHTML, /使用原资料重试/);
+  assert.doesNotMatch(page.node("#app").innerHTML, /original-private-answer|id="form"/);
+  assert.equal(page.requests.length, 0);
+  const retry = page.node("#retry").emit("click");
+  assert.equal(page.requests[0].url, "/api/retry");
+  assert.deepEqual(page.requests[0].body, { token: "batch-token", card_id: "A" });
+  page.context.openBatchCard(b);
+  page.requests[0].respond(job("A", "queued")); await retry;
+  assert.match(page.node("#app").innerHTML, /<h1>B<\/h1>/);
+  assert.match(page.node("#app").innerHTML, /检查信息并重试/);
+  assert.equal(a.job.state, "needs_input");
+  assert.equal(page.requests.length, 1);
+});
+
+test("external reasons keep revise unless the operator explicitly permits reuse", async () => {
+  for (const mode of ["revise", "reuse"]) {
+    const page = await processingQueue();
+    await page.node("#request-changes").emit("click");
+    page.node("#disposition-reason").value = "外部平台恢复后请重试";
+    page.node("#retry-reason-kind").value = "external";
+    if (mode === "reuse") page.node("#retry-mode").value = "reuse";
+    const submitting = page.node("#disposition-submit").emit("click");
+    assert.equal(page.requests[2].body.reason_type, "external");
+    assert.equal(page.requests[2].body.retry_mode, mode);
+    assert.equal(page.requests[2].body.message, "外部平台恢复后请重试");
+    page.requests[2].respond({ ok: true }); await flush();
+    page.requests[3].respond([product()]); await flush(); page.requests[4].respond([]); await submitting;
+  }
 });

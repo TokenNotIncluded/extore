@@ -127,7 +127,7 @@ def login(client, authenticator):
         json={"credential": authenticator.assertion(login_options(client))},
     )
     assert response.status_code == 200, response.text
-    assert response.json() == {"role": "admin"}
+    assert response.json() == {"role": "admin", "shop_id": None, "superadmin": True}
     assert client.get("/api/admin/products").status_code == 200
 
 
@@ -146,7 +146,13 @@ def test_first_passkey_disables_password_and_invalidates_bootstrap_sessions(clie
     register(client, Authenticator())
 
     status = client.get("/api/auth/status").json()
-    assert status == {"configured": True, "password_enabled": False, "role": "admin"}
+    assert {key: status[key] for key in ("configured", "password_enabled", "role")} == {
+        "configured": True,
+        "password_enabled": False,
+        "role": "admin",
+    }
+    assert status["superadmin"] is True and status["shop_id"] is None
+    assert isinstance(status["session_id"], str)
     assert client.get("/api/admin/products").status_code == 200
     assert (
         client.post("/api/auth/password", json={"password": password}).status_code

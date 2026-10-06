@@ -123,8 +123,9 @@ def listfiles(c, row, kind=None):
         for item in c.execute(
             "SELECT "
             + _METADATA
-            + " FROM job_files WHERE job_id=? AND (? IS NULL OR kind=?) ORDER BY created,id",
-            (row["id"], kind, kind),
+            + " FROM job_files WHERE job_id=? AND product_id=? AND card_id=? "
+            "AND (? IS NULL OR kind=?) ORDER BY created,id",
+            (row["id"], row["product_id"], row["card_id"], kind, kind),
         )
     ]
 
@@ -140,6 +141,9 @@ def _file(c, fid, *, content=False):
 
 
 def _input_scope(c, card, field_key):
+    from .shops import require_enabled_product
+
+    require_enabled_product(c, card["product_id"])
     ensure_card_usable(c, card)
     existing = c.execute("SELECT * FROM jobs WHERE card_id=?", (card["id"],)).fetchone()
     if existing:
@@ -157,16 +161,22 @@ def _input_scope(c, card, field_key):
 
 
 def _manage_scope(c, s, row, permission):
+    from .shops import authorize_product
+
     authorize_management(c, s, permission)
-    if s["role"] == "staff" and row["product_id"] != s["product_id"]:
-        fail("无权访问此商品的文件", 403)
+    authorize_product(c, s, row["product_id"])
 
 
 def _output_scope(c, s, jid, field_key):
     row = _row(c, jid)
     _manage_scope(c, s, row, "queue.process")
     p = _job_product(c, row)
-    actor = s["staff_id"] if s["role"] == "staff" else "owner"
+    actor = (
+        s["staff_id"]
+        if s["role"] == "staff"
+        else s.get("account_id")
+        or (f"shop:{s['shop_id']}" if s.get("shop_id") else "owner")
+    )
     if p["mode"] != "manual":
         fail("只能为队列商品上传交付文件", 409)
     if row["state"] != "processing" or row["claimed_by"] != actor:
@@ -178,10 +188,16 @@ def _output_scope(c, s, jid, field_key):
 class _QuotaParser(MultiPartParser):
     spool_max_size = CHUNK_BYTES
 
-    def __init__(self, *args, reservation, **kwargs):
+    def __init__(
+        self, *args, reservation, scope_fields, optional_fields, bind_scope, **kwargs
+    ):
         super().__init__(*args, **kwargs)
         self.reservation = reservation
+        self.scope_fields = set(scope_fields)
+        self.optional_fields = set(optional_fields)
+        self.bind_scope = bind_scope
         self.file_bytes = 0
+        self.file_started = False
 
     def on_headers_finished(self):
         super().on_headers_finished()
@@ -199,6 +215,25 @@ class _QuotaParser(MultiPartParser):
             self._files_to_close_on_error.remove(old)
             self._files_to_close_on_error.append(spool)
             old.close()
+            if self._current_part.field_name != "file":
+                raise MultiPartException("Unexpected file field")
+            fields = {}
+            for key, value in self.items:
+                if (
+                    key in fields
+                    or key not in self.scope_fields | self.optional_fields
+                    or not isinstance(value, str)
+                ):
+                    raise MultiPartException("Repeated or unexpected upload field")
+                fields[key] = value
+            if not self.scope_fields <= set(fields):
+                raise MultiPartException("extore_upload_field_order")
+            # Authenticate the product before accepting even the first payload
+            # byte, so its shop's in-flight quota is part of every reservation.
+            self.bind_scope(fields)
+            self.file_started = True
+        elif self.file_started:
+            raise MultiPartException("extore_upload_field_order")
 
     def on_part_data(self, data, start, end):
         if self._current_part.file is not None:
@@ -244,7 +279,7 @@ def file_limit_message():
     return f"上传文件超过 {_byte_limit(MAX_FILE_BYTES)} 限制"
 
 
-async def _multipart(request, expected, reservation, optional=()):
+async def _multipart(request, expected, reservation, bind_scope, optional=()):
     """Count the raw stream before the multipart parser can spool an unbounded file."""
     content_type = request.headers.get("content-type", "")
     if not content_type.lower().startswith("multipart/form-data;"):
@@ -275,6 +310,9 @@ async def _multipart(request, expected, reservation, optional=()):
         max_fields=len(expected) + len(optional) - 1,
         max_part_size=512,
         reservation=reservation,
+        scope_fields=tuple(key for key in expected if key != "file"),
+        optional_fields=optional,
+        bind_scope=bind_scope,
     )
     try:
         form = await parser.parse()
@@ -284,6 +322,8 @@ async def _multipart(request, expected, reservation, optional=()):
         for spool in getattr(parser, "_files_to_close_on_error", ()):
             spool.close()
         too_large = getattr(exc, "message", "") == "extore_upload_too_large"
+        if getattr(exc, "message", "") == "extore_upload_field_order":
+            fail("请将上传参数放在文件之前", 400)
         fail(
             file_limit_message() if too_large else "上传请求格式不正确",
             413 if too_large else 400,
@@ -350,7 +390,7 @@ def _store(c, card_id, product_id, job_id, attempt, key, kind, upload, reservati
         fail(f"此卡密的文件总量超过 {_byte_limit(MAX_CARD_BYTES)} 限制", 413)
     if inventory["count"] >= MAX_CARD_FILES:
         fail(f"此卡密的文件数量超过 {MAX_CARD_FILES} 个限制", 413)
-    check_storage_quota(c, size, reservation_id=reservation.id)
+    check_storage_quota(c, size, reservation_id=reservation.id, product_id=product_id)
     fid = str(uuid.uuid4())
     cursor = c.execute(
         "INSERT INTO job_files(id,card_id,product_id,job_id,field_key,kind,attempt,filename,content_type,size,content,created) VALUES (?,?,?,?,?,?,?,?,?,?,zeroblob(?),?)",
@@ -396,11 +436,21 @@ async def upload_input(request: Request):
     rate_limit(request, "files-upload", 60, 60)
     try:
         with receiving_upload() as reservation:
+
+            def bind_scope(fields):
+                with db() as c:
+                    card = resolve_customer_card(
+                        c, fields["token"], fields.get("card_id") or None
+                    )
+                    _input_scope(c, card, fields["field_key"])
+                    reservation.bind_product(c, card["product_id"])
+
             async with asyncio.timeout(UPLOAD_TIMEOUT_SECONDS):
                 form = await _multipart(
                     request,
                     ("token", "field_key", "file"),
                     reservation,
+                    bind_scope,
                     optional=("card_id",),
                 )
                 try:
@@ -436,9 +486,18 @@ async def upload_output(request: Request):
     s = session(request, ("admin", "staff"))
     try:
         with receiving_upload() as reservation:
+
+            def bind_scope(fields):
+                current = session(request, ("admin", "staff"))
+                with db() as c:
+                    row = _output_scope(
+                        c, current, fields["job_id"], fields["field_key"]
+                    )
+                    reservation.bind_product(c, row["product_id"])
+
             async with asyncio.timeout(UPLOAD_TIMEOUT_SECONDS):
                 form = await _multipart(
-                    request, ("job_id", "field_key", "file"), reservation
+                    request, ("job_id", "field_key", "file"), reservation, bind_scope
                 )
                 try:
                     s = session(request, ("admin", "staff"))
@@ -596,16 +655,18 @@ def managed_download(file_id: str, request: Request):
     rate_limit(request, "files-download", 60, 60)
     s = session(request, ("admin", "staff"))
     with db() as c:
-        item = _file(c, file_id, content=True)
+        # Resolve access using metadata before loading an untrusted attachment.
+        # A guessed ID from another shop must not allocate its BLOB in memory.
+        item = _file(c, file_id)
         if item["job_id"] is None:
             fail("文件尚未提交到任务", 404)
         row = _row(c, item["job_id"])
         _manage_scope(c, s, row, "queue.view")
         if item["product_id"] != row["product_id"] or item["card_id"] != row["card_id"]:
             fail("文件不属于此任务", 403)
-        if row["state"] == "destroyed" or item["content"] is None:
+        if row["state"] == "destroyed" or not item["available"]:
             fail("文件已销毁或领取", 410)
-        return _download(item)
+        return _download(_file(c, file_id, content=True))
 
 
 @router.post("/api/files/download")
@@ -613,7 +674,7 @@ def customer_download(body: FileDownload, request: Request):
     rate_limit(request, "files-download", 60, 60)
     with db() as c:
         card = resolve_customer_card(c, body.token, body.card_id)
-        item = _file(c, body.file_id, content=True)
+        item = _file(c, body.file_id)
         if (
             item["card_id"] != card["id"]
             or item["kind"] != "output"
@@ -625,13 +686,13 @@ def customer_download(body: FileDownload, request: Request):
             fail("文件不属于此次领取", 403)
         if row["state"] != "succeeded" or not row["revealed"] or not item["released"]:
             fail("请先领取商品后下载文件", 409)
-        if item["content"] is None or item["consumed"]:
+        if not item["available"] or item["consumed"]:
             fail("文件已领取或销毁", 410)
         p = _job_product(c, row)
         _field(p, item["field_key"], "output")
         if item["attempt"] != row["attempt"]:
             fail("文件对应的尝试已失效", 409)
-        response = _download(item)
+        response = _download(_file(c, body.file_id, content=True))
         if p["view_policy"] == "once":
             c.execute(
                 "UPDATE job_files SET content=NULL,consumed=1 WHERE id=? AND consumed=0",

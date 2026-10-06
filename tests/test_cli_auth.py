@@ -798,7 +798,7 @@ def test_bearer_and_new_proofs_revalidate_ancestor_authorization(
     )
 
 
-def test_auth_reset_revokes_devices_pending_challenges_and_bearers(
+def test_root_auth_reset_preserves_product_devices_and_shop_authorizations(
     owner, clients, monkeypatch
 ):
     from extore import cli
@@ -811,30 +811,34 @@ def test_auth_reset_revokes_devices_pending_challenges_and_bearers(
     ticket_response = owner.post(
         "/api/manage/cli-ticket", json={"staff_id": grant["id"]}
     )
-    assert ticket_response.status_code == 200, ticket_response.text
+    assert ticket_response.status_code == 200
     ticket = ticket_response.json()["token"]
     monkeypatch.setattr("builtins.input", lambda prompt: "RESET")
     monkeypatch.setattr(
         cli.getpass, "getpass", lambda prompt: "cli-auth-test-recovery-password"
     )
     cli.main(["reset-auth"])
-    assert client.get("/api/cli/status", headers=bearer(session)).status_code == 401
-    denied(client.post("/api/cli/challenge", json={"device_id": device["device_id"]}))
-    denied(
+    assert owner.get("/api/admin/products").status_code == 401
+    assert client.get("/api/cli/status", headers=bearer(session)).status_code == 200
+    assert (
         client.post(
             "/api/cli/session", json=session_body(device["device_id"], pending, key)
-        )
+        ).status_code
+        == 200
     )
-    denied(client.post("/api/cli/authorize", json=bind_body(token, key)))
-    denied(client.post("/api/cli/authorize", json=bind_body(ticket, identity())))
+    assert (
+        client.post(
+            "/api/cli/authorize", json=bind_body(ticket, identity())
+        ).status_code
+        == 200
+    )
     with db() as c:
         assert (
             c.execute(
                 "SELECT revoked FROM cli_devices WHERE id=?", (device["device_id"],)
             ).fetchone()[0]
-            == 1
+            == 0
         )
-        assert c.execute("SELECT count(*) FROM cli_challenges").fetchone()[0] == 0
         assert (
             c.execute(
                 "SELECT count(*) FROM products WHERE id=?", (grant["product_id"],)
@@ -1048,7 +1052,7 @@ def test_legacy_database_migration_retains_browser_sessions_and_separate_cli_quo
                 """
             )
         c.execute(
-            "INSERT INTO products VALUES (?,?,?)",
+            "INSERT INTO products(id,config,created) VALUES (?,?,?)",
             (
                 "legacy-product",
                 Product(name="Legacy browser product", parameters=[]).model_dump_json(),
@@ -1084,7 +1088,7 @@ def test_legacy_database_migration_retains_browser_sessions_and_separate_cli_quo
         database.init()
         database.init()
         with database.db() as c:
-            assert c.execute("PRAGMA user_version").fetchone()[0] == 10
+            assert c.execute("PRAGMA user_version").fetchone()[0] == 11
             assert not c.execute("PRAGMA foreign_key_check").fetchall()
             rows = [dict(row) for row in c.execute("SELECT * FROM sessions")]
             assert len(rows) == 2

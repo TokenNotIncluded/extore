@@ -223,10 +223,10 @@ class Product(BaseModel):
         if len({variant.id for variant in self.variants}) != len(self.variants):
             raise ValueError("规格代码不能重复")
         if self.script:
-            raise ValueError("不能指定或执行任意脚本；请选择官方处理器")
+            raise ValueError("不能指定或执行任意脚本；请选择商品处理器")
         if self.mode == "script":
             if not self.processor_id:
-                raise ValueError("请选择官方处理器")
+                raise ValueError("请选择商品处理器")
             from .processors import normalize_processor_product
 
             values = self.model_dump()
@@ -242,12 +242,10 @@ class Product(BaseModel):
             ]
             self.outputs = [OutputField.model_validate(f) for f in canonical["outputs"]]
             self.processor_config = (
-                {}
-                if allow_blank_secret and not self.processor_config
-                else canonical["processor_config"]
+                {} if not self.processor_config else canonical["processor_config"]
             )
         elif self.processor_id or self.processor_config:
-            raise ValueError("只有官方处理器模式可以配置处理器")
+            raise ValueError("只有商品处理器模式可以配置处理器")
         if len({p.key for p in self.parameters}) != len(self.parameters):
             raise ValueError("参数代码名不能重复")
         if self.delivery == "service":
@@ -338,12 +336,21 @@ class BatchUpdate(BaseModel):
     )
     ids: list[str] = Field(min_length=1, max_length=100)
     action: Literal[
-        "claim", "progress", "succeed", "fail", "retry", "request_changes", "reject"
+        "claim",
+        "progress",
+        "succeed",
+        "fail",
+        "retry",
+        "request_changes",
+        "request_retry",
+        "reject",
     ]
     message: str = Field(default="", max_length=1000)
     content: str | None = Field(default=None, max_length=100000)
     output: dict[str, str] | None = None
     retryable: bool = False
+    retry_mode: Literal["revise", "reuse"] = "revise"
+    reason_type: Literal["customer_input", "external", "processor"] = "customer_input"
 
     @field_validator("completed_steps")
     @classmethod
@@ -352,14 +359,14 @@ class BatchUpdate(BaseModel):
 
     @model_validator(mode="after")
     def unique_steps(self):
-        if self.action in ("request_changes", "reject"):
+        if self.action in ("request_changes", "request_retry", "reject"):
             self.message = self.message.strip()
             if not self.message:
-                raise ValueError("退回补充或拒绝任务必须填写原因")
+                raise ValueError("要求重试或拒绝任务必须填写原因")
             if self.output or self.content is not None:
-                raise ValueError("退回补充或拒绝任务不能同时交付结果")
+                raise ValueError("要求重试或拒绝任务不能同时交付结果")
             if self.completed_steps is not None or self.progress_steps is not None:
-                raise ValueError("退回补充或拒绝任务不修改处理步骤")
+                raise ValueError("要求重试或拒绝任务不修改处理步骤")
         if self.action == "retry" and (
             self.completed_steps is not None or self.progress_steps is not None
         ):

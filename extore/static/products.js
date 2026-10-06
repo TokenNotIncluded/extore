@@ -173,7 +173,7 @@
     ctx.workspace.innerHTML = `<div class="section-head"><h2>商品</h2>${owner ? '<button id="new-product">新建商品</button>' : ""}</div>
       ${owner ? `<div class="form-divider"><div class="grid">${select("quick-template", "快速新建模板", [["random", "随机选择模板"]], "random")}<div class="field"><label for="quick-product">生成私有草稿与 AI 配置链接</label><button id="quick-product" class="secondary" disabled>随机快速新建</button></div></div><p class="caption">先创建一个私有商品，再把仅能配置这个商品的链接交给 AI 完善。配置链接有效期为 7 天。复制已有商品后，需重新填写私密发货配置。</p></div>` : ""}
       ${createdLink ? `<div class="parameter" id="quick-created"><h3>商品已创建 · ${escape(createdLink.productName)}</h3><p class="caption">这个链接只允许编辑当前商品与发货配置。请复制保存；离开后完整链接不再显示。</p>${field("quick-management-link", "AI 商品配置链接", createdLink.url, "text", "readonly")}<div class="toolbar"><button id="copy-quick-link" class="secondary">${ctx.lang === "en" ? "Copy link" : "复制链接"}</button><button id="edit-quick-product" class="secondary">继续配置商品</button></div></div>` : ""}
-      ${products.length ? `<div class="product-list">${products.map((product) => `<article class="product-row">${product.logo ? `<img src="${escape(product.logo)}" alt="" loading="lazy" referrerpolicy="no-referrer">` : `<div class="product-icon">${icon}</div>`}<div class="product-info"><h3>${escape(product.name)}</h3><p>${product.public ? "公开展示" : "仅持卡可见"} · ${escape({ manual: "队列", webhook: "外部 Webhook", script: "官方处理器" }[product.mode] || product.mode)} · ${product.delivery === "service" ? "服务状态" : "内容交付"}</p><div class="variant-summary">${productVariants(product).map((variant) => `<span>${escape(variant.name)} · ${escape(priceLabel(variant))}${variant.enabled === false ? " · 已停用" : ""}</span>`).join("")}</div><div class="mono muted">${escape(product.id)}</div></div><div class="product-actions"><button class="secondary" data-edit="${escape(product.id)}">配置</button><button type="button" class="secondary" data-export="${escape(product.id)}">${ctx.lang === "en" ? "Copy product info" : "复制商品资料"}</button></div></article>`).join("")}</div>` : '<div class="empty">还没有商品。先创建商品，再生成卡密。</div>'}
+      ${products.length ? `<div class="product-list">${products.map((product) => `<article class="product-row">${product.logo ? `<img src="${escape(product.logo)}" alt="" loading="lazy" referrerpolicy="no-referrer">` : `<div class="product-icon">${icon}</div>`}<div class="product-info"><h3>${escape(product.name)}</h3><p>${product.public ? "公开展示" : "仅持卡可见"} · ${escape({ manual: "队列", webhook: "外部 Webhook", script: "商品处理器" }[product.mode] || product.mode)} · ${product.delivery === "service" ? "服务状态" : "内容交付"}</p><div class="variant-summary">${productVariants(product).map((variant) => `<span>${escape(variant.name)} · ${escape(priceLabel(variant))}${variant.enabled === false ? " · 已停用" : ""}</span>`).join("")}</div><div class="mono muted">${escape(product.id)}</div></div><div class="product-actions"><button class="secondary" data-edit="${escape(product.id)}">配置</button><button type="button" class="secondary" data-export="${escape(product.id)}">${ctx.lang === "en" ? "Copy product info" : "复制商品资料"}</button></div></article>`).join("")}</div>` : '<div class="empty">还没有商品。先创建商品，再生成卡密。</div>'}
       <div id="product-export-panel"></div>
       <div id="error" class="error" role="alert"></div>`;
     on("#new-product", "click", () => edit(ctx));
@@ -303,7 +303,9 @@
     let customOutputs = structuredClone(outputs);
     let variants = structuredClone(productVariants(product));
     let progressSteps = structuredClone(product.progress_steps || []);
+    const owner = ctx.role === "admin";
     const disabled = ctx.canConfigure ? "" : "disabled";
+    let profiles = [], profileBinding = null, bindingLoad = 0, profilesRequested = false;
     ctx.workspace.innerHTML = `<div class="section-head"><h2>${product.id ? "配置商品" : "新建商品"}</h2><div class="product-actions">${product.id ? `<button type="button" id="export-saved-product" class="secondary">${ctx.lang === "en" ? "Copy saved product info" : "复制已保存商品资料"}</button>` : ""}<button id="cancel" class="secondary">返回商品</button></div></div><div id="product-export-panel"></div><form id="product-form">
       <div class="grid">${field("p-name", "商品名称", product.name)}${select(
         "p-mode",
@@ -311,7 +313,7 @@
         [
           ["manual", "队列"],
           ["webhook", "外部 Webhook"],
-          ["script", "官方处理器"],
+          ["script", "商品处理器"],
         ],
         product.mode,
         disabled,
@@ -343,7 +345,7 @@
       <div class="form-divider" id="delivery-connection"><h3>发货对接</h3>
         <p id="queue-help" class="caption">队列任务可以由人员或 AI 领取处理。下方定义顾客填写的信息，以及完成任务时必须提交的结果。</p>
         <div id="webhook-settings"><p class="caption">将任务交给外部平台处理。接收地址须为 HTTPS 公网地址，使用签名密钥验证任务与回调。</p><div class="grid">${field("p-url", "Webhook 接收地址", product.webhook_url || "", "url", disabled)}${field("p-secret", "Webhook 签名密钥（至少 32 字符）", product.webhook_secret || "", "password", `${disabled} autocomplete="new-password"`)}</div></div>
-        <div id="processor-settings">${select("p-processor", "官方商品处理器", [["", "正在加载处理器…"]], "", disabled)}<p id="processor-description" class="caption"></p><div id="processor-configuration"></div><p class="caption">顾客填写项与交付结果由处理器代码定义。这里只能选择官方预设并填写它声明的配置。</p></div>
+        <div id="processor-settings">${select("p-processor", "商品处理器", [["", "正在加载处理器…"]], "", owner ? disabled : "disabled")}<p id="processor-description" class="caption"></p><div id="processor-configuration"></div><p class="caption">顾客填写项与交付结果由处理器代码定义。这里只能选择商品处理器预设并填写它声明的配置。</p></div>
       </div>
       <div class="form-divider"><div class="section-head"><h3>顾客填写的信息</h3><button type="button" id="add-param" class="secondary">添加参数</button></div><div id="parameters"></div></div>
       <div class="form-divider" id="outputs-section"><div class="section-head"><h3>任务完成时提交的结果</h3><button type="button" id="add-output" class="secondary" ${disabled}>添加输出字段</button></div><p class="caption">结果只在顾客主动领取时显示。人员、AI 或外部平台提交完成结果时，都须符合这些定义。</p><div id="outputs"></div></div>
@@ -468,22 +470,13 @@
         customOutputs = structuredClone(outputs);
       }
     };
-    const captureConfiguration = () => {
-      if (!displayedProcessorId || !ctx.canConfigure) return;
-      const spec = catalog.find((item) => item.id === displayedProcessorId);
-      if (!spec) return;
-      processorConfig = Object.fromEntries(
-        spec.configuration.map((definition, index) => [
-          definition.key,
-          $("#pc-value-" + index).value,
-        ]),
-      );
-      configByProcessor.set(displayedProcessorId, processorConfig);
-    };
+    // Shop secrets live in separate write-only profiles. Product edits never
+    // echo a masked value or an empty configuration back to the server.
+    const captureConfiguration = () => {};
     const drawFields = (selector, prefix, fields, readonly, codeDefined) => {
       const container = $(selector);
       if (codeDefined) {
-        container.innerHTML = `<p class="caption" data-schema-source="processor">由官方处理器代码定义，只读。</p>${fields.length ? fields.map((definition) => `<div class="parameter"><h3>${escape(localized(definition.label, ctx.lang))}</h3><p class="mono">${escape(definition.key)} · ${escape(definition.type)} · ${definition.required ? "必填" : "选填"}</p>${tutorial(definition, ctx.lang, prefix === "f" ? "填写教程" : "结果说明")}</div>`).join("") : '<p class="caption">无需额外填写信息。</p>'}`;
+        container.innerHTML = `<p class="caption" data-schema-source="processor">由商品处理器代码定义，只读。</p>${fields.length ? fields.map((definition) => `<div class="parameter"><h3>${escape(localized(definition.label, ctx.lang))}</h3><p class="mono">${escape(definition.key)} · ${escape(definition.type)} · ${definition.required ? "必填" : "选填"}</p>${tutorial(definition, ctx.lang, prefix === "f" ? "填写教程" : "结果说明")}</div>`).join("") : '<p class="caption">无需额外填写信息。</p>'}`;
         return;
       }
       container.innerHTML = fields
@@ -529,26 +522,49 @@
       displayedProcessorId = spec?.id || "";
       $("#processor-description").textContent = spec
         ? localized(spec.description, ctx.lang)
-        : "请选择一个官方处理器。";
-      if (!spec) {
-        $("#processor-configuration").innerHTML = "";
+        : "请选择一个商品处理器。";
+      if (!owner) {
+        $("#processor-configuration").innerHTML = '<p class="caption">商品处理器账户由店主单独管理，配置已隐藏。</p>';
         return;
       }
-      if (!ctx.canConfigure) {
-        $("#processor-configuration").innerHTML =
-          '<p class="caption">当前链接没有修改发货配置的权限，处理器配置已隐藏。</p>';
+      if (!spec) { $("#processor-configuration").innerHTML = ""; return; }
+      if (!product.id) {
+        $("#processor-configuration").innerHTML = '<p class="caption">先保存商品，再选择店铺的处理器账户。付款账号和密钥在“处理器账户”中单独配置。</p>';
         return;
       }
-      processorConfig = { ...(configByProcessor.get(processorId) || {}) };
-      $("#processor-configuration").innerHTML = spec.configuration
-        .map((definition, index) => {
-          const value =
-            processorConfig[definition.key] ?? definition.default ?? "";
-          const label = localized(definition.label, ctx.lang);
-          const attributes = `${definition.max_length ? `maxlength="${definition.max_length}"` : ""} ${definition.required ? 'data-required="true"' : ""}`;
-          return `${definition.type === "textarea" ? textarea("pc-value-" + index, label, value, attributes) : field("pc-value-" + index, label, value, definition.type === "number" ? "number" : definition.type === "url" ? "url" : "text", attributes)}${tutorial(definition, ctx.lang, "配置说明")}`;
-        })
-        .join("");
+      if (!profilesRequested) {
+        profilesRequested = true;
+        const load = ++bindingLoad;
+        const targetShop = product.shop_id || ctx.shopId;
+        const query = ctx.superadmin && targetShop ? "?" + new URLSearchParams({ shop_id: targetShop }) : "";
+        Promise.all([ctx.api("/admin/processor-profiles" + query), ctx.api("/admin/processor-profiles/bindings/" + encodeURIComponent(product.id))])
+          .then(([values, binding]) => {
+            if (!active() || load !== bindingLoad) return;
+            profiles = values;
+            profileBinding = binding;
+            drawConfiguration();
+          }).catch((error) => { if (active() && load === bindingLoad) report(error); });
+      }
+      const matching = profiles.filter((profile) => !profile.disabled && profile.processor_id === processorId && (!product.shop_id || profile.shop_id === product.shop_id));
+      const current = profileBinding?.profile;
+      $("#processor-configuration").innerHTML = `<p class="caption">只显示账户名称与版本。绑定只影响之后发行的卡密，已发行卡密保留原绑定。</p>${current ? `<p>当前账户：${escape(current.name)} · 版本 ${escape(current.bound_revision || current.revision)}</p>` : '<p class="caption">尚未绑定处理器账户。</p>'}${select("p-profile", "店铺处理器账户", [["", "请选择账户"], ...matching.map((profile) => [profile.id, profile.name + " · 版本 " + profile.revision])], current?.id || "")}<div class="actions"><button id="bind-profile" type="button" class="secondary">绑定所选账户</button>${current ? '<button id="unbind-profile" type="button" class="danger">解除未来卡密的账户绑定</button>' : ""}</div>`;
+      on("#bind-profile", "click", async () => {
+        const chosen = $("#p-profile").value;
+        if (!matching.some((profile) => profile.id === chosen)) throw new Error("请选择属于当前店铺的处理器账户");
+        const load = ++bindingLoad;
+        const result = await ctx.api("/admin/processor-profiles/bindings/" + encodeURIComponent(product.id), { profile_id: chosen }, "PUT");
+        if (!active() || load !== bindingLoad) return;
+        profileBinding = result;
+        drawConfiguration();
+        ctx.notify("处理器账户已绑定，仅用于之后发行的卡密");
+      });
+      on("#unbind-profile", "click", async () => {
+        const load = ++bindingLoad;
+        await ctx.api("/admin/processor-profiles/bindings/" + encodeURIComponent(product.id), null, "DELETE");
+        if (!active() || load !== bindingLoad) return;
+        profileBinding = null;
+        drawConfiguration();
+      });
     }
     function syncMode() {
       const mode = $("#p-mode").value;
@@ -666,7 +682,7 @@
           mode === "script" &&
           !catalog.some((item) => item.id === processorId)
         )
-          throw new Error("请选择可用的官方处理器");
+          throw new Error("请选择可用的商品处理器");
         const body = {
           name: $("#p-name").value,
           description: $("#p-description").value,
@@ -688,8 +704,9 @@
           progress_steps: progressSteps,
           support_email: $("#p-support-email").value.trim(),
         };
-        if (ctx.canConfigure)
-          body.processor_config = mode === "script" ? processorConfig : {};
+        // Configuration is not part of generic product editing. The existing
+        // processor ID remains unchanged for product-scoped managers.
+        if (!owner) body.processor_id = product.processor_id || "";
         const result = await ctx.api(
           ctx.role === "staff"
             ? "/manage/product"
@@ -697,7 +714,8 @@
           body,
           product.id ? "PUT" : "POST",
         );
-        // Keep the app's in-memory product list current even after navigation.
+        // A late save belongs to its original view and tenant.
+        if (!active()) return;
         const updated =
           ctx.role === "staff"
             ? [result]
@@ -724,7 +742,7 @@
       if (!active()) return;
       catalog = Array.isArray(response) ? response : response.processors || [];
       $("#p-processor").innerHTML =
-        `<option value="">请选择官方处理器</option>${catalog.map((spec) => `<option value="${escape(spec.id)}">${escape(localized(spec.name, ctx.lang))}</option>`).join("")}`;
+        `<option value="">请选择商品处理器</option>${catalog.map((spec) => `<option value="${escape(spec.id)}">${escape(localized(spec.name, ctx.lang))}</option>`).join("")}`;
       if (processorId && !catalog.some((spec) => spec.id === processorId)) {
         $("#p-processor").innerHTML +=
           `<option value="${escape(processorId)}">${escape(processorId)}（当前版本不可用）</option>`;

@@ -90,7 +90,7 @@ function appFixture({ uploadLimit = 20 * 1024 * 1024 } = {}) {
     context.fixtureValues = values;
     for (const name of Object.keys(values)) vm.runInContext(`${name} = fixtureValues[${JSON.stringify(name)}]`, context);
   };
-  return { context, node, requests, collections, timers, downloads, navigate, set, getContext: () => adapter.getContext() };
+  return { context, node, requests, collections, timers, downloads, navigate, set, getContext: () => adapter.getContext(), getActions: () => adapter.actions };
 }
 
 const parameter = (key, type = "text") => ({ key, type, label: { "zh-CN": key }, description: {}, required: true, collapsed: true });

@@ -32,6 +32,20 @@ def init_schema(c):
         "id TEXT PRIMARY KEY, size INTEGER NOT NULL DEFAULT 0 CHECK(size>=0), "
         "created REAL NOT NULL)"
     )
+    columns = {
+        row["name"] for row in c.execute("PRAGMA table_info(upload_reservations)")
+    }
+    if "shop_id" not in columns:
+        c.execute(
+            "ALTER TABLE upload_reservations ADD COLUMN shop_id TEXT REFERENCES shops(id)"
+        )
+    if "product_id" not in columns:
+        c.execute(
+            "ALTER TABLE upload_reservations ADD COLUMN product_id TEXT REFERENCES products(id)"
+        )
+    c.execute(
+        "CREATE INDEX IF NOT EXISTS upload_reservations_shop ON upload_reservations(shop_id)"
+    )
 
 
 def _directory():
@@ -62,21 +76,86 @@ def _totals(c):
     return stored, pending
 
 
-def check_storage_quota(c, additional, *, reservation_id=None):
+def _product_shop(c, product_id):
+    row = c.execute(
+        "SELECT shops.id,shops.storage_limit_bytes,shops.enabled FROM products "
+        "JOIN shops ON shops.id=products.shop_id WHERE products.id=?",
+        (product_id,),
+    ).fetchone()
+    if row is None or not row["enabled"]:
+        fail("商品不存在", 404)
+    return row
+
+
+def _shop_totals(c, shop_id):
+    stored = c.execute(
+        "SELECT COALESCE(SUM(job_files.size),0) FROM job_files "
+        "JOIN products ON products.id=job_files.product_id "
+        "WHERE products.shop_id=? AND job_files.content IS NOT NULL",
+        (shop_id,),
+    ).fetchone()[0]
+    pending = c.execute(
+        "SELECT COALESCE(SUM(size),0) FROM upload_reservations WHERE shop_id=?",
+        (shop_id,),
+    ).fetchone()[0]
+    return stored, pending
+
+
+def check_storage_quota(c, additional, *, reservation_id=None, product_id=None):
+    """Check replacement bytes on commit, or additional bytes while receiving.
+
+    The caller owns a BEGIN IMMEDIATE transaction. A commit substitutes the
+    reservation with the new BLOB exactly once; a stream increment includes all
+    currently reserved bytes. The product's shop is always derived from SQLite.
+    """
+    if not isinstance(additional, int) or additional < 0:
+        raise ValueError("Additional storage bytes must be a nonnegative integer")
     stored, pending = _totals(c)
+    reservation = None
     if reservation_id:
-        row = c.execute(
-            "SELECT size FROM upload_reservations WHERE id=?", (reservation_id,)
+        reservation = c.execute(
+            "SELECT size,shop_id,product_id FROM upload_reservations WHERE id=?",
+            (reservation_id,),
         ).fetchone()
-        if not row:
+        if not reservation:
             fail("上传已失效，请重新上传", 409)
-        pending -= row[0]
+        pending -= reservation["size"]
+        if reservation["product_id"] is not None:
+            if product_id not in (None, reservation["product_id"]):
+                fail("上传不能更换所属商品", 409)
+            product_id = reservation["product_id"]
     if stored + pending + additional > UPLOAD_TOTAL_BYTES:
         fail("服务器文件存储额度已满，请联系商家", 507)
     require_disk_space(additional, pending=pending)
+    if product_id is not None:
+        shop = _product_shop(c, product_id)
+        if reservation and reservation["shop_id"] not in (None, shop["id"]):
+            fail("上传不能更换所属店铺", 409)
+        own_stored, own_pending = _shop_totals(c, shop["id"])
+        if reservation and reservation["shop_id"] == shop["id"]:
+            own_pending -= reservation["size"]
+        if own_stored + own_pending + additional > shop["storage_limit_bytes"]:
+            fail("此店铺的文件存储额度已满，请联系商家", 507)
 
 
-def storage_usage(c):
+def storage_usage(c, shop_id=None):
+    """Shop callers receive only their own logical allocation, never disk state."""
+    if shop_id is not None:
+        shop = c.execute(
+            "SELECT storage_limit_bytes FROM shops WHERE id=?", (shop_id,)
+        ).fetchone()
+        if shop is None:
+            fail("店铺不存在", 404)
+        stored, pending = _shop_totals(c, shop_id)
+        return {
+            "stored_bytes": stored,
+            "uploading_bytes": pending,
+            "limit_bytes": shop["storage_limit_bytes"],
+            "active_uploads": c.execute(
+                "SELECT COUNT(*) FROM upload_reservations WHERE shop_id=?", (shop_id,)
+            ).fetchone()[0],
+            "upload_concurrency": UPLOAD_CONCURRENCY,
+        }
     stored, pending = _totals(c)
     return {
         "stored_bytes": stored,
@@ -89,6 +168,19 @@ def storage_usage(c):
         ).fetchone()[0],
         "upload_concurrency": UPLOAD_CONCURRENCY,
     }
+
+
+def set_shop_storage_limit(c, shop_id, limit):
+    """Caller must authorize a superadmin; allocated bytes cannot be discarded."""
+    if type(limit) is not int or not 1 <= limit <= UPLOAD_TOTAL_BYTES:
+        fail("店铺文件额度必须为正整数且不超过全站文件额度")
+    if not c.execute("SELECT id FROM shops WHERE id=?", (shop_id,)).fetchone():
+        fail("店铺不存在", 404)
+    stored, pending = _shop_totals(c, shop_id)
+    if limit < stored + pending:
+        fail("店铺文件额度不能小于已存储和正在上传的文件总量", 409)
+    c.execute("UPDATE shops SET storage_limit_bytes=? WHERE id=?", (limit, shop_id))
+    return storage_usage(c, shop_id)
 
 
 def _dead_lock(path):
@@ -212,12 +304,39 @@ class UploadReservation:
     def __init__(self, identifier):
         self.id = identifier
 
+    def bind_product(self, c, product_id):
+        """Bind once to an authenticated product before its payload is spooled."""
+        row = c.execute(
+            "SELECT size,product_id FROM upload_reservations WHERE id=?", (self.id,)
+        ).fetchone()
+        if row is None:
+            fail("上传已失效，请重新上传", 409)
+        if row["product_id"] not in (None, product_id):
+            fail("上传不能更换所属商品", 409)
+        shop = _product_shop(c, product_id)
+        check_storage_quota(
+            c, row["size"], reservation_id=self.id, product_id=product_id
+        )
+        c.execute(
+            "UPDATE upload_reservations SET shop_id=?,product_id=? WHERE id=?",
+            (shop["id"], product_id, self.id),
+        )
+
     def grow(self, size):
         """Reserve file bytes atomically before the multipart spool writes them."""
         if size == 0:
             return
         with db() as c:
-            check_storage_quota(c, size)
+            row = c.execute(
+                "SELECT product_id,shop_id FROM upload_reservations WHERE id=?",
+                (self.id,),
+            ).fetchone()
+            if row is None:
+                fail("上传已失效，请重新上传", 409)
+            if row["product_id"] is not None:
+                if _product_shop(c, row["product_id"])["id"] != row["shop_id"]:
+                    fail("上传所属店铺已变化，请重新上传", 409)
+            check_storage_quota(c, size, product_id=row["product_id"])
             changed = c.execute(
                 "UPDATE upload_reservations SET size=size+? WHERE id=?", (size, self.id)
             ).rowcount

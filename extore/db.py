@@ -87,8 +87,23 @@ def init():
         from .link_access import init_schema as init_link_access
 
         init_link_access(c)
-        if c.execute("PRAGMA user_version").fetchone()[0] < 10:
-            c.execute("PRAGMA user_version=10")
+        from .shops import init_schema as init_shops_schema
+
+        init_shops_schema(c)
+        from .maintenance import init_schema as init_maintenance_schema
+
+        init_maintenance_schema(c)
+        from .secret_store import init_schema as init_secret_store_schema
+
+        init_secret_store_schema(c)
+        from .processor_profiles import init_schema as init_processor_profiles_schema
+
+        init_processor_profiles_schema(c)
+        from .mail import init_schema as init_mail_schema
+
+        init_mail_schema(c)
+        if c.execute("PRAGMA user_version").fetchone()[0] < 11:
+            c.execute("PRAGMA user_version=11")
     # WAL is set outside a transaction.
     with sqlite3.connect(DATA / "extore.sqlite3") as c:
         c.execute("PRAGMA journal_mode=WAL")
@@ -116,9 +131,18 @@ def set_setting(c, key, value):
 
 
 def audit(c, actor, action, target):
+    from .maintenance import next_audit_id, resolve_audit_shop
+
     c.execute(
-        "INSERT INTO audit(actor,action,target,created) VALUES (?,?,?,?)",
-        (actor, action, target, time.time()),
+        "INSERT INTO audit(id,actor,action,target,created,shop_id) VALUES (?,?,?,?,?,?)",
+        (
+            next_audit_id(c),
+            actor,
+            action,
+            target,
+            time.time(),
+            resolve_audit_shop(c, actor, target),
+        ),
     )
 
 
@@ -138,6 +162,9 @@ def event(c, kind, product_id, job=None):
         payload["data"] = {
             k: job[k] for k in ("id", "state", "attempt", "progress", "message")
         }
+        if job["state"] == "needs_input":
+            payload["data"]["retry_mode"] = job["retry_mode"]
+            payload["data"]["retry_reason_type"] = job["retry_reason_type"]
         payload["data"]["variant"] = card_variant(c, job)
         payload["data"]["steps"], payload["data"]["completed_steps"] = progress_view(
             c, job

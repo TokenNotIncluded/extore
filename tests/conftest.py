@@ -19,6 +19,9 @@ def clean():
     init()
     with db() as c:
         for table in (
+            "mail_outbox",
+            "account_tokens",
+            "shop_integration_keys",
             "api_requests",
             "outbox",
             "events",
@@ -29,6 +32,7 @@ def clean():
             "credentials",
             "sessions",
             "owner_cli_action_challenges",
+            "owner_cli_password_challenges",
             "owner_cli_approval_challenges",
             "owner_cli_challenges",
             "owner_cli_requests",
@@ -41,9 +45,14 @@ def clean():
             "receipt_batch_cards",
             "receipt_batches",
             "grants",
+            "processor_card_bindings",
+            "processor_product_bindings",
+            "processor_profile_revisions",
+            "processor_profiles",
             "jobs",
             "cards",
             "products",
+            "shops",
             "settings",
         ):
             c.execute("DELETE FROM " + table)

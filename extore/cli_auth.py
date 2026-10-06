@@ -174,6 +174,7 @@ def _bind_view(device, staff, already):
     return {
         "device_id": device["id"],
         "product_id": staff["product_id"],
+        "shop_id": staff["shop_id"],
         "client_name": device["client_name"],
         "fingerprint": device["fingerprint"],
         "already_authorized": already,
@@ -310,7 +311,7 @@ async def cli_session(request: Request):
         ip, ua = request_metadata(request)
         c.execute(
             "INSERT INTO sessions(digest,role,staff_id,expires,created,id,last_seen,ip,ua,"
-            "revoked,channel,device_id,client_name) VALUES (?,'staff',?,?,?,?,?,?,?,0,'cli',?,?)",
+            "revoked,channel,device_id,client_name,shop_id,auth_at,auth_method) VALUES (?,'staff',?,?,?,?,?,?,?,0,'cli',?,?,?,?,?)",
             (
                 digest(access),
                 staff["id"],
@@ -322,6 +323,9 @@ async def cli_session(request: Request):
                 ua,
                 device["id"],
                 device["client_name"],
+                staff["shop_id"],
+                now,
+                "device_key",
             ),
         )
         c.execute("UPDATE cli_devices SET last_seen=? WHERE id=?", (now, device["id"]))
@@ -334,6 +338,7 @@ async def cli_session(request: Request):
             "device_id": device["id"],
             "session_id": sid,
             "product_id": staff["product_id"],
+            "shop_id": staff["shop_id"],
             "permissions": staff["permissions"],
         }
 
@@ -351,6 +356,7 @@ def cli_status(request: Request):
             "channel": "cli",
             "origin": ORIGIN,
             "product_id": s["product_id"],
+            "shop_id": s["shop_id"],
             "product_name": json.loads(row["config"]).get("name") if row else None,
             "permissions": s["permissions"],
             "link_id": s["staff_id"],
@@ -399,6 +405,9 @@ async def create_cli_ticket(request: Request):
         if s["role"] == "staff" and body.staff_id not in (None, s["staff_id"]):
             fail("不能为其它商品管理链接创建 CLI 授权口令", 403)
         staff = staff_authorization(c, staff_id)
+        from .shops import authorize_product
+
+        authorize_product(c, s, staff["product_id"])
         if staff["cli_uses"] >= staff["max_cli_uses"]:
             fail("此商品管理链接已达到 CLI 设备授权次数上限", 409)
         now, value = time.time(), "cli1_" + token()
@@ -410,7 +419,7 @@ async def create_cli_ticket(request: Request):
         )
         audit(
             c,
-            s["staff_id"] if s["role"] == "staff" else "owner",
+            s["staff_id"] if s["role"] == "staff" else s.get("account_id", "owner"),
             "cli.ticket.create",
             staff["id"],
         )
@@ -421,6 +430,7 @@ async def create_cli_ticket(request: Request):
             "expires_in": max(0, int(expires - now)),
             "staff_id": staff["id"],
             "product_id": staff["product_id"],
+            "shop_id": staff["shop_id"],
         }
 
 

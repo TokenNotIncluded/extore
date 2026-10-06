@@ -41,7 +41,10 @@ def test_legacy_staff_links_migrate_without_escalating_permissions(
             PRAGMA user_version=1;
             """
         )
-        c.execute("INSERT INTO products VALUES (?,?,?)", ("product", "{}", now))
+        c.execute(
+            "INSERT INTO products(id,config,created) VALUES (?,?,?)",
+            ("product", "{}", now),
+        )
         c.execute(
             "INSERT INTO staff VALUES (?,?,?,?,?,?)",
             ("legacy", "legacy-digest", "product", "原有链接", now + 86400, 0),
@@ -56,7 +59,7 @@ def test_legacy_staff_links_migrate_without_escalating_permissions(
         database.init()
         database.init()
         with database.db() as c:
-            assert c.execute("PRAGMA user_version").fetchone()[0] == 10
+            assert c.execute("PRAGMA user_version").fetchone()[0] == 11
             assert "result_json" in {
                 row["name"] for row in c.execute("PRAGMA table_info(jobs)")
             }
@@ -86,6 +89,7 @@ def test_legacy_staff_links_migrate_without_escalating_permissions(
                 "uses": 1,
                 "max_cli_uses": 1,
                 "cli_uses": 0,
+                "archived": 0,
             }
             assert staff_authorization(c, "legacy")["permissions"] == [
                 "queue.view",
@@ -118,7 +122,10 @@ def test_legacy_staff_links_migrate_without_escalating_permissions(
 )
 def test_corrupt_permissions_require_dependencies(permission):
     with database.db() as c:
-        c.execute("INSERT INTO products VALUES (?,?,?)", ("product", "{}", time.time()))
+        c.execute(
+            "INSERT INTO products(id,config,created) VALUES (?,?,?)",
+            ("product", "{}", time.time()),
+        )
         c.execute(
             "INSERT INTO staff(id,digest,product_id,name,expires,permissions) VALUES (?,?,?,?,?,?)",
             (

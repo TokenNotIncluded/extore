@@ -2,7 +2,7 @@
 
 [返回项目首页](../README.md) · [接口与事件](protocol.md) · [CLI 指南](cli.md) · [原生 WebMCP](webmcp.md) · [Python SDK](python-sdk.md)
 
-Extore 面向一个商家，负责卡密验证、信息收集、任务处理与交付。支付和支付订单管理由另一平台承担，通过制卡接口、Webhook 和签名回调对接。
+Extore 负责卡密验证、信息收集、任务处理与交付，支持隔离的多家店铺。平台管理员维护店铺、注册和 SMTP；店主只管理自己的商品与任务。支付和支付订单管理仍由另一平台承担，通过制卡接口、Webhook 和签名回调对接。付款适配器默认关闭，尚未选定提供商；内置预设不会发起付款。
 
 - [从 PyPI 安装](#从-pypi-安装)
 - [本地运行](#本地运行)
@@ -20,7 +20,7 @@ Extore 面向一个商家，负责卡密验证、信息收集、任务处理与�
 
 ## 从 PyPI 安装
 
-需要 Linux、Python 3.12+ 和 [uv](https://docs.astral.sh/uv/)。安装包已包含网页、Python SDK 与固定版本的官方处理器，无需另行克隆 Git 子模块：
+需要 Linux、Python 3.12+ 和 [uv](https://docs.astral.sh/uv/)。安装包已包含网页、Python SDK 与固定版本的预设处理器，无需另行克隆 Git 子模块：
 
 ```sh
 uv tool install extore
@@ -48,7 +48,7 @@ uv build -q
 ```sh
 git clone --recurse-submodules https://github.com/TokenNotIncluded/extore.git
 cd extore
-# 已有工作目录可先取得主仓库记录的官方处理器版本
+# 已有工作目录可先取得主仓库记录的预设处理器版本
 git submodule update --init processors/official
 uv sync --frozen
 uv run python -m extore.cli init
@@ -63,7 +63,9 @@ uv run uvicorn extore.app:app --host 127.0.0.1 --port 8000
 uv run python -m extore.worker
 ```
 
-打开 `http://localhost:8000`。连续点击左上角 Logo 5 次（2.5 秒内）进入后台，也可访问 `/admin`。输入服务器初始化时设置的密码，注册 Passkey 后获得后台权限，**密码立即失效**。密码会话只能注册 Passkey，不能管理商品。支持多个 Passkey；从浏览器添加或移除前需要最近 10 分钟内登录。[店主 CLI](cli-owner.md#passkey-注册)使用设备签名，注册仍需真实 WebAuthn 结果。
+打开 `http://localhost:8000`。连续点击左上角 Logo 5 次（2.5 秒内）进入后台，也可访问 `/admin`。平台管理员输入服务器初始化密码，注册 Passkey 后获得后台权限，**这套首次密码立即失效**；首次密码会话只能注册 Passkey，不能管理商品。支持多个 Passkey；从浏览器添加或移除前需要最近 10 分钟内登录。[店主 CLI](cli-owner.md#passkey-注册)使用设备签名，注册仍需真实 WebAuthn 结果。
+
+公众注册默认关闭。平台管理员配置加密保存的 SMTP 后，可创建店铺并发送店主邀请。店主从 `/account/login` 使用验证过的邮箱与密码登录，可启用 TOTP 和注册多个 Passkey；店主添加 Passkey 不会禁用邮箱密码。账号、恢复及 CLI 命令见[多店与账号](shops.md)。
 
 Passkey 需要 HTTPS 或 localhost。更换域名 / RP ID 后，旧 Passkey 无法用于新域名；须先规划固定域名。
 
@@ -73,15 +75,15 @@ Passkey 需要 HTTPS 或 localhost。更换域名 / RP ID 后，旧 Passkey 无�
 
 ## 基本流程
 
-1. 商家创建商品，设置公开性、处理方式及交付规则。队列商品自定义顾客输入和交付输出；自动商品选择官方处理器，由处理器定义输入与输出。
+1. 商家创建商品，设置公开性、处理方式及交付规则。队列商品自定义顾客输入和交付输出；自动商品选择预设处理器，由处理器定义输入与输出。
 2. 在后台生成卡密（只显示一次），或支付平台通过制卡接口领取卡密。
 3. 顾客输入卡密。非公开商品仅在验证成功后显示。
 4. 顾客填写参数，卡密锁定到唯一任务，重复提交返回同一个任务。
-5. 队列管理者、官方处理器或外部平台完成任务。顾客保存领取链接，查看状态并领取内容。队列管理者也可附原因退回补充或拒绝任务。
+5. 队列管理者、预设处理器或外部平台完成任务。顾客保存领取链接，查看状态并领取内容。队列管理者也可说明原因，要求「修改后重提」或「原资料重试」，或拒绝任务。
 
 成功后卡密不能再次创建任务。可重复查看商品可用原卡密重新获得领取链接；仅一次领取商品须保存原领取链接。领取链接有效 30 天，放在 URL 片段中，HTTP 请求与访问日志不包含凭证。
 
-每个商品有独立的队列，查看、筛选和批处理都限定当前商品。人或 AI 领取任务后，才能更新、完成或标记自己领取的队列任务；自动任务由官方处理器或外部平台处理。
+每个商品有独立的队列，查看、筛选和批处理都限定当前商品。人或 AI 领取任务后，才能更新、完成或标记自己领取的队列任务；自动任务由预设处理器或外部平台处理。
 
 队列默认显示「待处理」，包含排队、处理中和失败待核实任务；成功交付及已销毁任务收进「已处理」，可主动切换查看。原生 AI 工具使用同样的默认范围，避免把历史任务反复带进上下文。
 
@@ -91,7 +93,7 @@ Passkey 需要 HTTPS 或 localhost。更换域名 / RP ID 后，旧 Passkey 无�
 
 商品可定义规格档位、价格和属性，按档位发行卡密并统计库存；支付平台仍负责实际定价、收款和销售库存。商品信息可一键复制为供 AI 创建上游商品的提示词。队列支持步骤、已完成步骤、给顾客的消息和商品内排位，顾客等待页显示循环动画与商家邮箱快捷链接。
 
-卡密按商品和批次管理，可设置到期时间，查看剩余库存、使用、验码、领取与处理统计。查询用内部 ID 或尾号定位，不重新显示原卡密；失败可重试卡密单独统计；退回补充的卡密计回剩余，但仍绑定原顾客任务，不能当作从未使用的卡密再次销售。已拒绝卡密不能重提，独立计数。
+卡密按商品和批次管理，可设置到期时间，查看剩余库存、使用、验码、领取与处理统计。查询用内部 ID 或尾号定位，不重新显示原卡密；失败可重试卡密单独统计；需要重试的卡密计回剩余，但仍绑定原顾客任务，不能当作从未使用的卡密再次销售。原因可分为顾客资料、外部服务或处理程序问题；原资料重试不会要求顾客重新上传材料。已拒绝卡密不能重提，独立计数。
 
 ## 商品管理链接
 
@@ -113,7 +115,7 @@ Passkey 需要 HTTPS 或 localhost。更换域名 / RP ID 后，旧 Passkey 无�
 
 - [`extore manage`](cli.md)：商品配置、卡密、队列、链接、事件和会话，授权仍限单个商品；多个授权可在客户端聚合。
 - [`extore customer`](cli-customer.md)：从私密标准输入验码，按卡密快照填参、上传材料、重提、领取和下载；与管理凭证分开。
-- [`extore admin`](cli-owner.md)：首次用真实 Passkey 批准店主设备，全店操作使用设备私钥签名。设备最多 30 天，会话最多 8 小时，后续可签名续签。
+- [`extore admin`](cli-owner.md)：店主可使用邮箱密码及已启用的第二因素登录，或用真实 Passkey 批准设备；平台管理员使用 Passkey 批准。设备身份固定到所属店铺或平台，全店操作使用设备私钥签名。设备最多 30 天，会话最多 8 小时，后续可签名续签。
 
 默认列表返回摘要，任务输入、教程和完整配置按需获取。制卡、创建授权等结果保存到 0600 文件；上传不代表已提交或已交付。[AI 提示词](ai-prompts.md)提供可复制的操作说明。完整 CLI 安装要求为 `extore>=0.6.0`，也可在该版本源码目录用 `uv run extore …`。
 
@@ -122,21 +124,23 @@ Passkey 需要 HTTPS 或 localhost。更换域名 / RP ID 后，旧 Passkey 无�
 自动处理有两种：
 
 - **Webhook**：发送 `redemption.requested`，独立外部服务按任务 ID 去重，再签名回调状态、进度或结构化交付结果。
-- **官方处理器**：只能选择 [TokenNotIncluded/extore-processors](https://github.com/TokenNotIncluded/extore-processors) 中的白名单预设。`processors/official` 是固定到主仓库记录提交的 Git 子模块，输入输出由预设代码定义；商家只能选择预设并填写配置，不能上传程序、指定文件名或 Git 地址。
+- **预设处理器**：只能选择 [TokenNotIncluded/extore-processors](https://github.com/TokenNotIncluded/extore-processors) 中的白名单预设。`processors/official` 是固定到主仓库记录提交的 Git 子模块，输入、输出和店铺配置结构由代码定义；店主在本店创建加密配置档案并绑定商品，不能上传程序、指定文件名或 Git 地址。发行卡密会保存配置档案的版本，改配置并更新商品绑定只影响后续发行的卡密；撤销档案会阻止旧版本继续执行。
 
-内置预设 `resource_link` 交付已配置的 HTTPS 资源链接与可选说明；`personalized_text` 根据顾客姓名生成模板文本。升级处理器需审核代码与预设结构后更新主仓库的固定提交。已审核的固定代码仍按 worker 用户权限运行，不是任意恶意代码的沙箱；其他自动化可放在独立的 HTTPS 公网 Webhook 服务。
+内置预设 `resource_link` 交付已配置的 HTTPS 资源链接与可选说明；`personalized_text` 根据顾客姓名生成模板文本。预设能从代码初始化空步骤计划，再逐步更新已完成项和一句话进度；已有商家计划不会被替换。升级处理器需审核代码与预设结构后更新主仓库的固定提交。已审核的固定代码仍按 worker 用户权限运行，不是任意恶意代码的沙箱；其他自动化可放在独立的 HTTPS 公网 Webhook 服务。
 
 内容交付可设置重复查看或仅一次领取；服务交付只显示处理结果。顾客可立即销毁完成的交付：删除应用内内容及参数，后续链接无法查看。**这不会撤回已下载的副本、外部平台内容、已经发出的事件或历史备份，也不承诺物理介质的安全擦除。**一次领取的内容在成功返回后即从数据库中移除；网络中断时无法再次领取，应由商家另行处理。
 
 ## 认证恢复
 
-只能在服务器上操作，没有网页密码重置入口：
+平台管理员丢失全部 Passkey 时，只能在服务器恢复首次密码：
 
 ```sh
 uv run python -m extore.cli reset-auth
 ```
 
-输入 `RESET` 确认，然后在终端私密输入新密码。所有 Passkey、浏览器与 CLI 登录会话、CLI 设备授权、票据和认证挑战被撤销。重新进入后台，完成新 Passkey 注册。商品、卡密与任务保留。商品管理链接仍存在；需要撤销时在后台处理。商品和店主 CLI 设备均被撤销，不能保留旧私钥继续续签；新店主设备需要重新用 Passkey 批准。设备管理见[商品 CLI](cli.md#配置输出与撤销)及[店主 CLI](cli-owner.md#配置与退出)。
+输入 `RESET` 确认，然后在终端私密输入新密码。平台管理员的 Passkey、登录会话及平台 CLI 设备被撤销，认证挑战被清除；重新进入后台注册新 Passkey。各店账号、Passkey、商品管理设备和业务数据保留。
+
+店主使用 `/account/reset` 发送一次性邮件链接重置密码，已启用 TOTP 时还须提供验证码或恢复码。改密码或重置密码会撤销本店账号会话、店主 CLI 设备及商品处理设备；商品、卡密、任务与管理链接配置保留。设备管理见[商品 CLI](cli.md#配置输出与撤销)、[店主 CLI](cli-owner.md#配置与退出)及[多店与账号](shops.md)。
 
 ## 生产运行
 
@@ -147,7 +151,7 @@ export EXTORE_ORIGIN=https://redeem.example.com
 export EXTORE_DATA=/var/lib/extore
 ```
 
-使用反向代理提供 HTTPS。API 与 worker 必须共享同一个数据目录及配置。一个数据库运行一个 worker；API 可运行多个进程，但建议单进程起步。数据目录权限为 0700，部署前 `umask 077`，专用低权限用户运行。数据库、WAL 和 `issuance.key` 都是敏感文件。平台制卡响应为实现幂等重试采用加密存储，密钥独立保存在该文件，必须一并备份。
+使用反向代理提供 HTTPS。API 与 worker 必须共享同一个数据目录及配置。一个数据库运行一个 worker；API 可运行多个进程，但建议单进程起步。数据目录权限为 0700，部署前 `umask 077`，专用低权限用户运行。数据库、WAL、`issuance.key` 和 `master-secrets.key` 都是敏感文件，必须一并备份。前者保护平台制卡幂等响应，后者保护 SMTP、邮件队列、TOTP 和处理器配置档案；丢失密钥后不能解密既有秘密。
 
 ```sh
 uv run uvicorn extore.app:app --host 127.0.0.1 --port 8000 --forwarded-allow-ips=127.0.0.1
@@ -170,7 +174,7 @@ docker compose run --rm -it api python -m extore.cli init
 docker compose up -d
 ```
 
-官方处理器随程序包安装，执行超时 120 秒；输出最多 1 MB，单条结果最多 100 KB。顾客接口不返回处理器配置中的秘密。
+预设处理器随程序包安装，执行超时 120 秒；输出最多 1 MB，单条结果最多 100 KB。顾客接口不返回处理器配置中的秘密。
 
 未知、超时、崩溃进入“待核实”，默认不能重试。仅明确未交付的失败允许按商品配置重试；商家可以在核实外部结果后放行。下游仍必须以**稳定任务 ID**避免重复发货，无法跨第三方事务承诺绝对只执行一次。
 
@@ -185,17 +189,34 @@ Webhook 须使用 HTTPS 公网地址；DNS 校验后固定连接 IP、保留域�
 | `EXTORE_UPLOAD_FILE_BYTES` | `20971520`（20 MiB） | 单文件上限，可降低；当前最高 20 MiB |
 | `EXTORE_UPLOAD_JOB_BYTES` | `104857600`（100 MiB） | 每张卡密现存附件总容量 |
 | `EXTORE_UPLOAD_JOB_FILES` | `100` | 每张卡密现存附件数量 |
+| `EXTORE_UPLOAD_SHOP_BYTES` | `1073741824`（1 GiB） | 新店铺的默认附件额度；平台管理员可分别调整 |
 | `EXTORE_UPLOAD_TOTAL_BYTES` | `5368709120`（5 GiB） | 全站保留附件及正在接收文件的逻辑容量 |
 | `EXTORE_UPLOAD_DISK_RESERVE_BYTES` | `536870912`（512 MiB） | 实际磁盘剩余空间保留量，另外预留写入副本空间 |
 | `EXTORE_UPLOAD_CONCURRENCY` | `4` | 同时上传数量，最高 64 |
 | `EXTORE_UPLOAD_TIMEOUT_SECONDS` | `300`（5 分钟） | 一次上传的接收期限 |
 | `EXTORE_UPLOAD_DRAFT_TTL_SECONDS` | `86400`（24 小时） | 未绑定附件草稿保留时间 |
 
-配置须满足单文件容量 ≤ 单卡容量 ≤ 全站容量。`GET /api/upload-limits` 只公开 `max_file_bytes`、`max_card_bytes`、`max_card_files`，供顾客表单显示限制；不公开磁盘用量。商家可用 `GET /api/admin/storage` 查看 `stored_bytes`、`uploading_bytes`、`limit_bytes`、`disk_free_bytes`、`disk_reserve_bytes`、`active_uploads` 和 `upload_concurrency`。超出文件或卡密额度返回 413，同时上传过多返回 429，超时返回 408，全站额度或实际磁盘空间不足返回 507。
+配置须满足单文件容量 ≤ 单卡容量 ≤ 全站容量。`GET /api/upload-limits` 只公开 `max_file_bytes`、`max_card_bytes`、`max_card_files`，供顾客表单显示限制；不公开磁盘用量。`GET /api/admin/storage` 对店主只返回本店 `stored_bytes`、`uploading_bytes`、`limit_bytes`、`active_uploads` 和 `upload_concurrency`，不泄露其他店的用量；平台管理员另外能查看全站额度与实际磁盘余量。超出文件或卡密额度返回 413，同时上传过多返回 429，超时返回 408，全站额度或实际磁盘空间不足返回 507。
 
-附件内容保存在 SQLite BLOB 中，上传过程中实际接收的字节先占用全站额度，临时文件与数据库使用同一受检查的文件系统。worker 每 60 秒执行一次维护，每轮最多清理 100 条、20 MiB 的过期草稿，积压逐步回收；清理时也检查 WAL 写入所需的磁盘空间。仅删除过期的未绑定草稿和已中断上传占用，不按年龄删除已绑定材料，也保留当前处理中尝试的交付草稿。任务提交、重新提交、一次下载及销毁仍按各自规则绑定或清除内容。
+附件内容保存在 SQLite BLOB 中，上传过程中实际接收的字节占用本店与全站额度，临时文件与数据库使用同一受检查的文件系统。worker 每 60 秒执行一次维护，每轮最多清理 100 条、20 MiB 的过期草稿，积压逐步回收；清理时也检查 WAL 写入所需的磁盘空间。仅删除过期的未绑定草稿和已中断上传占用，不按年龄删除已绑定材料，也保留当前处理中尝试的交付草稿。任务提交、重新提交、一次下载及销毁仍按各自规则绑定或清除内容。
 
 每次维护在清理事务结束后，用独立连接尝试截断 WAL，最多等待 100 毫秒；有活跃读者或锁冲突时跳过，下轮再试。删除 BLOB 会释放逻辑额度，SQLite 可以复用空闲页；数据库文件本身不会因此自动缩小。数据库与 WAL 的物理峰值可能高于附件逻辑容量，512 MiB 保留量也不是可用存储额度。部署时按实际磁盘余量安排备份和维护，不把逻辑清理当作磁盘文件已收缩。
+
+## 记录保留与清理
+
+记录维护默认启用，按店铺分别应用策略。已投递或已取消事件默认保留 30 天；停止投递的 dead 事件保留 90 天；登录与权限审计保留 180 天，最少可设为 90 天。失效管理链接保留 90 天后归档，保留祖先关系墓碑，不能通过删除父链接让后代权限重新有效。待投递事件、有效链接、卡密、任务、附件和业务快照不属于这项清理。
+
+链接列表默认只显示 active，history 查看失效链接，all 也包含归档墓碑。CLI 清理默认预览，明确传 `--apply` 才实际执行：
+
+```sh
+extore admin maintenance status
+extore admin maintenance cleanup --area events --limit 100
+extore admin maintenance cleanup --area events --limit 100 --apply
+extore manage links cleanup --product PRODUCT_ID
+extore manage links cleanup --product PRODUCT_ID --apply
+```
+
+店主只能清理本店记录，平台管理员可显式选 `--shop SHOP_ID`；商品管理链接必须有委派权限且只清理自己的失效后代，不能清理自己的链接、同级或上级。维护分批执行，不因单次预览或 SQLite 删除声称磁盘文件已经缩小。保留策略与接口见[协议文档](protocol.md#记录保留与清理)。
 
 ## 开发文档与检查
 
@@ -211,11 +232,11 @@ uv run python -m compileall -q extore processors/official
 node --check extore/static/app.js
 ```
 
-启动时迁移已有数据库，保留商品、卡密、任务和管理链接的权限范围。事件与回调协议仍为版本 1。本项目没有支付收款、支付订单管理或多商家功能；商品管理链接只授予指定商品的权限。
+启动时迁移已有数据库，保留商品、卡密、任务和管理链接的权限范围；旧业务归入默认店铺。事件与回调协议仍为版本 1。多店数据与配置相互隔离，商品管理链接只授予指定商品的权限。支付收款与支付订单管理由上游平台负责，本项目不以预设演示结果证明实际付款。
 
 ## Arch Linux 原生部署
 
-[`deploy/arch/PKGBUILD`](../deploy/arch/PKGBUILD) 在目标机用锁定依赖构建运行环境，以 pacman 包管理文件；不复制本地虚拟环境。API 与 worker 使用独立 systemd 服务、低权限 `extore` 用户、只写 `/var/lib/extore`。程序包包含固定版本的官方处理器，不从商家指定的目录加载程序。
+[`deploy/arch/PKGBUILD`](../deploy/arch/PKGBUILD) 在目标机用锁定依赖构建运行环境，以 pacman 包管理文件；不复制本地虚拟环境。API 与 worker 使用独立 systemd 服务、低权限 `extore` 用户、只写 `/var/lib/extore`。程序包包含固定版本的预设处理器，不从商家指定的目录加载程序。
 
 首次无人值守部署可执行 `sudo -u extore extore-admin bootstrap`：生成随机首次密码，存于 `/var/lib/extore/bootstrap-password.txt`，权限 0600，不输出到日志。由服务器操作人员私密读取并完成 Passkey 注册；注册成功后密码文件也会删除。
 

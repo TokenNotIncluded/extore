@@ -1,5 +1,16 @@
 # 验收记录
 
+以下记录针对各自标注的版本和日期，保留当时范围与未验收事项。早期的单商家、首次密码和脚本说明不代表当前多店版本；当前行为见[多店与账号](shops.md)及[运行指南](getting-started.md)。新增功能的代码通过检查不等同于生产部署、邮件送达或真实付款完成。
+
+## 0.6.0 本地验证（2026-10-07）
+
+- 主项目 Python 1244 项、Node 400 项、处理器 34 项通过；处理器另有 74 个子测例，不重复计入独立测试总数。
+- Ruff 检查与 107 个文件的格式检查、Python 编译、CLI 帮助及版本检查通过。文档另校验 24 段 JSON、1 段 JSON Lines、115 条 CLI 示例和 79 个本地链接；SDK 步骤示例分别验证空计划、商家已有计划与已有完成项。
+- 本机 `http://127.0.0.1:8018` 的首页经过真实浏览器查看并留存截图。这项结果只证明本地页面，不能替代公网部署验收。
+- SMTP 通过测试用 TLS 服务验证，未验证真实邮件送达；未验证真实硬件 Passkey、付款提供商或实际付款交易。付款适配默认关闭，提供商尚未选定。
+
+本节只记录本地结果，不作为仓库 CI、PyPI 发布或生产部署完成的证据；这些步骤应在完成后分别补充。
+
 ## 0.2.0 更新（2026-10-06）
 
 - 首页空状态改为「暂无公开商品」，采用分段虚线与简化折线撕纸边缘。桌面 1440 × 1000、手机 390 × 844 检查，管理链接权限选择可在手机操作。
@@ -84,10 +95,10 @@ ssh -t archczy 'sudo -u extore extore-admin reset-auth'
 本节记录 0.3.0。前面的首次密码、任意本地脚本、清空测试数据等内容属于当时的历史记录，不代表当前配置或执行方式。
 
 - 运行代码：`03a774cb038db2b7d125db99c162029bccfd5bd5`；Arch 原生包 `extore 0.3.0-1`，目标运行环境 CPython 3.14.7。
-- [主代码 CI](https://github.com/TokenNotIncluded/extore/actions/runs/37464387047) 成功，提交与生产运行代码一致：主项目 Python 261 项、Node 138 项、官方处理器 23 项，共 422 项。官方测试中的 52 个子测例不重复计入总数。Ruff、Python 编译、前端语法与 wheel 构建通过。
-- [主仓库](https://github.com/TokenNotIncluded/extore) 与[官方处理器仓库](https://github.com/TokenNotIncluded/extore-processors) 均已公开。`processors/official` 子模块固定到 `7b4303aeeaf947373cd97e2885a60790218c8257`，仅运行白名单中的 `resource_link` 和 `personalized_text`；商家不能指定任意程序、上传代码或配置其他 Git 地址。
+- [主代码 CI](https://github.com/TokenNotIncluded/extore/actions/runs/37464387047) 成功，提交与生产运行代码一致：主项目 Python 261 项、Node 138 项、预设处理器 23 项，共 422 项。处理器测试中的 52 个子测例不重复计入总数。Ruff、Python 编译、前端语法与 wheel 构建通过。
+- [主仓库](https://github.com/TokenNotIncluded/extore) 与[预设处理器仓库](https://github.com/TokenNotIncluded/extore-processors) 均已公开。`processors/official` 子模块固定到 `7b4303aeeaf947373cd97e2885a60790218c8257`，仅运行白名单中的 `resource_link` 和 `personalized_text`；商家不能指定任意程序、上传代码或配置其他 Git 地址。
 - 新增商品输入与结构化输出定义、仅状态的服务交付、按商品的人与 AI 共用队列、39 项原生 WebMCP 工具，以及卡密批次、尾号、到期和统计追踪。界面已提供全部／单张卡密复制与三种管理链接操作。
-- 本地隔离环境已验证队列和官方处理器的原生工具交付闭环；领取与销毁期间的页面上下文竞态回归测试通过。这些证据不替代本次真实生产闭环验收。
+- 本地隔离环境已验证队列和预设处理器的原生工具交付闭环；领取与销毁期间的页面上下文竞态回归测试通过。这些证据不替代本次真实生产闭环验收。
 - 源码归档 SHA-256：`2e145873275e3f49f19984c9d1e0b085f3014f4be637615ade6e826c77141f7f`，服务器构建前校验一致。
 - 升级前受保护备份：`/var/backups/extore/20261006-0.3.0`。既有核心数据逐字段指纹、发行密钥与原环境配置还原校验一致；保留商家已注册的 1 个 Passkey，未注册或重置生产认证。
 - 升级时保留 1 个商品、10 张卡密、1 个管理链接、0 个任务。这些是商家创建的真实数据，未作为测试数据清理。SQLite 结构版本为 4，`integrity_check=ok`。
@@ -101,8 +112,8 @@ ssh -t archczy 'sudo -u extore extore-admin reset-auth'
 本节为当前运行验收，替代前文的待补充生产闭环状态。仅修改和部署 Extore，没有部署或修改上游商城。
 
 - 运行代码：`202f1e9f79783b723e24363e6111661e62ef79fd`；原生包 `extore 0.4.0-2`，在 archczy 的 CPython 3.14.7 构建。后续验收文档提交不改变运行程序。
-- [代码 CI](https://github.com/TokenNotIncluded/extore/actions/runs/37477559545) 全部通过：主项目 Python 436 项、Node 215 项、官方处理器 24 项，共 675 项；54 个官方子测例不重复计数。Ruff、格式、编译、前端语法和 wheel 构建通过。
-- 官方处理器子模块为 `92911e9f418d21a892297023f02c6f5325bd115a`；[处理器 CI](https://github.com/TokenNotIncluded/extore-processors/actions/runs/37474976242) 通过。两个仓库均公开，仍只运行官方白名单预设。
+- [代码 CI](https://github.com/TokenNotIncluded/extore/actions/runs/37477559545) 全部通过：主项目 Python 436 项、Node 215 项、预设处理器 24 项，共 675 项；54 个处理器子测例不重复计数。Ruff、格式、编译、前端语法和 wheel 构建通过。
+- 预设处理器子模块为 `92911e9f418d21a892297023f02c6f5325bd115a`；[处理器 CI](https://github.com/TokenNotIncluded/extore-processors/actions/runs/37474976242) 通过。两个仓库均公开，仍只运行预设白名单预设。
 - 源码归档 SHA-256：`f09a11e70201671e1a7805c2adca34b9b28785a3ae9e6ebe16f9f379af749523`，服务器原生构建前校验一致。
 - 受保护备份：`/var/backups/extore/20261006-0.4.0` 与 `/var/backups/extore/20261006-0.4.0-2`；后一份包含已经上传的材料及会话。升级前后既有字段逐表指纹、发行密钥和环境文件字节一致，保留 1 个商家 Passkey，没有初始化、注册或重置生产认证。
 - SQLite 结构版本 7，`integrity_check=ok`。两个服务 active/running，`NRestarts=0`；数据目录 0700、发行密钥 0600。`pacman -Qkk` 检查 1545 个文件，仅环境配置与包默认值不同：保留原字节及更严格的 0600 权限；程序文件无修改。

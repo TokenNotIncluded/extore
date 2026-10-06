@@ -2,22 +2,22 @@
 
 SDK 位于 `extore/sdk/`，任务和回调模块只使用 Python 标准库。二次开发服务可以使用项目包中的 `extore.sdk`；单独分发时需保留包层级及 `extore/variants.py` 默认规格辅助模块。安装 SDK 不会向主网站添加处理器。
 
-## 官方自动处理器
+## 预设自动处理器
 
-主网站只运行 [TokenNotIncluded/extore-processors](https://github.com/TokenNotIncluded/extore-processors) 的已审核白名单。代码放在 `processors/official` Git 子模块中，由父仓库的 gitlink 固定运行版本，不跟随远程分支自动更新。商品用 `processor_id` 选择处理器，用 `processor_config` 保存配置；`mode="script"` 仅保留内部兼容命名。
+主网站只运行 [TokenNotIncluded/extore-processors](https://github.com/TokenNotIncluded/extore-processors) 的已审核白名单。代码放在 `processors/official` Git 子模块中，由父仓库的 gitlink 固定运行版本，不跟随远程分支自动更新。商品用 `processor_id` 选择处理器，再绑定本店的加密配置档案；`mode="script"` 仅保留内部兼容命名。旧写入字段 `processor_config` 会转换为配置档案，读取不返回原值，详见[处理器配置档案](shops.md#处理器配置档案)。
 
-商家不能安装任意 Python 文件、上传脚本、指定路径或 Git URL。增加处理器需要向官方仓库贡献代码，经审核后随主项目更新固定版本。顾客输入 `parameters` 和交付字段 `outputs` 由处理器代码定义，商品配置不能改写这些字段。
+商家不能安装任意 Python 文件、上传脚本、指定路径或 Git URL。增加处理器需要向处理器仓库贡献代码，经审核后随主项目更新固定版本。顾客输入 `parameters`、交付字段 `outputs` 和店铺配置 `shop_configuration` 由处理器代码定义，商品配置不能改写这些字段。预设结构仍使用 `schema_version=1`；`configuration` 是 `shop_configuration` 的兼容名称。
 
-| 处理器 | 商家配置 `processor_config` | 顾客输入 `parameters` | 交付 `output` |
+| 处理器 | 店铺配置 `shop_configuration` | 顾客输入 `parameters` | 交付 `output` |
 |---|---|---|---|
 | `resource_link` | 必填 `resource_url`：HTTPS 地址，最多 2000 字符；可选 `message`：多行文本，最多 10000 字符，默认空串 | 无 | 必填 `resource_url`；可选 `message` |
 | `personalized_text` | 必填 `template`：最多 10000 字符，默认 `你好，$name！\n你的商品已准备好。` | 必填 `name`：最多 200 字符 | 必填 `content`：多行文本 |
 
-模板只做纯文本替换：`$name` 和 `${name}` 插入称呼，`$$` 表示美元符号，不执行代码。资源处理器只返回配置的链接，不访问该地址。两个处理器的配置字段均标记为 `secret: true`，顾客 API 不返回 `processor_config`；交付结果在授权领取时返回。
+模板只做纯文本替换：`$name` 和 `${name}` 插入称呼，`$$` 表示美元符号，不执行代码。资源处理器只返回配置的链接，不访问该地址。两个处理器的配置字段均标记为 `secret: true`；管理和顾客读取接口均不返回档案原文，交付结果在授权领取时返回。发行卡密时固定档案版本，worker 仅解密该卡所属店铺的版本；更新配置不改变旧卡，撤销档案则阻止已有版本继续执行。
 
-可以保存尚未填完配置的商品草稿，但发行卡密和实际执行前必须通过完整校验。
+可以保存尚未绑定配置的商品草稿，但发行卡密和实际执行前必须通过完整校验。配置档案本身须符合代码定义的结构。
 
-官方包的 Python 调用示例：
+预设包的 Python 调用示例：
 
 ```python
 from extore_processors import get_processor
@@ -30,7 +30,7 @@ result = processor.run(
 # result == {"status": "succeeded", "output": {"content": "你好，小林！\n你的商品已准备好。"}}
 ```
 
-### 官方 worker 子进程协议
+### 预设 worker 子进程协议
 
 worker 调用固定模块 `python -m extore_processors <processor_id>`，stdin 包含顾客参数、商家配置，以及服务端绑定的规格和步骤元数据：
 
@@ -39,39 +39,60 @@ worker 调用固定模块 `python -m extore_processors <processor_id>`，stdin �
   "params": {"name": "小林"},
   "configuration": {"template": "你好，$name！\n你的商品已准备好。"},
   "variant": {"id":"default","name":"默认规格","description":"","price":null,"currency":"CNY","attributes":{},"enabled":true},
-  "steps": [{"id":"prepare","label":{"zh-CN":"准备内容","en":"Prepare"},"done":false}],
-  "completed_steps": []
+  "steps": [],
+  "completed_steps": [],
+  "shop_context": {"shop_id":"所属店铺 UUID","profile_id":"配置档案 UUID","revision":1}
 }
 ```
 
-当前官方 CLI 成功时输出一条 JSON Lines 结果：
+空计划时，内置预设先定义两个步骤，实际完成校验与结果准备后分别更新进度，最后输出唯一结果行。stdout 使用 JSON Lines，示意如下：
 
-```json
+```jsonl
+{"kind":"progress","progress_steps":[{"id":"validate_input","label":{"zh-CN":"校验资料","en":"Validate input"}},{"id":"prepare_delivery","label":{"zh-CN":"准备交付","en":"Prepare delivery"}}],"progress":0,"completed_steps":[],"message":"正在准备处理"}
+{"kind":"progress","progress":50,"completed_steps":["validate_input"],"message":"资料已核实，正在准备交付"}
+{"kind":"progress","progress":99,"completed_steps":["validate_input","prepare_delivery"],"message":"交付内容已准备好"}
 {"kind":"result","state":"succeeded","output":{"content":"你好，小林！\n你的商品已准备好。"}}
 ```
 
 CLI 校验失败以非零状态退出，只向 stderr 写入安全错误代码，不输出用户值。worker 丢弃 stderr，限制执行时间为 120 秒、stdout 总量为 1 MB、单行读取为 150 KB。结果后继续输出、非零退出、无结果、超时或格式错误均转为不可自动重试的待核实失败。
 
-当前官方 CLI 接受并忽略这些元数据，两个预设的执行仍只使用 `params` 与 `configuration`；省略元数据的旧请求保持兼容。顾客填写的参数不能覆盖顶层 `variant`、`steps` 或 `completed_steps`。
+worker 只允许尚无计划、无已完成步骤的任务初始化一次 `progress_steps`，随后把计划保存为任务快照；已有计划不能更换。已有计划含预设自己的步骤 ID 时，预设按实际完成项更新；遇到其他商家计划时，只报告百分比和消息，不伪造已完成项。有步骤时最终进度由服务端按完成集合计算，百分比不能绕过商家计划。顾客填写的参数不能覆盖顶层 `variant`、`steps`、`completed_steps` 或 `shop_context`。
 
 固定审核代码限制了可运行的处理器集合，不能替代恶意代码的隔离沙箱。需要独立依赖或外部平台访问的自动化服务，可以使用下面的 HTTPS Webhook 与签名回调。
 
 ## SDK 任务与结果
 
-`Task` 字段为 `id`、`product_id`、`attempt`、`params`、`configuration`、`variant`、`steps` 与 `completed_steps`。`configuration` 默认 `{}`，两个步骤列表默认 `[]`；旧任务省略 `variant` 时使用固定默认规格（空属性、空参考价格、币种 `CNY`）。`idempotency_key` 等于稳定任务 ID，跨重试不变；真实交付必须按这个值去重。
+`Task` 字段为 `id`、`product_id`、`attempt`、`params`、`configuration`、`variant`、`steps`、`completed_steps` 与 `shop_context`。`configuration` 默认 `{}`；步骤计划和完成集合转为只读快照，默认空集合。`ShopContext` 是不可变的 `shop_id/profile_id/revision` 元数据，不含配置秘密，旧请求可省略。旧任务省略 `variant` 时使用固定默认规格（空属性、空参考价格、币种 `CNY`）。`idempotency_key` 等于稳定任务 ID，跨重试不变；真实交付必须按这个值去重。
 
-`variant` 是发行卡密时冻结的完整规格快照，包含 `id,name,description,price,currency,attributes,enabled`；以后停用规格或改价格、属性都不改旧卡。价格是字符串或 `None`，只作为商家跨平台建商品的参考。`steps` 是当前任务计划，每项含 `id,label,done`；`completed_steps` 是本次尝试已经完成的步骤 ID。输入输出定义也在任务首次提交时冻结，队列商品后来调整表单只影响新任务；处理旧任务时用队列接口返回的任务 `parameters` / `outputs`，不能套用商品当前表单。
+`variant` 是发行卡密时冻结的完整规格快照，包含 `id,name,description,price,currency,attributes,enabled`；以后停用规格或改价格、属性都不改旧卡。价格是字符串或 `None`，只作为商家跨平台建商品的参考。SDK 的 `steps` 每项含只读 `id,label`；页面和事件视图另外带 `done`。`completed_steps` 是本次尝试已经完成的步骤 ID。输入输出定义也在任务首次提交时冻结，队列商品后来调整表单只影响新任务；处理旧任务时用队列接口返回的任务 `parameters` / `outputs`，不能套用商品当前表单。
 
 ```python
 from extore.sdk import Result, Task, run
 
 
 def fulfill(task: Task) -> Result:
-    task.progress(20, "正在核对资料")
+    if not task.steps:
+        task.define_steps(
+            [
+                {"id": "check", "label": {"zh-CN": "核对资料", "en": "Check input"}},
+                {"id": "prepare", "label": {"zh-CN": "准备交付", "en": "Prepare"}},
+            ],
+            message="准备开始",
+        )
+    own_plan = [step["id"] for step in task.steps] == ["check", "prepare"]
     name = task.params["name"]
-    task.progress(80, "正在准备交付")
+    checked = (
+        list(dict.fromkeys([*task.completed_steps, "check"])) if own_plan else None
+    )
+    task.progress(50, "资料已核实", completed_steps=checked)
+    content = f"你好，{name}！\n你的商品已准备好。"
+    task.progress(
+        99,
+        "内容已准备好",
+        completed_steps=["check", "prepare"] if own_plan else None,
+    )
     return Result.success(
-        output={"content": f"你好，{name}！\n你的商品已准备好。"},
+        output={"content": content},
         message="已完成",
     )
 
@@ -80,7 +101,7 @@ if __name__ == "__main__":
     run(fulfill)
 ```
 
-`run` 是开发环境或外部服务的辅助入口，主网站不会加载这个示例文件。它的 stdin 使用完整 SDK 任务对象，区别于官方 worker 的独立协议：
+`run` 是开发环境或外部服务的辅助入口，主网站不会加载这个示例文件。它的 stdin 使用完整 SDK 任务对象，区别于预设 worker 的独立协议：
 
 ```json
 {
@@ -90,12 +111,15 @@ if __name__ == "__main__":
   "params": {"name": "小林"},
   "configuration": {},
   "variant": {"id":"standard","name":"标准版","description":"","price":"12.5","currency":"CNY","attributes":{"days":30},"enabled":true},
-  "steps": [{"id":"prepare","label":{"zh-CN":"准备内容","en":"Prepare"},"done":false}],
-  "completed_steps": []
+  "steps": [],
+  "completed_steps": [],
+  "shop_context": {"shop_id":"所属店铺 UUID","profile_id":null,"revision":null}
 }
 ```
 
-`task.progress(0..99, message)` 向 stdout 输出进度 JSON Lines。带步骤的任务使用 `task.progress(message="内容已准备好", completed_steps=["prepare"])`，也可同时提供百分比，但服务器按步骤数量计算；成功由系统设为 100。`run` 随后输出包含 `kind="result"`、`state`、`output`、`content`、`message`、`retryable` 和可选 `completed_steps` 的结果行。它捕获处理函数异常，返回待核实失败，不公开异常文本。自行编写外部服务时，进度行需要由服务转成 `Client.update` 回调，不能仅打印后期待主网站收到进度。
+`task.define_steps(plan, message="")` 为当前空计划初始化一次 1–30 个有唯一 ID 的步骤，输出 `kind="progress"` 与 `progress_steps`。已有计划或完成项时拒绝替换；顺序与标签固定，重试保留计划。`task.progress(0..99, message)` 输出进度 JSON Lines。带步骤的任务使用 `task.progress(message="内容已准备好", completed_steps=["prepare"])`，也可同时提供百分比，但服务器按步骤数量计算；成功由系统设为 100。
+
+`run` 随后输出包含 `kind="result"`、`state`、`output`、`content`、`message`、`retryable` 和可选 `completed_steps` 的结果行。它限制 stdin 为 200000 字节，并将无效输入或处理异常转换为安全的待核实失败，不公开异常文本。自行编写外部服务时，进度行需要由服务转成 `Client.update` 回调，不能仅打印后期待主网站收到进度。当前 `Client.update` 支持更新已存在计划的完成项，不接受 `progress_steps`；外部 Webhook 的计划应先在商品中定义。
 
 完成集合必须来自任务计划，省略保留原值，不能在同一尝试撤回已完成步骤。完成全部步骤但仍处理中时为 99%，成功回调自动完成全部步骤并设为 100%。`Result.success(..., completed_steps=...)` 与 `Result.failure(..., completed_steps=...)` 可携带完成集合；实际重试开始时清空集合、进度归零，保留任务 ID、规格、输入输出定义和步骤计划。
 
@@ -134,20 +158,27 @@ if event["type"] == "redemption.requested":
     attempt = data["attempt"]
     product_id = event["product_id"]
     variant = data["variant"]  # 发卡时冻结的规格，不从顾客 params 读取。
-    steps = data["steps"]      # 此任务的步骤快照，每项包含 done。
+    steps = data["steps"]  # 此任务的步骤快照，每项包含 done。
 
     client = Client("https://extore.lmm.best", product_secret)
     client.update(
-        product_id, task_id, attempt,
-        state="processing", message="正在处理",
+        product_id,
+        task_id,
+        attempt,
+        state="processing",
+        message="正在处理",
         completed_steps=data["completed_steps"],
     )
     # fulfill_once 由外部服务实现，并按 task_id 去重真实交付。
     # 此例商品的 outputs 定义了 resource_url 和 message。
     output = fulfill_once(task_id, data["params"])
     client.update(
-        product_id, task_id, attempt,
-        state="succeeded", output=output, message="已完成",
+        product_id,
+        task_id,
+        attempt,
+        state="succeeded",
+        output=output,
+        message="已完成",
     )
 ```
 
@@ -183,4 +214,4 @@ if event["type"] == "redemption.requested":
 
 ## 开发验证
 
-`uv run pytest -q` 运行主项目测试。新增处理器需同时验证官方包的配置、输入、输出与子进程协议；外部服务需另行验证事件重复、回调重试、超时，以及真实提供商的幂等交付。项目测试不能替代实际平台对接验收。
+`uv run pytest -q` 运行主项目测试。新增处理器需同时验证预设包的配置、输入、输出与子进程协议；外部服务需另行验证事件重复、回调重试、超时，以及真实提供商的幂等交付。项目测试不能替代实际平台对接验收。

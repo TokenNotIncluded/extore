@@ -7,7 +7,7 @@
 <h1 align="center">兑所 · Extore</h1>
 
 <p align="center">
-  一个商家的卡密兑换与交付网站。<br>
+  多店隔离的卡密兑换与交付网站。<br>
   输入卡密，填写信息，领取商品或查看服务结果。
 </p>
 
@@ -28,7 +28,9 @@
 
 ---
 
-Extore 接手支付之后的兑换与交付：验证卡密，将顾客带到对应商品，收集必要信息，再交给商品队列、官方处理器或外部服务。支付与支付订单管理留在上游平台，两边通过制卡接口、Webhook 和签名回调通信。
+Extore 接手支付之后的兑换与交付：验证卡密，将顾客带到对应商品，收集必要信息，再交给商品队列、预设处理器或外部服务。支付与支付订单管理留在上游平台，两边通过制卡接口、Webhook 和签名回调通信。
+
+一个实例可以管理多个独立店铺。平台管理员管理店铺、注册与邮件服务，店主管理自己的商品、队列、配置和附件；商品管理链接继续只授权指定商品。已有单店数据迁移到默认店铺。
 
 ## 能做什么
 
@@ -38,12 +40,12 @@ Extore 接手支付之后的兑换与交付：验证卡密，将顾客带到对�
 | 卡密管理 | 使用密码学安全随机数生成卡密，批量发行、复制与下载；按商品、规格、批次和状态跟踪库存与生命周期。原卡密只在发行时显示。 |
 | 独立商品队列 | 每个商品独立领取、筛选和批处理任务，显示真实步骤、处理消息与商品内排位。人或获授权的 AI 使用同一套接口。 |
 | 灵活交付 | 链接、文本、账户信息或文件，也可只返回服务状态。支持一次领取、重复查看、失败重试、退回补充、附原因的拒绝，以及顾客主动销毁内容。 |
-| 权限与认证 | 商家后台支持多个 Passkey。商品管理链接默认支持 1 次浏览器登录和 1 个 CLI 设备绑定，按权限授权、向下委派，并记录设备、会话与操作审计。 |
-| 自动化与二次开发 | 官方开源预设处理器、Python SDK、签名事件与回调；原生定义 **49 个 WebMCP 工具**，按页面、身份与权限动态提供。 |
-| 命令行操作 | `manage` 管理商品授权，`customer` 兑换与领取，`admin` 用 Passkey 批准的设备管理全店；默认精简输出，凭证保存到私密文件，提供可复制 AI 提示词。 |
-| 界面与存储 | SQLite 持久化任务、事件和投递重试；撕纸与分段虚线界面，灰黑暗色主题、中英文语言，默认跟随系统与浏览器。 |
+| 权限与认证 | 平台管理员使用多个 Passkey；店主可用邮箱密码、可选 TOTP 或多个 Passkey 登录。注册默认关闭，由平台管理员邀请店主。商品链接默认 1 次浏览器登录与 1 个 CLI 绑定，支持委派和会话审计。 |
+| 自动化与二次开发 | 开源预设处理器、店铺加密配置档案、代码定义输入输出与步骤、Python SDK、签名事件与回调；原生定义 **49 个 WebMCP 工具**，按页面、身份与权限动态提供。 |
+| 命令行操作 | `manage` 管理商品授权，`customer` 兑换与领取，`admin` 用固定账号的设备管理本店或平台；默认精简输出，凭证保存到私密文件，提供可复制 AI 提示词。 |
+| 界面与存储 | SQLite 持久化任务、事件和投递重试；单文件、单卡、单店与全站附件额度，磁盘余量保护；撕纸与分段虚线界面，明暗和语言默认自动。 |
 
-顾客上传的是兑换材料，管理者上传的是交付文件。官方处理器来自审核后固定版本的[开源子模块](https://github.com/TokenNotIncluded/extore-processors)，商家在预设中选择并填写配置。浏览器 AI 需要原生 WebMCP 支持及实际授权，具体兼容性见[工具文档](https://github.com/TokenNotIncluded/extore/blob/main/docs/webmcp.md#浏览器兼容性)。
+顾客上传的是兑换材料，管理者上传的是交付文件。预设处理器来自审核后固定版本的[开源子模块](https://github.com/TokenNotIncluded/extore-processors)，商家在预设中选择并填写配置。浏览器 AI 需要原生 WebMCP 支持及实际授权，具体兼容性见[工具文档](https://github.com/TokenNotIncluded/extore/blob/main/docs/webmcp.md#浏览器兼容性)。
 
 ## 兑换流程
 
@@ -54,9 +56,11 @@ Extore 接手支付之后的兑换与交付：验证卡密，将顾客带到对�
 1. 商家创建商品，配置输入、输出、处理方式和查看规则，按规格发行卡密。
 2. 顾客输入有效卡密。非公开商品在验证成功后才显示。
 3. 提交参数后创建唯一任务，重复提交返回同一个任务。
-4. 队列管理者、官方处理器或外部平台完成任务，顾客通过领取链接查看进度和结果。
+4. 队列管理者、预设处理器或外部平台完成任务，顾客通过领取链接查看进度和结果。
 
 队列商品可修改未来任务的输入输出，已有任务保留各自的结构快照。自动商品发行卡密后锁定处理器和输入输出结构。SKU 价格用于商品定义，上游平台负责实际定价、收款和销售库存。
+
+需要重试时，处理者须说明原因并选择「修改后重提」或「原资料重试」；外部故障也能作为原因。拒绝处理会禁用卡密。原任务、规格和步骤计划保留，重新开始后进度归零。
 
 ## 快速运行
 
@@ -89,14 +93,14 @@ uv run extore serve
 uv run extore worker
 ```
 
-打开 <http://localhost:8000>。在 2.5 秒内点击左上角 Logo 5 次，或直接访问 `/admin`。首次使用初始化密码注册 Passkey，注册成功后密码登录立即禁用；后续可添加多个 Passkey。
+打开 <http://localhost:8000>。在 2.5 秒内点击左上角 Logo 5 次，或直接访问 `/admin`。平台管理员首次使用初始化密码注册 Passkey，之后关闭这套首次密码登录；店主账号使用独立的邮箱密码和可选 TOTP，也可添加多个 Passkey。平台管理员先配置 SMTP，再邀请店主，详见[多店与账号](https://github.com/TokenNotIncluded/extore/blob/main/docs/shops.md)。
 
 <details>
 <summary>首次登录、认证恢复与运行边界</summary>
 
-- Passkey 需要 HTTPS 或 localhost；部署前确定固定域名。首次密码会话只能注册 Passkey，不能管理商品。
-- 丢失全部 Passkey 时，须在服务器终端执行 `uv run python -m extore.cli reset-auth`。它撤销全部 Passkey、登录会话及 CLI 设备授权，保留商品、卡密与任务；商品管理链接须另行撤销。详见[认证恢复](https://github.com/TokenNotIncluded/extore/blob/main/docs/getting-started.md#认证恢复)。
-- API 与 worker 共享数据目录和配置，一个数据库只运行一个 worker。数据目录、数据库和 `issuance.key` 都要妥善保护和备份。详见[生产运行](https://github.com/TokenNotIncluded/extore/blob/main/docs/getting-started.md#生产运行)。
+- Passkey 需要 HTTPS 或 localhost；部署前确定固定域名。平台管理员首次密码会话只能注册 Passkey，不能管理商品。
+- 平台管理员丢失全部 Passkey 时，在服务器执行 `uv run extore reset-auth` 恢复首次密码登录；店主使用邮件重置自己的密码，开启 TOTP 时还须提供第二因素或恢复码。两者均保留业务数据。详见[认证恢复](https://github.com/TokenNotIncluded/extore/blob/main/docs/getting-started.md#认证恢复)。
+- API 与 worker 共享数据目录和配置，一个数据库只运行一个 worker。数据目录、数据库、`issuance.key` 和 `master-secrets.key` 都要妥善保护和备份。详见[生产运行](https://github.com/TokenNotIncluded/extore/blob/main/docs/getting-started.md#生产运行)。
 - 领取链接是凭证。一次领取会消耗查看机会；销毁不能撤回已下载的副本、外部内容或历史备份。未知、超时或崩溃的交付默认等待核实，下游须用稳定任务 ID 去重。详见[自动处理与领取](https://github.com/TokenNotIncluded/extore/blob/main/docs/getting-started.md#自动处理与领取)。
 
 </details>
@@ -115,9 +119,14 @@ extore customer exchange --origin https://extore.example.com --codes-stdin < /pa
 
 # 店主：首次在浏览器用真实 Passkey 批准此设备
 extore admin login --origin https://extore.example.com
+
+# 已有邮箱账号的店主：隐藏输入密码及已开启的第二因素
+extore admin login --origin https://extore.example.com --email owner@example.com
 ```
 
 商品授权可以在客户端聚合查看，每次写入仍使用一个独立授权。店主设备授权最多 30 天，8 小时会话由本机私钥续签；后续 JSON 写操作另用一次性设备签名。列表默认摘要，任务详情和教程按需读取，制卡与新授权链接保存为 0600 文件。
+
+SMTP 凭据、TOTP 密钥与店铺处理器配置加密保存，接口只返回配置状态和修订元数据。付款适配尚未启用，供应商平台仍待确定；现有预设只交付链接或文本，不代表已完成真实付款。
 
 网页可复制带 5 分钟 CLI 绑定票据的商品机器人接入提示词；[文档里的提示词](https://github.com/TokenNotIncluded/extore/blob/main/docs/ai-prompts.md)也可直接复制，配合已授权的 CLI 使用。上传只保存材料，提交或交付需明确执行下一步；持续运行机器人由接入方安排。
 
@@ -129,9 +138,10 @@ extore admin login --origin https://extore.example.com
 | [接口与事件协议](https://github.com/TokenNotIncluded/extore/blob/main/docs/protocol.md) | 商品、SKU、卡密、队列、附件、完整事件定义与签名回调 |
 | [CLI 指南](https://github.com/TokenNotIncluded/extore/blob/main/docs/cli.md) | 商品完整管理、卡密、授权、队列与私密输出 |
 | [顾客 CLI](https://github.com/TokenNotIncluded/extore/blob/main/docs/cli-customer.md) · [店主 CLI](https://github.com/TokenNotIncluded/extore/blob/main/docs/cli-owner.md) | 批量兑换、材料与交付；Passkey 设备批准和全店操作 |
+| [多店与账号](https://github.com/TokenNotIncluded/extore/blob/main/docs/shops.md) | 平台与店主边界、邮箱邀请、TOTP、SMTP、加密处理器配置与存储额度 |
 | [可复制 AI 提示词](https://github.com/TokenNotIncluded/extore/blob/main/docs/ai-prompts.md) | 商品处理、店主运营与顾客领取的操作模板 |
 | [原生 WebMCP](https://github.com/TokenNotIncluded/extore/blob/main/docs/webmcp.md) | 49 个工具、浏览器支持、权限范围与确认要求 |
-| [Python SDK](https://github.com/TokenNotIncluded/extore/blob/main/docs/python-sdk.md) | 官方处理器协议、任务结果、外部验签与回调示例 |
+| [Python SDK](https://github.com/TokenNotIncluded/extore/blob/main/docs/python-sdk.md) | 预设处理器协议、任务结果、外部验签与回调示例 |
 | [验收记录](https://github.com/TokenNotIncluded/extore/blob/main/docs/acceptance.md) | 已记录的验证结果、对接边界与限制 |
 | [产品定义](https://github.com/TokenNotIncluded/extore/blob/main/PRODUCT.md) · [设计说明](https://github.com/TokenNotIncluded/extore/blob/main/DESIGN.md) | 项目范围、交互和视觉原则 |
 
@@ -139,7 +149,7 @@ extore admin login --origin https://extore.example.com
 
 ## 贡献
 
-欢迎通过 [Issues](https://github.com/TokenNotIncluded/extore/issues) 提交可复现的问题或功能建议，也欢迎提交 Pull Request。修改前请阅读[产品定义](https://github.com/TokenNotIncluded/extore/blob/main/PRODUCT.md)与[设计说明](https://github.com/TokenNotIncluded/extore/blob/main/DESIGN.md)，保持单商家范围、商品权限隔离和既有视觉语言。
+欢迎通过 [Issues](https://github.com/TokenNotIncluded/extore/issues) 提交可复现的问题或功能建议，也欢迎提交 Pull Request。修改前请阅读[产品定义](https://github.com/TokenNotIncluded/extore/blob/main/PRODUCT.md)与[设计说明](https://github.com/TokenNotIncluded/extore/blob/main/DESIGN.md)，保持店铺与商品权限隔离和既有视觉语言。
 
 常用检查如下；完整检查项以 [CI 工作流](https://github.com/TokenNotIncluded/extore/blob/main/.github/workflows/ci.yml)为准：
 
@@ -150,7 +160,7 @@ uv run pytest -q
 node --test tests/*.test.cjs
 ```
 
-Pull Request 请说明行为变化和验证结果。官方预设处理器在[独立仓库](https://github.com/TokenNotIncluded/extore-processors)维护，主项目通过子模块固定版本。反馈或示例中请删除卡密、管理链接、领取凭证、密钥和顾客资料。
+Pull Request 请说明行为变化和验证结果。内置预设处理器在[独立仓库](https://github.com/TokenNotIncluded/extore-processors)维护，主项目通过子模块固定版本。反馈或示例中请删除卡密、管理链接、领取凭证、密钥和顾客资料。
 
 ## 赞助
 
@@ -164,4 +174,4 @@ Pull Request 请说明行为变化和验证结果。官方预设处理器在[独
 
 ## 许可证
 
-Extore 使用 [MIT License](https://github.com/TokenNotIncluded/extore/blob/main/LICENSE)。官方处理器子模块的许可见[其仓库](https://github.com/TokenNotIncluded/extore-processors/blob/main/LICENSE)。
+Extore 使用 [MIT License](https://github.com/TokenNotIncluded/extore/blob/main/LICENSE)。预设处理器子模块的许可见[其仓库](https://github.com/TokenNotIncluded/extore-processors/blob/main/LICENSE)。

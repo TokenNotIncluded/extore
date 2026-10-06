@@ -212,6 +212,9 @@
     return JSON.stringify([
       c.page,
       c.role,
+      c.shopId ?? null,
+      c.superadmin ?? null,
+      c.sessionId ?? null,
       c.productId || "",
       [...(c.permissions || [])].sort(),
       c.tab || "",
@@ -422,6 +425,10 @@
     return adapter.api(path, body, method, {
       signal:
         signal && own(signal, "nativeSignal") ? signal.nativeSignal : signal,
+      ...(signal?.auth ? {
+        expectedScope: signal.auth.shop_id || "platform",
+        expectedSessionId: signal.auth.session_id,
+      } : {}),
     });
   }
   async function action(name, args, signal) {
@@ -912,7 +919,7 @@
   function safeLink(value, discloseURL = false) {
     const result = project(value, [
       "id", "product_id", "name", "expires", "revoked", "revoked_at", "permissions", "parent_id", "created",
-      "max_uses", "uses", "remaining_uses", "max_cli_uses", "cli_uses", "remaining_cli_uses",
+      "max_uses", "uses", "remaining_uses", "max_cli_uses", "cli_uses", "remaining_cli_uses", "archived",
       ...(discloseURL ? ["url"] : []),
     ]);
     if (Array.isArray(value?.children)) result.children = value.children.map((child) => safeLink(child));
@@ -945,7 +952,7 @@
     const result = { product, job: value.job ? project(value.job, [
       "id", "product_id", "product_name", "state", "message", "progress", "attempt", "created",
       "updated", "revealed", "delivery", "view_policy", "can_retry", "queue_ahead", "queue_position",
-      "completed_steps", "support_email",
+      "completed_steps", "support_email", "retry_mode", "retry_reason_type",
     ]) : null };
     if (value.variant) result.variant = variant(value.variant);
     if (value.job?.variant) result.job.variant = variant(value.job.variant);
@@ -1298,6 +1305,23 @@
         write,
       );
       add(
+        "redemption_retry_original",
+        "使用原资料重试",
+        "Retry the selected receipt card using its unchanged stored inputs and attachments only when its fresh status is needs_input, retry_mode reuse and can_retry true. Does not supply or revise params. Explicit confirm:true is required; never automatically repeat an external effect.",
+        object({ confirm: confirmed }, ["confirm"]),
+        async (_, signal) => {
+          const value = await action("receipt", [], signal);
+          checkInvocation(signal);
+          const selected = selectedReceipt(value, c);
+          if (selected.job?.state !== "needs_input" || selected.job?.retry_mode !== "reuse" || selected.job?.can_retry !== true)
+            throw new ToolError("invalid_state", "This task requires revised input or cannot be retried.");
+          const result = await action("retryOriginal", [], signal);
+          await refresh();
+          return result;
+        },
+        write,
+      );
+      add(
         "receipt_reveal",
         "领取交付内容",
         "Deliberately reveal delivery content to the agent and visible UI. In a batch, select the desired card in the page first. Once-only delivery is consumed by opening; save it immediately. Explicit confirm:true is always required.",
@@ -1434,8 +1458,8 @@
           : [await request("/manage/product", undefined, "GET", signal)];
       add(
         "processors_list",
-        "官方处理器目录",
-        "Read the approved official processor catalogue and its code-defined customer inputs, delivery outputs, and configuration schema. Configuration values and secrets are never included; arbitrary executable scripts are disabled.",
+        "商品处理器目录",
+        "Read the approved product processor catalogue and its code-defined customer inputs, delivery outputs, and configuration schema. Configuration values and secrets are never included; arbitrary executable scripts are disabled.",
         object(),
         async (_, signal) =>
           safeProcessorCatalogue(
@@ -1597,7 +1621,7 @@
         add(
           "product_create",
           "新建商品",
-          "Create a merchant product with localized input and output fields. Official processors are selected from processors_list and own their schemas; draft configuration may be completed later. Arbitrary executable scripts are disabled. Webhook secrets must be provided explicitly. Explicit confirm:true is required.",
+          "Create a merchant product with localized input and output fields. Product processors are selected from processors_list and own their schemas; draft configuration may be completed later. Arbitrary executable scripts are disabled. Webhook secrets must be provided explicitly. Explicit confirm:true is required.",
           object(
             { product: object(productFields, ["name"]), confirm: confirmed },
             ["product", "confirm"],
@@ -1732,7 +1756,7 @@
         batch_id: { ...string(100), pattern: "^[A-Za-z0-9_-]*$" },
         search: string(100),
         offset: integer(0),
-        limit: integer(1, 500),
+        limit: { type: "integer", minimum: 1, maximum: 500 },
       };
       add(
         "card_inventory",
@@ -1780,7 +1804,7 @@
         "cards_list",
         "卡密记录",
         "List card IDs and lifecycle states, never card plaintext or hashes.",
-        object({ product_id: id, limit: integer(1, 500) }),
+        object({ product_id: id, limit: { type: "integer", minimum: 1, maximum: 500 } }),
         (input, signal) => {
           assertProduct(input);
           return request(
@@ -1845,10 +1869,25 @@
       add(
         "staff_list",
         "商品管理链接列表",
-        "List product-management link metadata without bearer tokens or private links. Delegated managers only see descendants of their own link.",
-        object(),
-        async (_, signal) => (await request(linksPath, undefined, "GET", signal)).map((link) => safeLink(link)),
+        "List product-management links without private credentials. Defaults to active links; history includes revoked/expired links and all also includes archived tombstones. Delegated managers only see their own descendants.",
+        object({ view: choice(["active", "history", "all"]) }),
+        async (input, signal) => (await request(query(linksPath, input, ["view"]), undefined, "GET", signal)).map((link) => safeLink(link)),
         { ...readonly, ...linksAuthority },
+      );
+      for (const applying of [false, true]) add(
+        applying ? "staff_cleanup" : "staff_cleanup_preview",
+        applying ? "归档失效管理链接" : "预览管理链接清理",
+        "Archive only already invalid product-management links while preserving ancestry tombstones, live jobs, files and authorization boundaries. Preview never changes records. Applying requires explicit confirm:true.",
+        object({ product_id: id, limit: { type: "integer", minimum: 1, maximum: 500 }, ...(applying ? { confirm: confirmed } : {}) }, applying ? ["confirm"] : []),
+        async (input, signal) => {
+          if (!admin && input.product_id && input.product_id !== c.productId)
+            throw new ToolError("forbidden", "This product-management link cannot clean another product.");
+          const body = { dry_run: !applying, ...(input.product_id ? { product_id: input.product_id } : {}), ...(input.limit ? { limit: input.limit } : {}), ...(admin ? { areas: ["links"] } : {}) };
+          const result = await request(admin ? "/admin/maintenance/cleanup" : "/manage/links/cleanup", body, "POST", signal);
+          if (applying) await updateUI();
+          return result;
+        },
+        { ...(applying ? write : readonly), ...linksAuthority },
       );
       add(
         "staff_authorize",
@@ -1988,7 +2027,7 @@
         product_id: id,
         state: choice(states),
         view: { ...choice(["active", "processed", "all"]), default: "active" },
-        limit: integer(1, 500),
+        limit: { type: "integer", minimum: 1, maximum: 500 },
       };
       const scopedJob = async (input, signal) => {
         assertQueue(input);
@@ -2209,11 +2248,12 @@
           { ...write, ...authority("queue.process") },
         );
         for (const [operation, title, description] of [
-          ["request_changes", "请顾客补充信息", "Ask the customer to correct or add information for claimed jobs in the selected product queue. This moves them to needs_input and waits for customer resubmission. A meaningful reason of at most 1000 characters and explicit confirm:true are required."],
+          ["request_retry", "需要重试", "Return a claimed job for retry with a customer-visible reason. Missing input, external factors and processor problems are supported. retry_mode revise requires updated input; reuse permits the same stored input, without executing external work automatically. A meaningful reason of at most 1000 characters and explicit confirm:true are required."],
+          ["request_changes", "需要重试（兼容）", "Compatibility alias for a retry requiring revised inputs. A meaningful customer-visible reason and confirm:true are required."],
           ["reject", "拒绝处理任务", "Reject claimed jobs in the selected product queue with an explanation visible to the customer. This is terminal and does not authorize another fulfillment attempt. A meaningful reason of at most 1000 characters and explicit confirm:true are required."],
         ]) add(
           "jobs_" + operation, title, description,
-          object({ product_id: id, ids, reason: { ...string(1000, 1), pattern: "\\S" }, confirm: confirmed }, ["product_id", "ids", "reason", "confirm"]),
+          object({ product_id: id, ids, reason: { ...string(1000, 1), pattern: "\\S" }, ...(operation === "request_retry" ? { retry_mode: choice(["revise", "reuse"]), reason_type: choice(["customer_input", "external", "processor"]) } : {}), confirm: confirmed }, ["product_id", "ids", "reason", "confirm"]),
           async (input, signal) => {
             const { reason, ...body } = input;
             return batch(operation)({ ...body, message: reason }, signal);
@@ -2261,6 +2301,22 @@
           return data;
         },
         { ...write, ...eventsAuthority },
+      );
+    }
+    if (admin && ["events", "staff"].includes(c.tab)) {
+      add("maintenance_status", "记录保留与清理设置", "Read this authority's retention policy and compact record counts, without private payloads.", object(), (_, signal) => request("/admin/maintenance", undefined, "GET", signal), { ...readonly, ...privileged });
+      for (const applying of [false, true]) add(
+        applying ? "records_cleanup" : "records_cleanup_preview",
+        applying ? "清理已完成记录" : "预览记录清理",
+        "Clean records older than the configured retention periods. Pending webhook events, live links, task data, cards and files are preserved. Audit retention is separate. A bounded batch is processed; applying requires explicit confirm:true.",
+        object({ areas: { type: "array", items: choice(["links", "events", "audit"]), minItems: 1, maxItems: 3, uniqueItems: true }, product_id: id, limit: { type: "integer", minimum: 1, maximum: 500 }, ...(applying ? { confirm: confirmed } : {}) }, applying ? ["confirm"] : []),
+        async (input, signal) => {
+          const { confirm: ignored, ...body } = input;
+          const result = await request("/admin/maintenance/cleanup", { ...body, dry_run: !applying }, "POST", signal);
+          if (applying) await updateUI();
+          return result;
+        },
+        { ...(applying ? write : readonly), ...privileged },
       );
     }
     if (admin && c.tab === "security") {
@@ -2350,6 +2406,9 @@
               checkActive(captured, options.signal, controller.signal);
               if (
                 !definition.roles.includes(auth.role) ||
+                (own(c, "shopId") && auth.shop_id !== c.shopId) ||
+                (own(c, "superadmin") && auth.superadmin !== c.superadmin) ||
+                (own(c, "sessionId") && auth.session_id !== c.sessionId) ||
                 (definition.productId &&
                   auth.product_id !== definition.productId) ||
                 (auth.role === "staff" &&

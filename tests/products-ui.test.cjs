@@ -375,7 +375,7 @@ test("invalid schema JSON prevents changing handling or delivery and preserves t
   }
 });
 
-test("switching between queue and an official processor preserves each draft configuration", async () => {
+test("switching between queue and a processor retains queue drafts without exposing shop secrets", async () => {
   const p = page();
   await editProduct(p);
   p.node("#f-key-0").value = "draft-account";
@@ -384,14 +384,19 @@ test("switching between queue and an official processor preserves each draft con
   await p.node("#p-mode").emit("change");
   p.node("#p-processor").value = "personalized_text";
   await p.node("#p-processor").emit("change");
-  p.node("#pc-value-0").value = "draft template $name";
+  assert.equal(p.node("#pc-value-0"), null);
+  assert.equal(p.requests[1].url, "/admin/processor-profiles");
+  assert.equal(p.requests[2].url, "/admin/processor-profiles/bindings/product-one");
+  p.requests[1].resolve([]);
+  p.requests[2].resolve({ product_id: "product-one", profile: null });
+  await flush();
   p.node("#p-mode").value = "manual";
   await p.node("#p-mode").emit("change");
   assert.equal(p.node("#f-key-0").value, "draft-account");
   assert.equal(p.node("#o-key-0").value, "draft-delivery");
   p.node("#p-mode").value = "script";
   await p.node("#p-mode").emit("change");
-  assert.equal(p.node("#pc-value-0").value, "draft template $name");
+  assert.equal(p.node("#pc-value-0"), null);
   assert.match(p.node("#parameters").innerHTML, /name · text/);
   assert.match(p.node("#outputs").innerHTML, /content · textarea/);
 });
@@ -414,27 +419,53 @@ test("clipboard denial still selects the complete scoped management link", async
   assert.deepEqual(p.notifications, ["请复制已选中的配置链接"]);
 });
 
-test("official processors own customer fields and output schemas while configuration stays separate", async () => {
+test("processor schemas stay code-defined and product writes never echo masked credentials", async () => {
   const p = page();
-  await editProduct(p, product({ mode: "script", processor_id: "personalized_text", processor_config: { template: "旧模板 $name" } }));
+  await editProduct(p, product({ shop_id: "shop-one", mode: "script", processor_id: "personalized_text", processor_config: { template: "credential-never-rendered" } }));
   assert.equal(p.node("#p-script"), null);
-  assert.doesNotMatch(p.workspace.innerHTML, /脚本名称|服务器安装/);
+  assert.doesNotMatch(p.workspace.innerHTML, /脚本名称|服务器安装|credential-never-rendered/);
   assert.equal(p.node("#p-delivery").disabled, true);
   assert.match(p.node("#parameters").innerHTML, /data-schema-source="processor"/);
   assert.match(p.node("#outputs").innerHTML, /data-schema-source="processor"/);
   assert.equal(p.node("#f-key-0"), null);
   assert.equal(p.node("#o-key-0"), null);
-  assert.equal(p.node("#add-param").hidden, true);
-  assert.equal(p.node("#add-output").hidden, true);
-  assert.equal(p.node("#pc-value-0").value, "旧模板 $name");
-  p.node("#pc-value-0").value = "新模板 $name";
+  assert.equal(p.node("#pc-value-0"), null);
+  p.requests[1].resolve([{ id: "profile-one", shop_id: "shop-one", processor_id: "personalized_text", name: "付款账户 <one>", revision: 2 }, { id: "foreign", shop_id: "shop-two", processor_id: "personalized_text", name: "Foreign account", revision: 1 }]);
+  p.requests[2].resolve({ product_id: "product-one", profile: null });
+  await flush();
+  assert.match(p.node("#processor-configuration").innerHTML, /付款账户 &lt;one&gt;/);
+  assert.doesNotMatch(p.node("#processor-configuration").innerHTML, /Foreign account/);
   p.node("#product-form").emit("submit");
-  const body = JSON.parse(JSON.stringify(p.requests[1].body));
+  const body = JSON.parse(JSON.stringify(p.requests[3].body));
   assert.equal(body.processor_id, "personalized_text");
-  assert.deepEqual(body.processor_config, { template: "新模板 $name" });
+  assert.equal(Object.hasOwn(body, "processor_config"), false);
   assert.deepEqual(body.parameters, catalog[0].parameters);
   assert.deepEqual(body.outputs, catalog[0].outputs);
   assert.equal(body.script, "");
+});
+
+test("even a full product manager cannot load or bind shop processor accounts", async () => {
+  const p = page({ role: "staff", canConfigure: true });
+  await editProduct(p, product({ mode: "script", processor_id: "personalized_text", processor_config: { template: "payment-secret" } }));
+  assert.equal(p.requests.length, 1);
+  assert.equal(p.node("#p-processor").disabled, true);
+  assert.equal(p.node("#p-profile"), null);
+  assert.equal(p.node("#pc-value-0"), null);
+  assert.doesNotMatch(p.workspace.innerHTML, /payment-secret/);
+  p.node("#product-form").emit("submit");
+  assert.equal(p.requests[1].body.processor_id, "personalized_text");
+  assert.equal(Object.hasOwn(p.requests[1].body, "processor_config"), false);
+});
+
+test("late processor-account metadata cannot replace a different editor", async () => {
+  const p = page();
+  await editProduct(p, product({ mode: "script", processor_id: "personalized_text" }));
+  p.leave();
+  p.workspace.innerHTML = "Different page";
+  p.requests[1].resolve([{ id: "late", processor_id: "personalized_text", name: "Old account" }]);
+  p.requests[2].resolve({ product_id: "product-one", profile: { id: "late", name: "Old account" } });
+  await flush();
+  assert.equal(p.workspace.innerHTML, "Different page");
 });
 
 test("a description editor has no fulfillment controls or editable output definitions", async () => {

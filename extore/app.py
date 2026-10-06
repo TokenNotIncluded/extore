@@ -10,7 +10,8 @@ from fastapi import FastAPI, HTTPException, Request, Response
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
-from . import auth
+from . import auth, shops
+from .account_auth import router as account_auth_router
 from .card_tracking import router as card_tracking_router
 from .cli_auth import router as cli_auth_router
 from .config import ORIGIN, check_config
@@ -26,6 +27,8 @@ from .files import (
 )
 from .link_access import augment_link_view, consume_link, revoke_staff_sessions
 from .link_access import router as link_access_router
+from .link_cleanup import link_state
+from .maintenance import router as maintenance_router
 from .models import (
     BatchUpdate,
     CodeInput,
@@ -41,7 +44,8 @@ from .models import (
 )
 from .owner_cli_auth import router as owner_cli_router
 from .owner_cli_auth import verify_owner_cli_action
-from .processors import processor_catalog, public_configuration
+from .processor_profiles import router as processor_profiles_router
+from .processors import processor_catalog
 from .security import (
     authorize_management,
     batch_cards,
@@ -86,12 +90,15 @@ async def lifespan(app):
 
 app = FastAPI(title="Extore API", version="0.6.0", lifespan=lifespan)
 app.include_router(auth.router)
+app.include_router(account_auth_router)
 app.include_router(card_tracking_router)
 app.include_router(files_router)
 app.include_router(source_router)
 app.include_router(link_access_router)
 app.include_router(cli_auth_router)
 app.include_router(owner_cli_router)
+app.include_router(processor_profiles_router)
+app.include_router(maintenance_router)
 
 
 @app.middleware("http")
@@ -177,20 +184,42 @@ def health():
 
 
 @app.get("/api/admin/storage")
-def storage_status(request: Request):
-    session(request)
+def storage_status(request: Request, shop_id: str = ""):
+    s = session(request)
     from .storage import storage_usage
 
     with db() as c:
-        return storage_usage(c)
+        authorize_management(c, s)
+        return storage_usage(c, shop_id=selected_shop_scope(c, s, shop_id))
+
+
+def selected_shop_scope(c, s, requested_shop_id=""):
+    """Root may select a shop; merchants cannot widen their session scope."""
+    own = shops.scoped_shop_id(s)
+    if not requested_shop_id:
+        return own
+    if own is not None and requested_shop_id != own:
+        fail("没有此店铺的管理权限", 403)
+    shops.shop_row(c, requested_shop_id, require_enabled=False)
+    return requested_shop_id
 
 
 @app.get("/api/products")
-def public_products():
+def public_products(shop_id: str = ""):
     with db() as c:
+        if shop_id:
+            shop = c.execute(
+                "SELECT id FROM shops WHERE id=? AND enabled=1", (shop_id,)
+            ).fetchone()
+            if not shop:
+                fail("店铺不存在", 404)
         rows = [
             public_product(product(c, r["id"]))
-            for r in c.execute("SELECT * FROM products ORDER BY created")
+            for r in c.execute(
+                "SELECT products.id FROM products JOIN shops ON shops.id=products.shop_id "
+                "WHERE shops.enabled=1 AND (?='' OR products.shop_id=?) ORDER BY products.created",
+                (shop_id, shop_id),
+            )
         ]
     return [p for p in rows if p["public"]]
 
@@ -207,6 +236,7 @@ def _screen_exchange_card(c, card, index=None):
                 410 if batch_revoked else 404,
             )
         ensure_card_usable(c, card)
+        shops.require_enabled_product(c, card["product_id"])
         row = c.execute("SELECT * FROM jobs WHERE card_id=?", (card["id"],)).fetchone()
         p = job_product(c, row) if row else product(c, card["product_id"])
         if row and (
@@ -338,11 +368,13 @@ def redeem(body: Redemption, request: Request):
                 card = by_id.get(item.card_id)
                 if not card:
                     fail("这张卡密不在此领取链接中", 404)
+                shops.require_enabled_product(c, card["product_id"])
                 submit(c, card, item.params)
             return _batch_receipt(c, body.token)
         if body.items:
             fail("单张卡密请直接提交参数")
         card = grant(c, body.token)
+        shops.require_enabled_product(c, card["product_id"])
         return job_view(c, submit(c, card, body.params))
 
 
@@ -360,6 +392,19 @@ def receipt(body: TokenInput):
             "variant": card_variant(c, card),
             "job": job_view(c, row) if row else None,
         }
+
+
+@app.post("/api/retry")
+def retry_original_submission(body: TokenInput, request: Request):
+    """Retry only the original frozen inputs after an explicit reuse outcome."""
+    rate_limit(request, "retry", 20, 60)
+    with db() as c:
+        card = resolve_customer_card(c, body.token, body.card_id)
+        shops.require_enabled_product(c, card["product_id"])
+        row = c.execute("SELECT * FROM jobs WHERE card_id=?", (card["id"],)).fetchone()
+        if not row or row["state"] != "needs_input" or row["retry_mode"] != "reuse":
+            fail("此任务需要重新填写信息或当前不能重试", 409)
+        return job_view(c, submit(c, card, json.loads(row["params"])))
 
 
 @app.post("/api/receipt/reveal")
@@ -429,13 +474,25 @@ def destroy(body: TokenInput):
 
 
 @app.get("/api/admin/products")
-def admin_products(request: Request, compact: bool = False):
-    session(request)
+def admin_products(request: Request, compact: bool = False, shop_id: str = ""):
+    s = session(request)
     with db() as c:
+        authorize_management(c, s)
+        scope = selected_shop_scope(c, s, shop_id)
         return [
-            product_summary(product(c, r["id"])) if compact else product(c, r["id"])
-            for r in c.execute("SELECT * FROM products ORDER BY created")
+            product_summary(owner_product_view(c, r["id"]))
+            if compact
+            else owner_product_view(c, r["id"])
+            for r in c.execute(
+                "SELECT id FROM products WHERE (? IS NULL OR shop_id=?) ORDER BY created",
+                (scope, scope),
+            )
         ]
+
+
+def owner_product_view(c, pid):
+    row = c.execute("SELECT shop_id FROM products WHERE id=?", (pid,)).fetchone()
+    return {**product(c, pid), "shop_id": row["shop_id"]}
 
 
 def product_summary(p):
@@ -443,6 +500,7 @@ def product_summary(p):
         **{key: p[key] for key in ("id", "name", "mode", "delivery", "view_policy")},
         "parameters_count": len(p["parameters"]),
         "outputs_count": len(p["outputs"]),
+        **({"shop_id": p["shop_id"]} if "shop_id" in p else {}),
         "variants": [
             {key: v[key] for key in ("id", "name", "price", "currency", "enabled")}
             for v in p["variants"]
@@ -451,16 +509,31 @@ def product_summary(p):
 
 
 @app.post("/api/admin/products")
-def create_product(body: Product, request: Request):
-    session(request)
+def create_product(body: Product, request: Request, shop_id: str = ""):
+    s = session(request)
     pid = str(uuid.uuid4())
     with db() as c:
+        authorize_management(c, s)
+        shop_id = shops.resolve_create_shop(c, s, shop_id or None)
+        values = body.model_dump()
         c.execute(
-            "INSERT INTO products VALUES (?,?,?)",
-            (pid, body.model_dump_json(), time.time()),
+            "INSERT INTO products(id,config,created,shop_id) VALUES (?,?,?,?)",
+            (
+                pid,
+                json.dumps({**values, "processor_config": {}}, ensure_ascii=False),
+                time.time(),
+                shop_id,
+            ),
         )
-        audit(c, "owner", "product.create", pid)
-    return {"id": pid, **body.model_dump()}
+        from .processor_profiles import persist_product_configuration
+
+        persist_product_configuration(c, pid, values, actor_session=s)
+        c.execute(
+            "UPDATE products SET config=? WHERE id=?",
+            (json.dumps(values, ensure_ascii=False), pid),
+        )
+        audit(c, management_actor(s), "product.create", pid)
+        return owner_product_view(c, pid)
 
 
 PRODUCT_TEMPLATES = (
@@ -502,7 +575,7 @@ def managed_processors(request: Request):
 
 
 @app.post("/api/admin/products/quick")
-def quick_product(body: QuickProductInput, request: Request):
+def quick_product(body: QuickProductInput, request: Request, shop_id: str = ""):
     s = session(request)
     alphabet = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"
     name = body.name or "未命名商品 · " + "".join(
@@ -510,7 +583,12 @@ def quick_product(body: QuickProductInput, request: Request):
     )
     pid = str(uuid.uuid4())
     with db() as c:
+        authorize_management(c, s)
+        shop_id = shops.resolve_create_shop(c, s, shop_id or None)
         if body.template_id == "existing_product":
+            source_row = shops.authorize_product(c, s, body.from_product_id)
+            if source_row["shop_id"] != shop_id:
+                fail("商品模板只能复制到同一店铺", 403)
             source = product(c, body.from_product_id)
             values = {key: value for key, value in source.items() if key != "id"}
             # A new configuration link must never inherit the source product's
@@ -518,7 +596,7 @@ def quick_product(body: QuickProductInput, request: Request):
             if values["webhook_secret"]:
                 values["webhook_secret"] = secrets.token_urlsafe(32)
             # Copy processor structure without the source's delivery secrets.
-            values["processor_config"] = public_configuration(values)
+            values["processor_config"] = {}
             config = Product.model_validate({**values, "name": name, "public": False})
         else:
             template = next(t for t in PRODUCT_TEMPLATES if t["id"] == body.template_id)
@@ -526,10 +604,10 @@ def quick_product(body: QuickProductInput, request: Request):
                 name=name, mode=template["mode"], delivery=template["delivery"]
             )
         c.execute(
-            "INSERT INTO products VALUES (?,?,?)",
-            (pid, config.model_dump_json(), time.time()),
+            "INSERT INTO products(id,config,created,shop_id) VALUES (?,?,?,?)",
+            (pid, config.model_dump_json(), time.time(), shop_id),
         )
-        audit(c, "owner", "product.create", pid)
+        audit(c, management_actor(s), "product.create", pid)
         link = create_product_link(
             c,
             ProductLinkInput(
@@ -540,18 +618,20 @@ def quick_product(body: QuickProductInput, request: Request):
             ),
             s,
         )
-        return {"product": {"id": pid, **config.model_dump()}, "management_link": link}
+        return {"product": owner_product_view(c, pid), "management_link": link}
 
 
 @app.put("/api/admin/products/{pid}")
 def edit_product(pid: str, body: Product, request: Request):
-    session(request)
+    s = session(request)
     with db() as c:
-        save_product(c, pid, body, "owner")
-    return {"id": pid, **body.model_dump()}
+        authorize_management(c, s)
+        shops.authorize_product(c, s, pid)
+        save_product(c, pid, body, management_actor(s), s)
+        return owner_product_view(c, pid)
 
 
-def save_product(c, pid, body, actor):
+def save_product(c, pid, body, actor, actor_session=None):
     old = product(c, pid)
     freeze_product_plans(c, pid, old["progress_steps"])
     freeze_product_schemas(c, pid, old)
@@ -585,7 +665,14 @@ def save_product(c, pid, body, actor):
                     f"已发行卡密的商品不能修改{label}字段的代码名、类型或必填规则；请新建商品",
                     409,
                 )
-    c.execute("UPDATE products SET config=? WHERE id=?", (body.model_dump_json(), pid))
+    from .processor_profiles import persist_product_configuration
+
+    values = body.model_dump()
+    persist_product_configuration(c, pid, values, actor_session=actor_session)
+    c.execute(
+        "UPDATE products SET config=? WHERE id=?",
+        (json.dumps(values, ensure_ascii=False), pid),
+    )
     audit(c, actor, "product.update", pid)
 
 
@@ -595,8 +682,10 @@ def field_schema(fields):
 
 @app.post("/api/admin/cards")
 def cards(body: IssueCards, request: Request):
-    session(request)
+    s = session(request)
     with db() as c:
+        authorize_management(c, s)
+        shops.authorize_product(c, s, body.product_id)
         codes = issue_cards(
             c,
             body.product_id,
@@ -605,7 +694,7 @@ def cards(body: IssueCards, request: Request):
             expires=body.expires,
             variant_id=body.variant_id,
         )
-        audit(c, "owner", "cards.issue", f"{body.product_id}:{body.count}")
+        audit(c, management_actor(s), "cards.issue", f"{body.product_id}:{body.count}")
         return {"codes": codes, "batch_id": card_batch_id(c, codes)}
 
 
@@ -620,29 +709,47 @@ def card_batch_id(c, codes):
 
 
 @app.get("/api/admin/cards")
-def list_cards(request: Request, product_id: str = "", limit: int = 100):
-    session(request)
+def list_cards(
+    request: Request, product_id: str = "", limit: int = 100, shop_id: str = ""
+):
+    s = session(request)
     with db() as c:
+        authorize_management(c, s)
+        scope = selected_shop_scope(c, s, shop_id)
+        if product_id:
+            shops.authorize_product(c, s, product_id)
         return [
             dict(r)
             for r in c.execute(
-                "SELECT id,product_id,state,created FROM cards WHERE (?='' OR product_id=?) ORDER BY created DESC LIMIT ?",
-                (product_id, product_id, max(1, min(limit, 500))),
+                "SELECT cards.id,product_id,state,cards.created FROM cards "
+                "JOIN products ON products.id=cards.product_id "
+                "WHERE (?='' OR product_id=?) AND (? IS NULL OR products.shop_id=?) "
+                "ORDER BY cards.created DESC LIMIT ?",
+                (
+                    product_id,
+                    product_id,
+                    scope,
+                    scope,
+                    max(1, min(limit, 500)),
+                ),
             )
         ]
 
 
 @app.post("/api/admin/cards/{cid}/revoke")
 def revoke_card(cid: str, request: Request):
-    session(request)
+    s = session(request)
     with db() as c:
-        row = c.execute("SELECT state FROM cards WHERE id=?", (cid,)).fetchone()
+        authorize_management(c, s)
+        row = c.execute("SELECT * FROM cards WHERE id=?", (cid,)).fetchone()
+        if row:
+            shops.authorize_product(c, s, row["product_id"])
         if not row or row["state"] != "ready":
             fail("只能撤销尚未兑换的卡密", 409)
         c.execute("UPDATE cards SET state='revoked' WHERE id=?", (cid,))
         c.execute("DELETE FROM grants WHERE card_id=?", (cid,))
         c.execute("DELETE FROM receipt_batch_cards WHERE card_id=?", (cid,))
-        audit(c, "owner", "card.revoke", cid)
+        audit(c, management_actor(s), "card.revoke", cid)
     return {"ok": True}
 
 
@@ -667,7 +774,8 @@ def link_view(row):
 
 def create_product_link(c, body, s):
     pid = queue_product_id(s, body.product_id)
-    product(c, pid)
+    authorize_management(c, s)
+    shops.authorize_product(c, s, pid)
     now = time.time()
     parent_id = s["staff_id"] if s["role"] == "staff" else None
     if parent_id:
@@ -707,7 +815,7 @@ def create_product_link(c, body, s):
             body.max_cli_uses,
         ),
     )
-    audit(c, parent_id or "owner", "staff.create", sid)
+    audit(c, management_actor(s), "staff.create", sid)
     result = link_view(c.execute("SELECT * FROM staff WHERE id=?", (sid,)).fetchone())
     return {**result, "url": ORIGIN + "/staff#" + value}
 
@@ -738,17 +846,36 @@ def create_staff(body: StaffInput, request: Request):
 
 
 @app.get("/api/admin/staff")
-def list_staff(request: Request):
-    session(request)
+def list_staff(
+    request: Request,
+    view: Literal["active", "history", "all"] = "active",
+    shop_id: str = "",
+):
+    s = session(request)
     with db() as c:
-        return [link_view(r) for r in c.execute("SELECT * FROM staff ORDER BY created")]
+        authorize_management(c, s)
+        scope = selected_shop_scope(c, s, shop_id)
+        return [
+            link_view(r)
+            for r in c.execute(
+                "SELECT staff.* FROM staff JOIN products ON products.id=staff.product_id "
+                "WHERE (? IS NULL OR products.shop_id=?) ORDER BY staff.created",
+                (scope, scope),
+            )
+            if view == "all" or link_state(c, r) == view
+        ]
 
 
 @app.post("/api/admin/staff/{sid}/revoke")
 def revoke_staff(sid: str, request: Request):
-    session(request)
+    s = session(request)
     with db() as c:
-        return revoke_product_link(c, sid, "owner")
+        authorize_management(c, s)
+        row = c.execute("SELECT product_id FROM staff WHERE id=?", (sid,)).fetchone()
+        if not row:
+            fail("商品管理链接不存在", 404)
+        shops.authorize_product(c, s, row["product_id"])
+        return revoke_product_link(c, sid, management_actor(s))
 
 
 @app.post("/api/staff/login")
@@ -773,14 +900,16 @@ def staff_login(body: TokenInput, request: Request, response: Response):
 
 
 @app.get("/api/manage/products")
-def managed_products(request: Request, compact: bool = False):
+def managed_products(request: Request, compact: bool = False, shop_id: str = ""):
     s = session(request, ("admin", "staff"))
     with db() as c:
         queue_staff_authorization(c, s)
+        shop_scope = selected_shop_scope(c, s, shop_id)
         scope = s["product_id"] if s["role"] == "staff" else ""
         rows = c.execute(
-            "SELECT * FROM products WHERE (?='' OR id=?) ORDER BY created",
-            (scope, scope),
+            "SELECT * FROM products WHERE (?='' OR id=?) "
+            "AND (? IS NULL OR shop_id=?) ORDER BY created",
+            (scope, scope, shop_scope, shop_scope),
         ).fetchall()
         result = []
         for r in rows:
@@ -831,12 +960,16 @@ def jobs(
     job_id: str = "",
     view: Literal["active", "processed", "all"] = "active",
     compact: bool = False,
+    shop_id: str = "",
 ):
     s = session(request, ("admin", "staff"))
     with db() as c:
         authorize_management(c, s, "queue.view")
+        scope = selected_shop_scope(c, s, shop_id)
         product_id = queue_product_id(s, product_id)
-        product(c, product_id)
+        ownership = shops.authorize_product(c, s, product_id)
+        if scope is not None and ownership["shop_id"] != scope:
+            fail("商品不属于所选店铺", 403)
         conditions = ["product_id=?"]
         values = [product_id]
         if state:
@@ -877,6 +1010,8 @@ def jobs(
             "queue_position",
             "queue_ahead",
             "can_retry",
+            "retry_mode",
+            "retry_reason_type",
         )
         for row in rows:
             details = job_view(c, row)
@@ -903,7 +1038,7 @@ def jobs(
 @app.post("/api/manage/batch")
 def batch(body: BatchUpdate, request: Request):
     s = session(request, ("admin", "staff"))
-    actor = s["staff_id"] if s["role"] == "staff" else "owner"
+    actor = management_actor(s)
     with db() as c:
         authorize_management(
             c, s, "queue.retry" if body.action == "retry" else "queue.process"
@@ -911,6 +1046,7 @@ def batch(body: BatchUpdate, request: Request):
         if body.progress_steps is not None:
             authorize_management(c, s, "queue.process")
         product_id = queue_product_id(s, body.product_id)
+        shops.authorize_product(c, s, product_id)
         p = product(c, product_id)
         rows = [job(c, jid) for jid in dict.fromkeys(body.ids)]
         if any(r["product_id"] != product_id for r in rows):
@@ -960,10 +1096,18 @@ def batch(body: BatchUpdate, request: Request):
                         retryable=body.retryable,
                     ),
                 )
-            elif body.action in ("request_changes", "reject"):
+            elif body.action in ("request_changes", "request_retry", "reject"):
                 from .task_outcomes import apply_queue_outcome
 
-                apply_queue_outcome(c, jid, body.action, body.message, actor)
+                apply_queue_outcome(
+                    c,
+                    jid,
+                    body.action,
+                    body.message,
+                    actor,
+                    retry_mode=body.retry_mode,
+                    reason_type=body.reason_type,
+                )
             elif body.action == "retry":
                 if r["state"] != "failed":
                     fail("只能放行失败的任务", 409)
@@ -983,12 +1127,16 @@ def batch(body: BatchUpdate, request: Request):
 def management_scope(c, s, product_id, permission):
     authorize_management(c, s, permission)
     pid = queue_product_id(s, product_id)
-    product(c, pid)
+    shops.authorize_product(c, s, pid)
     return pid
 
 
 def management_actor(s):
-    return s["staff_id"] if s["role"] == "staff" else "owner"
+    if s["role"] == "staff":
+        return s["staff_id"]
+    return s.get("account_id") or (
+        "shop:" + s["shop_id"] if s.get("shop_id") is not None else "owner"
+    )
 
 
 @app.get("/api/manage/product")
@@ -1014,6 +1162,11 @@ def edit_managed_product(
         pid = management_scope(c, s, product_id, "product.edit")
         old = product(c, pid)
         values = body.model_dump()
+        if s["role"] == "staff" and any(
+            values[field] != old[field]
+            for field in ("processor_id", "processor_config")
+        ):
+            fail("商品管理链接不能选择处理器账户或修改店铺凭证", 403)
         if not values["webhook_secret"]:
             values["webhook_secret"] = old["webhook_secret"]
         if "fulfillment.configure" not in s["permissions"]:
@@ -1039,8 +1192,8 @@ def edit_managed_product(
             updated = Product.model_validate(values)
         except ValueError:
             fail("商品配置格式错误", 422)
-        save_product(c, pid, updated, management_actor(s))
-        return managed_product_view({"id": pid, **updated.model_dump()}, s)
+        save_product(c, pid, updated, management_actor(s), s)
+        return managed_product_view(product(c, pid), s)
 
 
 @app.get("/api/manage/cards")
@@ -1123,7 +1276,7 @@ def retry_managed_event(eid: str, request: Request, product_id: str = ""):
         if row["state"] != "dead":
             fail("只能重试已停止投递的事件", 409)
         c.execute(
-            "UPDATE outbox SET state='pending',attempts=0,due=? WHERE id=?",
+            "UPDATE outbox SET state='pending',attempts=0,due=?,finished_at=NULL WHERE id=?",
             (time.time(), eid),
         )
         audit(c, management_actor(s), "webhook.retry", eid)
@@ -1131,7 +1284,11 @@ def retry_managed_event(eid: str, request: Request, product_id: str = ""):
 
 
 @app.get("/api/manage/links")
-def managed_links(request: Request, product_id: str = ""):
+def managed_links(
+    request: Request,
+    product_id: str = "",
+    view: Literal["active", "history", "all"] = "active",
+):
     s = session(request, ("admin", "staff"))
     with db() as c:
         pid = management_scope(c, s, product_id, "links.delegate")
@@ -1145,7 +1302,8 @@ def managed_links(request: Request, product_id: str = ""):
             for r in c.execute(
                 "SELECT * FROM staff WHERE product_id=? ORDER BY created", (pid,)
             )
-            if descendants is None or r["id"] in descendants
+            if (descendants is None or r["id"] in descendants)
+            and (view == "all" or link_state(c, r) == view)
         ]
 
 
@@ -1175,29 +1333,42 @@ def revoke_managed_link(sid: str, request: Request, product_id: str = ""):
 
 
 @app.get("/api/admin/events")
-def events(request: Request):
-    session(request)
+def events(request: Request, shop_id: str = ""):
+    s = session(request)
     with db() as c:
+        authorize_management(c, s)
+        scope = selected_shop_scope(c, s, shop_id)
         return [
             dict(r)
             for r in c.execute(
-                "SELECT events.id,type,job_id,created,outbox.state AS webhook_state,attempts,error FROM events LEFT JOIN outbox ON outbox.id=events.id ORDER BY created DESC LIMIT 100"
+                "SELECT events.id,type,job_id,events.created,outbox.state AS webhook_state,attempts,error "
+                "FROM events JOIN products ON products.id=events.product_id "
+                "LEFT JOIN outbox ON outbox.id=events.id "
+                "WHERE (? IS NULL OR products.shop_id=?) ORDER BY events.created DESC LIMIT 100",
+                (scope, scope),
             )
         ]
 
 
 @app.post("/api/admin/events/{eid}/retry")
 def retry_event(eid: str, request: Request):
-    session(request)
+    s = session(request)
     with db() as c:
-        row = c.execute("SELECT state FROM outbox WHERE id=?", (eid,)).fetchone()
+        authorize_management(c, s)
+        row = c.execute(
+            "SELECT events.product_id,outbox.state FROM events "
+            "LEFT JOIN outbox ON outbox.id=events.id WHERE events.id=?",
+            (eid,),
+        ).fetchone()
+        if row:
+            shops.authorize_product(c, s, row["product_id"])
         if not row or row["state"] != "dead":
             fail("只能重试已停止投递的事件", 409)
         c.execute(
-            "UPDATE outbox SET state='pending',attempts=0,due=? WHERE id=?",
+            "UPDATE outbox SET state='pending',attempts=0,due=?,finished_at=NULL WHERE id=?",
             (time.time(), eid),
         )
-        audit(c, "owner", "webhook.retry", eid)
+        audit(c, management_actor(s), "webhook.retry", eid)
     return {"ok": True}
 
 
@@ -1233,9 +1404,26 @@ async def callback(pid: str, jid: str, request: Request):
 def platform_cards(body: IssueCards, request: Request):
     rate_limit(request, "integration", 60, 60)
     with db() as c:
-        key = request.headers.get("authorization", "").removeprefix("Bearer ")
-        expected = setting(c, "integration_key")
-        if not expected or not secrets.compare_digest(digest(key), expected):
+        secret = request.headers.get("authorization", "").removeprefix("Bearer ")
+        secret_digest = digest(secret)
+        scoped_key = c.execute(
+            "SELECT shop_id FROM shop_integration_keys WHERE key_digest=?",
+            (secret_digest,),
+        ).fetchone()
+        legacy = False
+        if scoped_key:
+            shop_id = scoped_key["shop_id"]
+        else:
+            expected = setting(c, "integration_key")
+            if not expected or not secrets.compare_digest(secret_digest, expected):
+                fail("平台密钥无效", 401)
+            shop_id = shops.default_shop(c)
+            legacy = True
+        shops.shop_row(c, shop_id)
+        target = shops.require_enabled_product(c, body.product_id)
+        if target["shop_id"] != shop_id:
+            fail("平台密钥无权发行此店铺的卡密", 403)
+        if not secret:
             fail("平台密钥无效", 401)
         key = request.headers.get("idempotency-key", "")
         if not 8 <= len(key) <= 200:
@@ -1246,7 +1434,11 @@ def platform_cards(body: IssueCards, request: Request):
         if not body.label and body.expires is None:
             excluded.update(("label", "expires"))
         fingerprint = digest(body.model_dump_json(exclude=excluded))
-        request_key = digest(key)
+        request_key = (
+            digest(key)
+            if legacy
+            else digest("shop:" + shop_id + ":" + secret_digest + ":" + key)
+        )
         old = c.execute(
             "SELECT * FROM api_requests WHERE key=?", (request_key,)
         ).fetchone()
@@ -1278,8 +1470,63 @@ def platform_cards(body: IssueCards, request: Request):
                 time.time(),
             ),
         )
-        audit(c, "platform", "cards.issue", f"{body.product_id}:{body.count}")
+        audit(
+            c,
+            "platform" if legacy else "shop:" + shop_id,
+            "cards.issue",
+            f"{body.product_id}:{body.count}",
+        )
         return result
+
+
+@app.get("/api/shop/integration-key")
+def integration_key_status(request: Request, shop_id: str = ""):
+    s = session(request)
+    with db() as c:
+        authorize_management(c, s)
+        shop_id = shops.resolve_create_shop(c, s, shop_id or None)
+        row = c.execute(
+            "SELECT created FROM shop_integration_keys WHERE shop_id=?", (shop_id,)
+        ).fetchone()
+        return {
+            "shop_id": shop_id,
+            "configured": row is not None,
+            "created": row["created"] if row else None,
+        }
+
+
+def _integration_key_owner(s, c, shop_id):
+    from .account_auth import require_recent
+
+    authorize_management(c, s)
+    if s.get("channel") != "cli":
+        require_recent(s)
+    return s, shops.resolve_create_shop(c, s, shop_id or None)
+
+
+@app.post("/api/shop/integration-key")
+def rotate_integration_key(request: Request, shop_id: str = ""):
+    s = session(request)
+    with db() as c:
+        s, shop_id = _integration_key_owner(s, c, shop_id)
+        value = token()
+        c.execute(
+            "INSERT INTO shop_integration_keys(shop_id,key_digest,created) VALUES (?,?,?) "
+            "ON CONFLICT(shop_id) DO UPDATE SET key_digest=excluded.key_digest,created=excluded.created",
+            (shop_id, digest(value), time.time()),
+        )
+        audit(c, management_actor(s), "integration_key.rotate", shop_id)
+        return {"shop_id": shop_id, "key": value}
+
+
+@app.delete("/api/shop/integration-key")
+def revoke_integration_key(request: Request, shop_id: str = ""):
+    s = session(request)
+    with db() as c:
+        s, shop_id = _integration_key_owner(s, c, shop_id)
+        c.execute("DELETE FROM shop_integration_keys WHERE shop_id=?", (shop_id,))
+        audit(c, management_actor(s), "integration_key.revoke", shop_id)
+        return {"ok": True}
 
 
 STATIC = Path(__file__).parent / "static"
@@ -1291,5 +1538,11 @@ app.mount("/static", StaticFiles(directory=STATIC), name="static")
 @app.api_route("/staff", methods=["GET", "HEAD"])
 @app.api_route("/receipt", methods=["GET", "HEAD"])
 @app.api_route("/cli/owner", methods=["GET", "HEAD"])
+@app.api_route("/account", methods=["GET", "HEAD"])
+@app.api_route("/account/login", methods=["GET", "HEAD"])
+@app.api_route("/account/invite", methods=["GET", "HEAD"])
+@app.api_route("/account/register", methods=["GET", "HEAD"])
+@app.api_route("/account/reset", methods=["GET", "HEAD"])
+@app.api_route("/account/security", methods=["GET", "HEAD"])
 def index():
     return FileResponse(STATIC / "index.html")

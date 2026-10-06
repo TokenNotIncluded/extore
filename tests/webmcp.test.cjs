@@ -2719,3 +2719,67 @@ test("safe session discovery identifies CLI channels and devices without reveali
   for (const secret of ["DEVICE-PUBLIC-KEY", "DEVICE-FINGERPRINT", "CLI-PRIVATE", "CLI-DIGEST", "DEVICE-PRIVATE-KEY"])
     assert.equal(JSON.stringify(result).includes(secret), false);
 });
+
+test("merchant and platform tools reject a switched shop or browser session with the same admin role", async (t) => {
+  for (const changed of [
+    { shop_id: "shop-b", superadmin: false, session_id: "session-a" },
+    { shop_id: null, superadmin: true, session_id: "session-a" },
+    { shop_id: "shop-a", superadmin: false, session_id: "session-b" },
+  ]) {
+    const h = await harness(t, {
+      context: { page: "admin", role: "admin", tab: "products", shopId: "shop-a", superadmin: false, sessionId: "session-a" },
+      api: async (url) => url === "/auth/status" ? { role: "admin", ...changed } : assert.fail("Changed shop reached a business endpoint"),
+    });
+    rejected(await h.call("products_admin_list", {}), "forbidden");
+    assert.deepEqual(h.calls.map((call) => call.url), ["/auth/status"]);
+  }
+});
+
+test("management tools pass the captured shop and session to the HTTP adapter", async (t) => {
+  let bound;
+  const h = await harness(t, {
+    context: { page: "admin", role: "admin", tab: "products", shopId: "shop-a", superadmin: false, sessionId: "session-a" },
+    api: async (url, body, method, options) => {
+      if (url === "/auth/status") return { role: "admin", shop_id: "shop-a", superadmin: false, session_id: "session-a" };
+      bound = options;
+      return [product()];
+    },
+  });
+  assert.equal((await h.call("products_admin_list", {})).ok, true);
+  assert.equal(bound.expectedScope, "shop-a");
+  assert.equal(bound.expectedSessionId, "session-a");
+});
+
+test("native retry dispositions distinguish unchanged input from revised input", async (t) => {
+  const h = await harness(t, { context: staffContext({ queueProduct: product() }) });
+  const base = { product_id: "p1", ids: ["j1"], reason: "External service is unavailable", retry_mode: "reuse", reason_type: "external", confirm: true };
+  assert.equal((await h.call("jobs_request_retry", base)).ok, true);
+  assert.deepEqual(mutations(h)[0].body, { product_id: "p1", ids: ["j1"], message: base.reason, retry_mode: "reuse", reason_type: "external", action: "request_retry" });
+  for (const input of [{ ...base, retry_mode: "automatic" }, { ...base, reason_type: "payment" }, { ...base, confirm: false }]) rejected(await h.call("jobs_request_retry", input));
+});
+
+test("original-input retry requires a fresh eligible selected receipt and explicit confirmation", async (t) => {
+  let retried = 0;
+  const receipt = { product: product(), job: { id: "j1", state: "needs_input", can_retry: true, retry_mode: "reuse", retry_reason_type: "external", params: { private: "do not export" } } };
+  const h = await harness(t, { context: { page: "receipt", currentToken: "private", product: product() }, receipt, actions: { retryOriginal: async () => { retried += 1; return { id: "j1", state: "queued" }; } } });
+  rejected(await h.call("redemption_retry_original", { confirm: false }));
+  assert.equal((await h.call("redemption_retry_original", { confirm: true })).ok, true);
+  assert.equal(retried, 1);
+  receipt.job.retry_mode = "revise";
+  rejected(await h.call("redemption_retry_original", { confirm: true }), "invalid_state");
+  assert.equal(retried, 1);
+});
+
+test("record cleanup tools preview by default and restrict destructive cleanup to authorized scopes", async (t) => {
+  const owner = await harness(t, { context: { page: "admin", role: "admin", tab: "events" }, api: async (url, body) => url === "/auth/status" ? { role: "admin" } : ({ dry_run: body?.dry_run, changed: {} }) });
+  assert.equal((await owner.call("records_cleanup_preview", { areas: ["events"], limit: 100 })).ok, true);
+  assert.deepEqual(mutations(owner)[0].body, { areas: ["events"], limit: 100, dry_run: true });
+  rejected(await owner.call("records_cleanup", { areas: ["events"] }));
+  assert.equal((await owner.call("records_cleanup", { areas: ["events"], confirm: true })).ok, true);
+  assert.deepEqual(mutations(owner)[1].body, { areas: ["events"], dry_run: false });
+  const staff = await harness(t, { context: staffContext({ tab: "staff", permissions: ["links.delegate"] }) });
+  assert.equal(staff.names().includes("extore_records_cleanup"), false);
+  rejected(await staff.call("staff_cleanup", { product_id: "p2", confirm: true }), "forbidden");
+  assert.equal(mutations(staff).length, 0);
+  assert.ok(staff.names().includes("extore_staff_cleanup_preview"));
+});

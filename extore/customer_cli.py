@@ -214,6 +214,8 @@ def _summary_job(job):
             "queue_position",
             "queue_ahead",
             "can_retry",
+            "retry_mode",
+            "retry_reason_type",
             "revealed",
             "steps",
             "completed_steps",
@@ -606,6 +608,27 @@ class CustomerClient:
         entry["status"] = _summary_receipt(result)
         return {"ok": True, "receipt_id": entry["id"], **entry["status"]}
 
+    def retry_existing(self, entry, card_id=None):
+        value = self.receipt(entry)
+        selected = self.select(value, card_id)
+        row = selected.get("job") or {}
+        if (
+            row.get("state") != "needs_input"
+            or row.get("retry_mode") != "reuse"
+            or not row.get("can_retry")
+        ):
+            raise ManageError(
+                "This task requires revised input or cannot be retried",
+                code="invalid_state",
+            )
+        body = {"token": entry["token"]}
+        if card_id:
+            body["card_id"] = card_id
+        self.json(entry["origin"], "POST", "/api/retry", json=body)
+        current = self.receipt(entry)
+        entry["status"] = _summary_receipt(current)
+        return {"ok": True, "receipt_id": entry["id"], **entry["status"]}
+
     @staticmethod
     def _submit_state(selected, retry):
         row = selected.get("job")
@@ -793,7 +816,7 @@ def add_parser(commands):
         ("receipt", "show current receipt progress and queue position"),
         ("files", "list cached input and revealed delivery file IDs"),
         ("redeem", "submit defined inputs, optionally uploading file paths"),
-        ("retry", "resubmit corrected inputs after the task was returned"),
+        ("retry", "retry with revised inputs or --reuse the stored inputs"),
         ("upload", "upload an input file without submitting the task"),
         ("reveal", "save delivery content to a new private JSON file"),
         ("download", "download one revealed delivery file"),
@@ -827,6 +850,12 @@ def add_parser(commands):
             input_group.add_argument(
                 "--items-file", type=Path, help="batch JSON list of {card_id,params}"
             )
+            if name == "retry":
+                input_group.add_argument(
+                    "--reuse",
+                    action="store_true",
+                    help="retry unchanged stored inputs when the processor permits it",
+                )
             command.add_argument(
                 "--file",
                 action="append",
@@ -988,6 +1017,12 @@ def dispatch(client, args):
                 result["inputs"] = value["job"].get("params", {})
         return result
     if command in ("redeem", "retry"):
+        if getattr(args, "reuse", False):
+            if args.file:
+                raise ManageError(
+                    "--reuse cannot upload new attachments", code="invalid_input"
+                )
+            return client.retry_existing(entry, card_id)
         items = _read_json(args.items_file) if args.items_file else None
         params = _read_json(args.params_file) if items is None else None
         return client.redeem(

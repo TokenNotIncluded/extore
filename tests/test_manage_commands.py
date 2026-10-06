@@ -217,7 +217,8 @@ def test_delegated_link_create_list_revoke_keeps_url_private(manager, monkeypatc
     links = run(manager, "links", "list")
     assert [link["id"] for link in links["links"]] == [result["link"]["id"]]
     assert run(manager, "links", "revoke", result["link"]["id"])["ok"]
-    assert run(manager, "links", "list")["links"][0]["revoked"]
+    assert run(manager, "links", "list")["links"] == []
+    assert run(manager, "links", "list", "--view", "history")["links"][0]["revoked"]
 
 
 def test_events_named_retry_reactivates_only_dead_webhook_attempt(manager):
@@ -400,9 +401,27 @@ def test_default_product_list_is_small_and_detail_is_explicit(manager):
     assert query["compact"] == "true"
 
 
-def test_official_processor_secret_configuration_is_hidden_and_preserved(
+def test_processor_vault_is_owner_only_and_product_cli_preserves_binding(
     manager, monkeypatch
 ):
+    current = next(
+        item
+        for item in manager["owner"].get("/api/admin/products").json()
+        if item["id"] == manager["pid"]
+    )
+    definition = {
+        "name": current["name"],
+        "mode": "script",
+        "processor_id": "personalized_text",
+        "processor_config": {"template": "Hello $name"},
+        "webhook_secret": current["webhook_secret"],
+    }
+    configured = manager["owner"].put(
+        "/api/admin/products/" + manager["pid"], json=definition
+    )
+    assert configured.status_code == 200, configured.text
+    binding_path = "/api/admin/processor-profiles/bindings/" + manager["pid"]
+    binding = manager["owner"].get(binding_path).json()
     patch_input(
         manager,
         monkeypatch,
@@ -412,17 +431,20 @@ def test_official_processor_secret_configuration_is_hidden_and_preserved(
             "processor_config": {"template": "Hello $name"},
         },
     )
-    updated = run(manager, "product", "update", "--json-stdin", "--detail")
-    assert updated["product"]["processor_config"] == {"template": "[redacted]"}
+    with pytest.raises(remote.ManageError) as denied:
+        run(manager, "product", "update", "--json-stdin", "--detail")
+    assert denied.value.status == 403
     patch_input(manager, monkeypatch, {"name": "Personalized through CLI"})
     updated = run(manager, "product", "update", "--json-stdin", "--detail")
-    assert updated["product"]["processor_config"] == {"template": "[redacted]"}
+    assert updated["product"]["processor_config"] == {}
     stored = next(
         item
         for item in manager["owner"].get("/api/admin/products").json()
         if item["id"] == manager["pid"]
     )
-    assert stored["processor_config"] == {"template": "Hello $name"}
+    assert stored["processor_config"] == {}
+    assert manager["owner"].get(binding_path).json() == binding
+    assert "Hello $name" not in json.dumps(updated)
     assert (
         "webhook_secret" in updated["product"]
         and updated["product"]["webhook_secret"] == "[redacted]"

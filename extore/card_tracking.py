@@ -215,22 +215,28 @@ WITH inventory AS (
  LEFT JOIN card_batches b ON b.id=m.batch_id
  LEFT JOIN jobs j ON j.card_id=c.id
  WHERE (:product_id='' OR c.product_id=:product_id)
+ AND (:shop_id='' OR p.shop_id=:shop_id)
 )
 """
 
 
 def _scope(c, s, product_id):
+    from .shops import authorize_product
+
     authorize_management(c, s, "cards.manage")
     if s["role"] == "staff":
         if product_id and product_id != s["product_id"]:
             fail("无权查看此商品的卡密", 403)
         product_id = s["product_id"]
-    if (
-        product_id
-        and not c.execute("SELECT 1 FROM products WHERE id=?", (product_id,)).fetchone()
-    ):
-        fail("商品不存在", 404)
+    if product_id:
+        authorize_product(c, s, product_id)
     return product_id
+
+
+def _shop_scope(s):
+    # Legacy administrators have no shop binding. Tenant administrators must
+    # retain their SQL scope even when no explicit product filter is supplied.
+    return s.get("shop_id") or ""
 
 
 def _empty_summary():
@@ -249,14 +255,19 @@ def _empty_summary():
     }
 
 
-def _summary(c, pid, now, variant_id=""):
+def _summary(c, pid, now, variant_id="", shop_id=""):
     result = _empty_summary()
     for row in c.execute(
         _INVENTORY + "SELECT status,COUNT(*) AS n,"
         "SUM(job_id IS NOT NULL AND job_state!='needs_input') AS used,"
         "SUM(first_verified IS NOT NULL) AS verified,SUM(revealed!=0) AS viewed "
         "FROM inventory WHERE (:variant_id='' OR variant_id=:variant_id) GROUP BY status",
-        {"product_id": pid, "now": now, "variant_id": variant_id},
+        {
+            "product_id": pid,
+            "shop_id": shop_id,
+            "now": now,
+            "variant_id": variant_id,
+        },
     ):
         result["states"][row["status"]] = row["n"]
         result["total"] += row["n"]
@@ -286,7 +297,7 @@ def _sum_summaries(summaries):
     return result
 
 
-def _variant_buckets(c, pid, config, now):
+def _variant_buckets(c, pid, config, now, shop_id=""):
     from .variants import default_variant, resolve_product_variants
 
     configured = resolve_product_variants(config)
@@ -296,7 +307,7 @@ def _variant_buckets(c, pid, config, now):
         for row in c.execute(
             _INVENTORY
             + "SELECT DISTINCT variant_id FROM inventory ORDER BY variant_id",
-            {"product_id": pid, "now": now},
+            {"product_id": pid, "shop_id": shop_id, "now": now},
         )
     ]
     for variant_id in issued:
@@ -343,21 +354,23 @@ def _variant_buckets(c, pid, config, now):
                 key: variant[key]
                 for key in ("name", "description", "price", "currency", "enabled")
             },
-            "summary": _summary(c, pid, now, variant_id),
+            "summary": _summary(c, pid, now, variant_id, shop_id),
         }
         for variant_id, variant in metadata.items()
     ]
 
 
-def _stats(c, pid):
+def _stats(c, pid, shop_id=""):
     now = time.time()
     products = []
     for row in c.execute(
         "SELECT id,json_extract(config,'$.name') AS name,config FROM products "
-        "WHERE (?='' OR id=?) ORDER BY created,id",
-        (pid, pid),
+        "WHERE (?='' OR id=?) AND (?='' OR shop_id=?) ORDER BY created,id",
+        (pid, pid, shop_id, shop_id),
     ).fetchall():
-        variants = _variant_buckets(c, row["id"], json.loads(row["config"]), now)
+        variants = _variant_buckets(
+            c, row["id"], json.loads(row["config"]), now, shop_id
+        )
         products.append(
             {
                 "product_id": row["id"],
@@ -373,10 +386,13 @@ def _stats(c, pid):
     }
 
 
-def _inventory(c, pid, status, batch_id, search, offset, limit, variant_id=""):
+def _inventory(
+    c, pid, status, batch_id, search, offset, limit, variant_id="", shop_id=""
+):
     now = time.time()
     params = {
         "product_id": pid,
+        "shop_id": shop_id,
         "now": now,
         "status": status,
         "batch_id": batch_id,
@@ -406,22 +422,30 @@ def _inventory(c, pid, status, batch_id, search, offset, limit, variant_id=""):
     return {
         "items": items,
         "total": total,
-        "summary": _summary(c, pid, now),
+        "summary": _summary(c, pid, now, shop_id=shop_id),
         "offset": offset,
         "limit": limit,
     }
 
 
 def _history(c, s, cid, pid):
+    from .shops import authorize_product
+
     row = c.execute("SELECT product_id FROM cards WHERE id=?", (cid,)).fetchone()
     if row is None:
         fail("卡密不存在", 404)
     if pid and row["product_id"] != pid:
         fail("无权查看此商品的卡密", 403)
+    authorize_product(c, s, row["product_id"])
     card = dict(
         c.execute(
             _INVENTORY + "SELECT * FROM inventory WHERE id=:card_id",
-            {"product_id": row["product_id"], "now": time.time(), "card_id": cid},
+            {
+                "product_id": row["product_id"],
+                "shop_id": _shop_scope(s),
+                "now": time.time(),
+                "card_id": cid,
+            },
         ).fetchone()
     )
     timeline = [
@@ -492,7 +516,7 @@ def admin_card_stats(
 ):
     s = session(request)
     with db() as c:
-        return _stats(c, _scope(c, s, product_id))
+        return _stats(c, _scope(c, s, product_id), _shop_scope(s))
 
 
 @router.get("/api/manage/card-stats")
@@ -501,7 +525,7 @@ def managed_card_stats(
 ):
     s = session(request, ("admin", "staff"))
     with db() as c:
-        return _stats(c, _scope(c, s, product_id))
+        return _stats(c, _scope(c, s, product_id), _shop_scope(s))
 
 
 @router.get("/api/admin/card-inventory")
@@ -526,6 +550,7 @@ def admin_card_inventory(
             offset,
             limit,
             variant_id,
+            _shop_scope(s),
         )
 
 
@@ -551,6 +576,7 @@ def managed_card_inventory(
             offset,
             limit,
             variant_id,
+            _shop_scope(s),
         )
 
 

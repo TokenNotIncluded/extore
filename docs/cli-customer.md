@@ -45,20 +45,32 @@ extore customer receipt RECEIPT_ID
 | --- | --- |
 | 尚无任务 | 填写参数并 `redeem` |
 | `queued` / `processing` | 查看状态与排位，等待处理 |
-| `needs_input` | 阅读原因，修改资料并 `retry`；沿用原任务与快照，attempt 增加 |
+| `needs_input` | 阅读原因与 `retry_mode`：`revise` 修改后重提，`reuse` 使用原资料重试 |
 | `failed` | 只有 `can_retry=true` 时可按商品规则重试，否则联系商家 |
 | `rejected` | 查看拒绝原因；卡密已禁用，不能重提或领取 |
 | `succeeded` | 按查看规则领取、下载或销毁 |
 | `destroyed` | 内容已经关闭，不能恢复 |
 
-退回补充不受发货失败的 `allow_retry` / `max_attempts` 限制，但卡密过期或撤销后仍不能重提。需要取回原补充资料时显式使用 `--inputs`：
+要求重试不受发货失败的 `allow_retry` / `max_attempts` 限制，但卡密过期、撤销或店铺停用后仍不能重提。状态中的 `retry_reason_type` 区分 `customer_input`（顾客资料）、`external`（外部服务）、`processor`（处理程序），不代表所有问题都需要顾客改资料。
+
+`retry_mode=revise` 时按要求修改资料。需要取回原参数时显式使用 `--inputs`：
 
 ```sh
 extore customer receipt RECEIPT_ID --inputs
 extore customer retry RECEIPT_ID --params-file corrected.json
 ```
 
-新尝试保留任务 ID、输入输出定义、规格和计划，重置完成步骤与进度。
+`retry_mode=reuse` 且 `can_retry=true` 时，原参数和输入附件保持不变：
+
+```sh
+extore customer retry RECEIPT_ID --reuse
+# 批量 receipt 每次明确选择一张卡
+extore customer retry RECEIPT_ID --reuse --card CARD_ID
+```
+
+`--reuse` 不需要参数文件，也不能与 `--params-file`、`--params-stdin`、`--items-file` 或 `--file` 混用。它只适用于处理者明确允许原资料重试的 `needs_input` 任务；不能代替修改后重提，也不能绕过拒绝、过期或撤销。无需重新选文件或取出私密原参数。
+
+两种新尝试都保留任务 ID、输入输出定义、规格和计划，`attempt` 增加，完成步骤与进度归零。卡密仍归原顾客任务，不会生成新的销售库存。
 
 ## 上传材料
 
@@ -74,7 +86,7 @@ extore customer upload RECEIPT_ID --field material --file ./material.pdf
 extore customer redeem RECEIPT_ID --params-file params.json --file material=./material.pdf
 ```
 
-`--file FIELD=PATH` 可重复，但每个文件字段只提供一次。目标必须是当前卡密输入快照的 `file` 字段。CLI 读取服务器上传限制；服务端默认单文件 20 MiB，还检查单卡、全站容量和并发。提交成功前，上传材料属于草稿，保留期见[存储说明](getting-started.md#文件上传与存储)。
+`--file FIELD=PATH` 可重复，但每个文件字段只提供一次。目标必须是当前卡密输入快照的 `file` 字段。CLI 读取服务器上传限制；服务端默认单文件 20 MiB，还检查单卡、单店、全站容量和并发。提交成功前，上传材料属于草稿，保留期见[存储说明](getting-started.md#文件上传与存储)。原资料重试不能追加或替换文件；需要修改材料的任务应使用 `revise`。
 
 ## 批量卡密
 
@@ -128,7 +140,8 @@ extore customer destroy RECEIPT_ID --confirm
 | `import-receipt` | 隐藏交互输入，或 `--link-stdin` |
 | `receipts` | 本地摘要，无网络请求 |
 | `receipt / status RECEIPT_ID` | `--card`、显式 `--inputs` |
-| `redeem / retry RECEIPT_ID` | 三选一：`--params-file` / `--params-stdin` / `--items-file`；单卡可重复 `--file FIELD=PATH` |
+| `redeem RECEIPT_ID` | 三选一：`--params-file` / `--params-stdin` / `--items-file`；单卡可重复 `--file FIELD=PATH` |
+| `retry RECEIPT_ID` | 修改后重提沿用 redeem 参数；原资料重试用互斥的 `--reuse`，批量必须明确 `--card` |
 | `upload RECEIPT_ID` | `--field`、`--file`、批量时 `--card` |
 | `reveal RECEIPT_ID` | 新文件 `--output`、批量时 `--card` |
 | `files RECEIPT_ID` | 批量时 `--card` |

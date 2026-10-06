@@ -679,3 +679,229 @@ def test_malformed_nested_receipt_is_a_safe_error_without_traceback(
     assert not output.out
     assert json.loads(output.err)["code"] == "invalid_response"
     assert "Traceback" not in output.err and "unexpected-job-shape" not in output.err
+
+
+def test_reuse_retry_keeps_private_original_inputs_and_bound_file(
+    owner, customer, tmp_path, monkeypatch, capsys
+):
+    run, profile, calls = customer
+    product = make_product(
+        owner,
+        allow_retry=False,
+        max_attempts=1,
+        parameters=[
+            {"key": "request", "label": {"zh-CN": "需求"}},
+            {"key": "source", "label": {"zh-CN": "附件"}, "type": "file"},
+        ],
+    )
+    codes = issue(owner, product)
+    rid = exchange(run, codes)["receipt_id"]
+    source = tmp_path / "original.txt"
+    source.write_bytes(b"private-original-file")
+    row = run(
+        "redeem",
+        rid,
+        "--params-stdin",
+        "--file",
+        f"source={source}",
+        stdin='{"request":"private-original-requirements"}',
+    )["job"]
+    batch(owner, product["id"], row["id"], "claim")
+    batch(
+        owner,
+        product["id"],
+        row["id"],
+        "request_retry",
+        message="上游暂时不可用，请复用原始输入重试",
+        retry_mode="reuse",
+        reason_type="external",
+    )
+    token = json.loads(profile.read_text())["receipts"][0]["token"]
+    with db() as c:
+        original = c.execute("SELECT * FROM jobs WHERE id=?", (row["id"],)).fetchone()
+        original_params = json.loads(original["params"])
+        file_id = original_params["source"]
+        original_file = c.execute(
+            "SELECT job_id,content FROM job_files WHERE id=?", (file_id,)
+        ).fetchone()
+        assert original_file["job_id"] == row["id"]
+    count = len(calls)
+    retried_result = run("retry", rid, "--reuse")
+    monkeypatch.setattr(remote, "execute", lambda args: retried_result)
+    remote.run(arguments("retry", rid, "--reuse", profile=profile))
+    output = capsys.readouterr()
+    result = json.loads(output.out)
+    assert not output.err
+    assert result["job"]["id"] == row["id"]
+    assert result["job"]["state"] == "queued"
+    assert result["job"]["attempt"] == 2
+    for private in (token, codes[0], "private-original-requirements", file_id):
+        assert private not in output.out
+    mutations = [
+        (path, json.loads(body))
+        for method, path, _, body in calls[count:]
+        if method != "GET" and path != "/api/receipt"
+    ]
+    assert mutations == [("/api/retry", {"token": token})]
+    assert "private-original-requirements" not in profile.read_text()
+    with db() as c:
+        retried = c.execute("SELECT * FROM jobs WHERE id=?", (row["id"],)).fetchone()
+        assert json.loads(retried["params"]) == original_params
+        assert retried["claimed_by"] is None and retried["lease"] is None
+        assert retried["message"] == "" and retried["progress"] == 0
+        reused_file = c.execute(
+            "SELECT job_id,content FROM job_files WHERE id=?", (file_id,)
+        ).fetchone()
+        assert tuple(reused_file) == tuple(original_file)
+
+
+def test_reuse_retry_changes_only_the_selected_batch_card(owner, customer):
+    run, profile, calls = customer
+    product = make_product(owner, allow_retry=False, max_attempts=1)
+    receipt = exchange(run, issue(owner, product, 2))
+    rid = receipt["receipt_id"]
+    cards = [item["card_id"] for item in receipt["items"]]
+    jobs = []
+    for index, card in enumerate(cards):
+        submitted = run(
+            "redeem",
+            rid,
+            "--card",
+            card,
+            "--params-stdin",
+            stdin=json.dumps({"request": f"private-batch-input-{index}"}),
+        )
+        row = submitted["items"][index]["job"]
+        jobs.append(row["id"])
+        batch(owner, product["id"], row["id"], "claim")
+        batch(
+            owner,
+            product["id"],
+            row["id"],
+            "request_retry",
+            message=f"暂时不可用 {index}",
+            retry_mode="reuse",
+            reason_type="processor",
+        )
+    token = json.loads(profile.read_text())["receipts"][0]["token"]
+    count = len(calls)
+    result = run("retry", rid, "--card", cards[1], "--reuse")
+    assert result["items"][0]["job"]["state"] == "needs_input"
+    assert result["items"][0]["job"]["attempt"] == 1
+    assert result["items"][1]["job"]["state"] == "queued"
+    assert result["items"][1]["job"]["attempt"] == 2
+    assert result["items"][1]["job"]["id"] == jobs[1]
+    retries = [
+        json.loads(body) for _, path, _, body in calls[count:] if path == "/api/retry"
+    ]
+    assert retries == [{"token": token, "card_id": cards[1]}]
+    assert not any(
+        path in ("/api/redeem", "/api/files/upload") for _, path, _, _ in calls[count:]
+    )
+    for private in (token, "private-batch-input-0", "private-batch-input-1"):
+        assert private not in json.dumps(result)
+    with db() as c:
+        rows = [
+            c.execute("SELECT * FROM jobs WHERE id=?", (jid,)).fetchone()
+            for jid in jobs
+        ]
+        assert [json.loads(row["params"])["request"] for row in rows] == [
+            "private-batch-input-0",
+            "private-batch-input-1",
+        ]
+
+
+def test_reuse_with_new_attachment_is_rejected_before_any_request(
+    owner, customer, tmp_path
+):
+    run, _, calls = customer
+    product = make_product(owner)
+    rid = exchange(run, issue(owner, product))["receipt_id"]
+    count = len(calls)
+    with pytest.raises(ManageError, match="cannot upload new attachments") as error:
+        run("retry", rid, "--reuse", "--file", f"source={tmp_path / 'missing.txt'}")
+    assert error.value.code == "invalid_input"
+    assert len(calls) == count
+    with db() as c:
+        assert c.execute("SELECT count(*) FROM jobs").fetchone()[0] == 0
+        assert c.execute("SELECT count(*) FROM job_files").fetchone()[0] == 0
+
+
+@pytest.mark.parametrize(
+    "input_flag", ["--params-stdin", "--params-file", "--items-file"]
+)
+def test_reuse_does_not_accept_replacement_input_flags(input_flag, tmp_path):
+    replacement = (
+        [] if input_flag == "--params-stdin" else [str(tmp_path / "inputs.json")]
+    )
+    with pytest.raises(SystemExit) as error:
+        arguments("retry", "receipt-id", "--reuse", input_flag, *replacement)
+    assert error.value.code == 2
+
+
+@pytest.mark.parametrize("disable", ["revise", "expired", "already_queued"])
+def test_reuse_is_denied_before_retry_when_private_preflight_disallows_it(
+    owner, customer, disable
+):
+    run, profile, calls = customer
+    product = make_product(owner)
+    rid = exchange(run, issue(owner, product))["receipt_id"]
+    row = run("redeem", rid, "--params-stdin", stdin='{"request":"private-input"}')[
+        "job"
+    ]
+    if disable != "already_queued":
+        batch(owner, product["id"], row["id"], "claim")
+        batch(
+            owner,
+            product["id"],
+            row["id"],
+            "request_retry",
+            message="需要用户确认",
+            retry_mode="revise" if disable == "revise" else "reuse",
+        )
+    if disable == "expired":
+        with db() as c:
+            c.execute(
+                "UPDATE card_meta SET expires=? WHERE card_id=(SELECT card_id FROM jobs WHERE id=?)",
+                (time.time() - 1, row["id"]),
+            )
+    token = json.loads(profile.read_text())["receipts"][0]["token"]
+    count = len(calls)
+    with pytest.raises(
+        ManageError, match="requires revised input or cannot be retried"
+    ) as error:
+        run("retry", rid, "--reuse")
+    assert error.value.code == "invalid_state" and token not in str(error.value)
+    assert [path for _, path, _, _ in calls[count:]] == ["/api/receipt"]
+    with db() as c:
+        unchanged = c.execute(
+            "SELECT state,attempt,params FROM jobs WHERE id=?", (row["id"],)
+        ).fetchone()
+        assert unchanged["attempt"] == 1
+        assert unchanged["state"] == (
+            "queued" if disable == "already_queued" else "needs_input"
+        )
+        assert json.loads(unchanged["params"]) == {"request": "private-input"}
+
+
+@pytest.mark.parametrize("selection", ["foreign", "missing"])
+def test_reuse_batch_requires_a_card_from_the_private_receipt(
+    owner, customer, selection
+):
+    run, _, calls = customer
+    product = make_product(owner)
+    receipt = exchange(run, issue(owner, product, 2))
+    foreign = exchange(run, issue(owner, product))
+    with db() as c:
+        foreign_card = c.execute(
+            "SELECT card_id FROM grants WHERE card_id NOT IN (SELECT card_id FROM receipt_batch_cards)"
+        ).fetchone()[0]
+    count = len(calls)
+    selected = ["--card", foreign_card] if selection == "foreign" else []
+    expected = "not in this receipt" if selection == "foreign" else "Select --card"
+    with pytest.raises(ManageError, match=expected):
+        run("retry", receipt["receipt_id"], "--reuse", *selected)
+    assert [path for _, path, _, _ in calls[count:]] == ["/api/receipt"]
+    assert foreign["receipt_id"] != receipt["receipt_id"]
+    with db() as c:
+        assert c.execute("SELECT count(*) FROM jobs").fetchone()[0] == 0

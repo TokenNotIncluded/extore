@@ -128,7 +128,7 @@ def test_builtin_quick_product_is_private_and_creates_only_config_link(
     started = time.time()
     result = quick_create(owner, template_id=template_id)
     product, link = assert_config_link(result, started, time.time())
-    assert set(product) == {"id", *Product.model_fields}
+    assert set(product) == {"id", "shop_id", *Product.model_fields}
     assert re.fullmatch(r"未命名商品 · [A-Z0-9]{6}", product["name"])
     assert product["public"] is False
     assert product["mode"] == "manual"
@@ -248,10 +248,27 @@ def test_existing_product_template_copies_valid_config_without_orders_or_cards(
     assert len(product["webhook_secret"]) >= 32
     assert product["webhook_secret"] != SECRET
     if mode == "script":
-        default_template = get_spec("personalized_text")["configuration"][0]["default"]
-        assert product["processor_config"] == {"template": default_template}
+        assert product["processor_config"] == {}
         assert private_template not in json.dumps(result)
-        assert source["processor_config"] == {"template": private_template}
+        assert source["processor_config"] == {}
+        from extore.processor_profiles import runtime_configuration
+
+        with db() as c:
+            assert (
+                c.execute(
+                    "SELECT 1 FROM processor_product_bindings WHERE product_id=?",
+                    (product["id"],),
+                ).fetchone()
+                is None
+            )
+            configuration, _ = runtime_configuration(
+                c,
+                c.execute(
+                    "SELECT * FROM jobs WHERE id=?", (source_job["id"],)
+                ).fetchone(),
+                source["processor_id"],
+            )
+            assert configuration == {"template": private_template}
     else:
         assert product["processor_config"] == source["processor_config"] == {}
     assert snapshot(*RELATED_TABLES) == before
@@ -304,7 +321,7 @@ def test_resource_clone_clears_delivery_secrets_until_new_resource_is_configured
     )
     clone, link = assert_config_link(result, started, time.time())
     assert clone["processor_id"] == "resource_link"
-    assert clone["processor_config"] == {"resource_url": "", "message": ""}
+    assert clone["processor_config"] == {}
     assert clone["parameters"] == source["parameters"]
     assert clone["outputs"] == source["outputs"]
     assert clone["public"] is False
@@ -328,7 +345,7 @@ def test_resource_clone_clears_delivery_secrets_until_new_resource_is_configured
     response = owner.post(
         "/api/admin/cards", json={"product_id": clone["id"], "count": 1}
     )
-    assert response.status_code == 400, response.text
+    assert response.status_code == 409, response.text
     assert "配置" in response.json()["detail"]
     assert snapshot("products", "staff", "audit", *RELATED_TABLES) == before
     login_link(owner, link)
@@ -344,11 +361,13 @@ def test_resource_clone_clears_delivery_secrets_until_new_resource_is_configured
         },
     }
     response = owner.put("/api/manage/product", json=configured)
-    assert response.status_code == 200, response.text
+    assert response.status_code == 403, response.text
     with db() as c:
         value = create_session(c, Response(), "admin")
     owner.cookies.clear()
     owner.cookies.set("extore_session", value)
+    response = owner.put("/api/admin/products/" + clone["id"], json=configured)
+    assert response.status_code == 200 and response.json()["processor_config"] == {}
     response = owner.post(
         "/api/admin/cards", json={"product_id": clone["id"], "count": 1}
     )
@@ -460,7 +479,9 @@ def test_quick_config_link_edits_only_its_product_and_fulfillment(owner, setup_p
     assert status["role"] == "staff" and status["product_id"] == product["id"]
     assert status["permissions"] == CONFIG_PERMISSIONS
     response = owner.get("/api/manage/product")
-    assert response.status_code == 200 and response.json() == product
+    assert response.status_code == 200 and response.json() == {
+        key: value for key, value in product.items() if key != "shop_id"
+    }
     updated = {
         **product,
         "name": "由 AI 配置",

@@ -38,6 +38,9 @@ def product(c, pid):
     )
     if config.get("mode") == "script" and config.get("processor_id"):
         config = normalize_product(config)
+        # Configuration is write-only and lives in the tenant credential vault.
+        # Reads and product exports must not materialize decrypted settings.
+        config["processor_config"] = {}
     return {"id": row["id"], **config}
 
 
@@ -45,11 +48,25 @@ def public_product(p):
     return {
         k: v
         for k, v in p.items()
-        if k not in ("webhook_url", "webhook_secret", "script", "processor_config")
+        if k
+        not in (
+            "webhook_url",
+            "webhook_secret",
+            "script",
+            "processor_config",
+            "shop_id",
+            "profile_id",
+            "processor_profile",
+            "processor_profile_id",
+            "processor_binding",
+        )
     }
 
 
 def issue_cards(c, pid, count, label="", expires=None, variant_id="default"):
+    from .shops import require_enabled_product
+
+    require_enabled_product(c, pid)
     p = product(c, pid)
     variant = next((v for v in p["variants"] if v["id"] == variant_id), None)
     if variant is None:
@@ -57,17 +74,19 @@ def issue_cards(c, pid, count, label="", expires=None, variant_id="default"):
     if not variant["enabled"]:
         fail("商品规格已停用，不能发行新卡密", 409)
     if p["mode"] == "script":
-        try:
-            normalize_product(p, allow_incomplete=False)
-        except (ValueError, KeyError):
-            fail("请先完成官方处理器配置")
+        from .processor_profiles import freeze_card_binding, issue_configuration
+
+        binding = issue_configuration(c, pid)
     codes = []
     for _ in range(count):
         code = new_card()
+        card_id = str(uuid.uuid4())
         c.execute(
             "INSERT INTO cards(id,digest,product_id,created) VALUES (?,?,?,?)",
-            (str(uuid.uuid4()), card_digest(code), pid, time.time()),
+            (card_id, card_digest(code), pid, time.time()),
         )
+        if p["mode"] == "script":
+            freeze_card_binding(c, card_id, pid, binding)
         codes.append(code)
     record_issue(
         c,
@@ -310,6 +329,14 @@ def job_view(c, row, staff=False):
     )
     if row["state"] == "needs_input":
         result["params"] = json.loads(row["params"])
+        result["retry_mode"] = (
+            row["retry_mode"] if "retry_mode" in row.keys() else "revise"
+        )
+        result["retry_reason_type"] = (
+            row["retry_reason_type"]
+            if "retry_reason_type" in row.keys()
+            else "customer_input"
+        )
     result["queue_ahead"] = (
         c.execute(
             "SELECT count(*) FROM jobs WHERE product_id=? AND state IN ('queued','processing') "
@@ -336,13 +363,23 @@ def job_view(c, row, staff=False):
 
 def submit(c, card, params):
     from .files import bind_inputs, purge_job_outputs, validate_input_files
+    from .shops import require_enabled_product
 
+    require_enabled_product(c, card["product_id"])
     ensure_card_usable(c, card)
     row = c.execute("SELECT * FROM jobs WHERE card_id=?", (card["id"],)).fetchone()
     if row and row["state"] == "rejected":
         fail("此任务已被拒绝，不能重新提交", 409)
     p = job_product(c, row) if row else product(c, card["product_id"])
     clean = validate_params(p, params)
+    if (
+        row
+        and row["state"] == "needs_input"
+        and "retry_mode" in row.keys()
+        and row["retry_mode"] == "reuse"
+        and clean != json.loads(row["params"])
+    ):
+        fail("此任务重试必须复用原有需求和附件，请使用重试入口", 409)
     validate_input_files(c, card, p, clean)
     if row:
         if row["state"] not in ("failed", "needs_input"):

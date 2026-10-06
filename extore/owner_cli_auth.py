@@ -10,10 +10,13 @@ import unicodedata
 import uuid
 
 from fastapi import APIRouter, Request, Response
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 from webauthn import generate_authentication_options, verify_authentication_response
-from webauthn.helpers import options_to_json
-from webauthn.helpers.structs import UserVerificationRequirement
+from webauthn.helpers import base64url_to_bytes, options_to_json
+from webauthn.helpers.structs import (
+    PublicKeyCredentialDescriptor,
+    UserVerificationRequirement,
+)
 
 from .cli_auth import _body, _decode, _handshake, _verify
 from .config import COOKIE_SECURE, ORIGIN, RP_ID
@@ -35,6 +38,7 @@ GRANT_TTL = 30 * 86400
 SESSION_TTL = 28800
 SCOPE = "shop.owner"
 APPROVAL_COOKIE = "extore_owner_approval"
+_ALL_SHOPS = object()
 
 
 def init_schema(c):
@@ -63,6 +67,15 @@ def init_schema(c):
     }
     if "approved_snapshot" not in request_columns:
         c.execute("ALTER TABLE owner_cli_requests ADD COLUMN approved_snapshot TEXT")
+    if "target_email" not in request_columns:
+        c.execute("ALTER TABLE owner_cli_requests ADD COLUMN target_email TEXT")
+    if "scope_bound" not in request_columns:
+        c.execute(
+            "ALTER TABLE owner_cli_requests ADD COLUMN scope_bound INTEGER NOT NULL DEFAULT 0 CHECK(scope_bound IN (0,1))"
+        )
+    c.execute(
+        "CREATE TABLE IF NOT EXISTS owner_cli_password_challenges (digest TEXT PRIMARY KEY,request_id TEXT NOT NULL REFERENCES owner_cli_requests(id) ON DELETE CASCADE,shop_id TEXT NOT NULL REFERENCES shops(id),snapshot TEXT NOT NULL,expires REAL NOT NULL,created REAL NOT NULL)"
+    )
     c.execute(
         "CREATE INDEX IF NOT EXISTS sessions_owner_device ON sessions(owner_device_id)"
     )
@@ -80,6 +93,16 @@ class KeyProof(BaseModel):
 class OwnerRequest(KeyProof):
     client_name: str = Field(min_length=1, max_length=100)
     nonce: str = Field(min_length=43, max_length=43)
+    target_email: str | None = Field(default=None, max_length=254)
+
+    @field_validator("target_email")
+    @classmethod
+    def normalize_target(cls, value):
+        if value is not None:
+            from .account_auth import normalize_email
+
+            return normalize_email(value)
+        return None
 
 
 class RequestProof(KeyProof):
@@ -90,6 +113,25 @@ class ApprovalInput(BaseModel):
     model_config = ConfigDict(extra="forbid")
     request_id: str = Field(min_length=1, max_length=100)
     device_code: str = Field(min_length=1, max_length=64)
+    shop_id: str | None = Field(default=None, min_length=1, max_length=100)
+
+
+class PasswordOptions(ApprovalInput):
+    email: str = Field(min_length=3, max_length=254)
+    password: str = Field(min_length=1, max_length=200)
+    code: str | None = Field(default=None, max_length=100)
+    backup_code: str | None = Field(default=None, max_length=100)
+
+    @field_validator("email")
+    @classmethod
+    def normalize_email(cls, value):
+        from .account_auth import normalize_email
+
+        return normalize_email(value)
+
+
+class PasswordApproval(ApprovalInput):
+    approval_token: str = Field(min_length=43, max_length=43)
 
 
 class ApprovalVerify(BaseModel):
@@ -130,6 +172,9 @@ def _snapshot(row):
                 "device_code",
                 "challenge",
                 "expires",
+                "shop_id",
+                "target_email",
+                "scope_bound",
             )
         },
         sort_keys=True,
@@ -149,9 +194,88 @@ def owner_device(c, did):
         "SELECT * FROM owner_cli_devices WHERE id=? AND revoked=0 AND expires>?",
         (did, time.time()),
     ).fetchone()
-    if row is None or not c.execute("SELECT 1 FROM credentials LIMIT 1").fetchone():
+    if row is None:
         fail("商家 CLI 设备授权已失效", 401)
+    _approval_valid(c, row["shop_id"], row["approved_credential_id"])
     return row
+
+
+def _approval_valid(c, shop_id, credential_id):
+    from .shops import shop_row
+
+    if shop_id is not None:
+        shop = shop_row(c, shop_id)
+        if credential_id in (f"password:{shop_id}", f"password-totp:{shop_id}"):
+            if not shop["password_hash"]:
+                fail("商家 CLI 设备授权已失效", 401)
+            return
+    if not c.execute(
+        "SELECT 1 FROM credentials WHERE id=? AND shop_id IS ?",
+        (credential_id, shop_id),
+    ).fetchone():
+        fail("商家 CLI 设备批准身份已失效", 401)
+
+
+def _authority(c, shop_id):
+    from .shops import shop_row
+
+    return {
+        "role": "admin",
+        "scope": SCOPE,
+        "superadmin": shop_id is None,
+        "shop_id": shop_id,
+        "shop_name": "平台管理" if shop_id is None else shop_row(c, shop_id)["name"],
+    }
+
+
+def _actor(shop_id):
+    return "owner" if shop_id is None else f"shop:{shop_id}"
+
+
+def _browser_actor(request):
+    if request.headers.get("authorization") is not None:
+        fail("请使用新的浏览器认证批准设备", 401)
+    return session(request) if request.cookies.get("extore_session") else None
+
+
+def _pending_request(c, body):
+    row = _request(c, body.request_id)
+    normalized = body.device_code.strip().upper().replace("-", "")
+    if not re.fullmatch(r"[A-Z2-9]{12}", normalized) or not hmac.compare_digest(
+        row["device_code"].replace("-", ""), normalized
+    ):
+        fail("设备码不匹配", 401)
+    if row["expires"] <= time.time() or row["state"] != "pending":
+        fail("商家设备授权请求已过期或处理", 409)
+    return row
+
+
+def _bind_shop(c, row, shop_id):
+    from .shops import shop_row
+
+    shop = shop_row(c, shop_id) if shop_id is not None else None
+    if row["scope_bound"] and row["shop_id"] != shop_id:
+        fail("此设备请求已绑定其他管理范围", 403)
+    if row["target_email"] and (shop is None or shop["email"] != row["target_email"]):
+        fail("设备请求与店铺账号不匹配", 401)
+    if not row["scope_bound"]:
+        c.execute(
+            "UPDATE owner_cli_requests SET shop_id=?,scope_bound=1 WHERE id=?",
+            (shop_id, row["id"]),
+        )
+    return _request(c, row["id"])
+
+
+def _approval_view(c, row):
+    return {
+        **_authority(c, row["shop_id"]),
+        "request_id": row["id"],
+        "device_code": row["device_code"],
+        "client_name": row["client_name"],
+        "fingerprint": row["fingerprint"],
+        "grant_expires": row["grant_expires"],
+        "expires": row["expires"],
+    }
 
 
 def _request_view(row):
@@ -177,10 +301,13 @@ async def request_owner(request: Request):
     ):
         fail("设备名称无效", 400)
     _decode(body.nonce, 32)
+    proof = f"extore-cli-owner-request-v1\n{ORIGIN}\n{body.public_key}\n{body.client_name}\n{body.nonce}"
+    if body.target_email is not None:
+        proof = f"extore-cli-owner-request-v2\n{ORIGIN}\n{body.public_key}\n{body.client_name}\n{body.nonce}\n{body.target_email}"
     raw = _verify(
         body.public_key,
         body.signature,
-        f"extore-cli-owner-request-v1\n{ORIGIN}\n{body.public_key}\n{body.client_name}\n{body.nonce}",
+        proof,
     )
     with db() as c:
         c.execute(
@@ -192,7 +319,10 @@ async def request_owner(request: Request):
             (body.public_key, body.nonce),
         ).fetchone()
         if row is not None:
-            if row["client_name"] != body.client_name:
+            if (
+                row["client_name"] != body.client_name
+                or row["target_email"] != body.target_email
+            ):
                 fail("商家设备授权请求不匹配", 401)
             return _request_view(row)
         now, rid = time.time(), str(uuid.uuid4())
@@ -201,7 +331,7 @@ async def request_owner(request: Request):
         )
         code = "-".join(code[i : i + 4] for i in range(0, 12, 4))
         c.execute(
-            "INSERT INTO owner_cli_requests(id,public_key,client_name,fingerprint,nonce,device_code,challenge,scope,expires,grant_expires,created) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+            "INSERT INTO owner_cli_requests(id,public_key,client_name,fingerprint,nonce,device_code,challenge,scope,expires,grant_expires,created,target_email) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
             (
                 rid,
                 body.public_key,
@@ -214,6 +344,7 @@ async def request_owner(request: Request):
                 now + REQUEST_TTL,
                 now + GRANT_TTL,
                 now,
+                body.target_email,
             ),
         )
         audit(c, "pending", "cli.owner.request", rid)
@@ -235,31 +366,58 @@ async def pending_status(request: Request):
         if not hmac.compare_digest(row["public_key"], body.public_key):
             fail("商家设备授权请求不匹配", 401)
         state = "expired" if row["expires"] <= time.time() else row["state"]
-        return {
+        result = {
             "status": "approved" if state == "claimed" else state,
             "expires": row["expires"],
         }
+        if state in ("approved", "claimed"):
+            if not row["scope_bound"] or row["approved_snapshot"] != _snapshot(row):
+                fail("商家设备授权范围已失效", 401)
+            _approval_valid(c, row["shop_id"], row["approved_credential_id"])
+            result.update(_authority(c, row["shop_id"]))
+        return result
 
 
 @router.post("/auth/cli-owner/options")
 async def approval_options(request: Request, response: Response):
-    if request.headers.get("authorization") is not None:
-        fail("请在浏览器使用 Passkey 批准设备", 401)
+    actor = _browser_actor(request)
     rate_limit(request, "owner-cli-approval", 20, 60)
     body = await _body(request, ApprovalInput)
     with db() as c:
-        row = _request(c, body.request_id)
-        normalized = body.device_code.strip().upper().replace("-", "")
-        if not re.fullmatch(r"[A-Z2-9]{12}", normalized) or not hmac.compare_digest(
-            row["device_code"].replace("-", ""), normalized
-        ):
-            fail("设备码不匹配", 401)
-        if row["expires"] <= time.time() or row["state"] != "pending":
-            fail("商家设备授权请求已过期或处理", 409)
-        if not c.execute("SELECT 1 FROM credentials LIMIT 1").fetchone():
+        if actor is not None:
+            authorize_management(c, actor)
+        own = actor.get("shop_id") if actor is not None else None
+        selected = body.shop_id if "shop_id" in body.model_fields_set else own
+        if own is not None and selected != own:
+            fail("不能批准其他店铺的设备", 403)
+        row = _bind_shop(c, _pending_request(c, body), selected)
+        keys = c.execute(
+            "SELECT id FROM credentials WHERE shop_id IS ?", (selected,)
+        ).fetchall()
+        methods = ["passkey"] if keys else []
+        if selected is not None:
+            from .shops import shop_row
+
+            shop = shop_row(c, selected)
+            if shop["password_hash"]:
+                methods.append("password_totp" if shop["totp_secret"] else "password")
+        if not methods:
             fail("请先注册商家 Passkey", 409)
+        if not keys:
+            response.delete_cookie(APPROVAL_COOKIE, path="/api/auth/cli-owner")
+            return {
+                **_approval_view(c, row),
+                "options": None,
+                "approval_methods": methods,
+                "mfa_required": bool(shop["totp_secret"]),
+            }
         options = generate_authentication_options(
-            rp_id=RP_ID, user_verification=UserVerificationRequirement.REQUIRED
+            rp_id=RP_ID,
+            user_verification=UserVerificationRequirement.REQUIRED,
+            allow_credentials=[
+                PublicKeyCredentialDescriptor(id=base64url_to_bytes(key["id"]))
+                for key in keys
+            ],
         )
         value, now = token(), time.time()
         c.execute("DELETE FROM owner_cli_approval_challenges WHERE expires<=?", (now,))
@@ -288,26 +446,25 @@ async def approval_options(request: Request, response: Response):
             path="/api/auth/cli-owner",
         )
         return {
+            **_approval_view(c, row),
             "options": json.loads(options_to_json(options)),
-            "request_id": row["id"],
-            "device_code": row["device_code"],
-            "client_name": row["client_name"],
-            "fingerprint": row["fingerprint"],
-            "role": "admin",
-            "scope": SCOPE,
-            "grant_expires": row["grant_expires"],
-            "expires": row["expires"],
+            "approval_methods": methods,
+            "mfa_required": bool(selected is not None and shop["totp_secret"]),
         }
 
 
 @router.post("/auth/cli-owner/verify")
 async def approval_verify(request: Request, response: Response):
-    if request.headers.get("authorization") is not None:
-        fail("请在浏览器使用 Passkey 批准设备", 401)
+    actor = _browser_actor(request)
     rate_limit(request, "owner-cli-approval-verify", 20, 60)
     body = await _body(request, ApprovalVerify)
     with db() as c:
         row = _request(c, body.request_id)
+        if actor is not None:
+            authorize_management(c, actor)
+            if actor.get("shop_id") is not None and actor["shop_id"] != row["shop_id"]:
+                fail("此批准请求属于其他店铺", 403)
+        _authority(c, row["shop_id"])
         ch = c.execute(
             "SELECT * FROM owner_cli_approval_challenges WHERE digest=? AND expires>?",
             (digest(request.cookies.get(APPROVAL_COOKIE, "")), time.time()),
@@ -318,12 +475,13 @@ async def approval_verify(request: Request, response: Response):
             or ch["snapshot"] != _snapshot(row)
             or row["state"] != "pending"
             or row["expires"] <= time.time()
+            or not row["scope_bound"]
         ):
             fail("商家设备批准请求已失效", 401)
         key = c.execute(
             "SELECT * FROM credentials WHERE id=?", (body.credential.get("id", ""),)
         ).fetchone()
-        if key is None:
+        if key is None or key["shop_id"] != row["shop_id"]:
             fail("Passkey 未注册", 401)
         try:
             verified = verify_authentication_response(
@@ -348,9 +506,94 @@ async def approval_verify(request: Request, response: Response):
         c.execute(
             "DELETE FROM owner_cli_approval_challenges WHERE request_id=?", (row["id"],)
         )
-        audit(c, "owner", "cli.owner.approve", row["id"])
+        audit(c, _actor(row["shop_id"]), "cli.owner.approve", row["id"])
     response.delete_cookie(APPROVAL_COOKIE, path="/api/auth/cli-owner")
     return {"ok": True, "status": "approved"}
+
+
+@router.post("/auth/cli-owner/password-options")
+async def password_options(request: Request):
+    from .account_auth import _throttle, verify_shop_password
+
+    actor = _browser_actor(request)
+    body = await _body(request, PasswordOptions)
+    _throttle(request, "owner-cli-password", body.email, limit=5, window=300)
+    with db() as c:
+        row = _pending_request(c, body)
+        shop = c.execute("SELECT * FROM shops WHERE email=?", (body.email,)).fetchone()
+        if shop is None:
+            from .account_auth import _password_valid
+
+            _password_valid(None, body.password)
+            fail("登录信息或二次验证码错误", 401)
+        if actor is not None:
+            authorize_management(c, actor)
+            if actor.get("shop_id") is not None and actor["shop_id"] != shop["id"]:
+                fail("此批准请求属于其他店铺", 403)
+        if body.shop_id is not None and body.shop_id != shop["id"]:
+            fail("设备请求与店铺账号不匹配", 401)
+        verify_shop_password(c, shop, body.password, body.code, body.backup_code)
+        row = _bind_shop(c, row, shop["id"])
+        now, value = time.time(), token()
+        expires = min(now + CHALLENGE_TTL, row["expires"])
+        c.execute(
+            "DELETE FROM owner_cli_password_challenges WHERE expires<=? OR request_id=?",
+            (now, row["id"]),
+        )
+        c.execute(
+            "INSERT INTO owner_cli_password_challenges VALUES (?,?,?,?,?,?)",
+            (digest(value), row["id"], shop["id"], _snapshot(row), expires, now),
+        )
+        return {
+            **_approval_view(c, row),
+            "options": None,
+            "approval_methods": [
+                "password_totp" if shop["totp_secret"] else "password"
+            ],
+            "mfa_required": bool(shop["totp_secret"]),
+            "approval_token": value,
+            "approval_expires": expires,
+        }
+
+
+@router.post("/auth/cli-owner/password-approve")
+async def password_approve(request: Request):
+    actor = _browser_actor(request)
+    body = await _body(request, PasswordApproval)
+    rate_limit(request, "owner-cli-password-approve", 20, 60)
+    with db() as c:
+        row = _pending_request(c, body)
+        proof = c.execute(
+            "SELECT * FROM owner_cli_password_challenges WHERE digest=? AND expires>?",
+            (digest(body.approval_token), time.time()),
+        ).fetchone()
+        if (
+            proof is None
+            or proof["request_id"] != row["id"]
+            or proof["shop_id"] != row["shop_id"]
+            or proof["snapshot"] != _snapshot(row)
+            or row["shop_id"] is None
+            or not row["scope_bound"]
+        ):
+            fail("新的密码批准验证已失效", 401)
+        if actor is not None:
+            authorize_management(c, actor)
+            if actor.get("shop_id") is not None and actor["shop_id"] != row["shop_id"]:
+                fail("此批准请求属于其他店铺", 403)
+        marker = f"password:{row['shop_id']}"
+        _approval_valid(c, row["shop_id"], marker)
+        c.execute(
+            "UPDATE owner_cli_requests SET state='approved',approved_credential_id=?,approved_snapshot=? WHERE id=?",
+            (marker, _snapshot(row), row["id"]),
+        )
+        c.execute(
+            "DELETE FROM owner_cli_password_challenges WHERE request_id=?", (row["id"],)
+        )
+        c.execute(
+            "DELETE FROM owner_cli_approval_challenges WHERE request_id=?", (row["id"],)
+        )
+        audit(c, _actor(row["shop_id"]), "cli.owner.approve", row["id"])
+        return {**_authority(c, row["shop_id"]), "ok": True, "status": "approved"}
 
 
 @router.post("/cli/owner/claim")
@@ -365,6 +608,7 @@ async def claim_owner(request: Request):
             or row["expires"] <= time.time()
             or row["state"] not in ("approved", "claimed")
             or row["approved_snapshot"] != _snapshot(row)
+            or not row["scope_bound"]
         ):
             fail("商家设备授权尚未批准或已失效", 401)
         _verify(
@@ -372,12 +616,13 @@ async def claim_owner(request: Request):
             body.signature,
             f"extore-cli-owner-claim-v1\n{ORIGIN}\n{row['id']}\n{row['challenge']}\n{body.public_key}",
         )
-        if not c.execute("SELECT 1 FROM credentials LIMIT 1").fetchone():
-            fail("商家设备授权已失效", 401)
+        _approval_valid(c, row["shop_id"], row["approved_credential_id"])
         existing = c.execute(
             "SELECT * FROM owner_cli_devices WHERE public_key=?", (body.public_key,)
         ).fetchone()
         already = row["state"] == "claimed"
+        if existing is not None and existing["shop_id"] != row["shop_id"]:
+            fail("此设备密钥已绑定其他管理范围，请使用新密钥", 403)
         if existing is not None and existing["revoked"]:
             fail("此商家设备已撤销，请使用新的设备密钥", 401)
         if already:
@@ -391,7 +636,7 @@ async def claim_owner(request: Request):
         else:
             did, now = str(uuid.uuid4()), time.time()
             c.execute(
-                "INSERT INTO owner_cli_devices VALUES (?,?,?,?,?,0,?,?,?)",
+                "INSERT INTO owner_cli_devices(id,public_key,client_name,fingerprint,expires,revoked,approved_credential_id,created,last_seen,shop_id) VALUES (?,?,?,?,?,0,?,?,?,?)",
                 (
                     did,
                     row["public_key"],
@@ -401,21 +646,21 @@ async def claim_owner(request: Request):
                     row["approved_credential_id"],
                     now,
                     now,
+                    row["shop_id"],
                 ),
             )
             existing = c.execute(
                 "SELECT * FROM owner_cli_devices WHERE id=?", (did,)
             ).fetchone()
-            audit(c, "owner", "cli.owner.device.create", did)
+            audit(c, _actor(row["shop_id"]), "cli.owner.device.create", did)
         c.execute(
             "UPDATE owner_cli_requests SET state='claimed',device_id=? WHERE id=?",
             (existing["id"], row["id"]),
         )
         device = owner_device(c, existing["id"])
         return {
+            **_authority(c, device["shop_id"]),
             "device_id": device["id"],
-            "role": "admin",
-            "scope": SCOPE,
             "client_name": device["client_name"],
             "fingerprint": device["fingerprint"],
             "expires": device["expires"],
@@ -479,7 +724,7 @@ async def owner_login(request: Request):
         c.execute("DELETE FROM owner_cli_challenges WHERE id=?", (ch["id"],))
         ip, ua = request_metadata(request)
         c.execute(
-            "INSERT INTO sessions(digest,role,expires,created,id,last_seen,ip,ua,revoked,channel,owner_device_id,client_name) VALUES (?,'admin',?,?,?,?,?,?,0,'cli',?,?)",
+            "INSERT INTO sessions(digest,role,expires,created,id,last_seen,ip,ua,revoked,channel,owner_device_id,client_name,shop_id,auth_at,auth_method) VALUES (?,'admin',?,?,?,?,?,?,0,'cli',?,?,?,?,?)",
             (
                 digest(access),
                 expires,
@@ -490,17 +735,19 @@ async def owner_login(request: Request):
                 ua,
                 device["id"],
                 device["client_name"],
+                device["shop_id"],
+                now,
+                "device_key",
             ),
         )
         c.execute(
             "UPDATE owner_cli_devices SET last_seen=? WHERE id=?", (now, device["id"])
         )
-        audit(c, "owner", "session.create", sid)
+        audit(c, _actor(device["shop_id"]), "session.create", sid)
         return {
+            **_authority(c, device["shop_id"]),
             "access_token": access,
             "token_type": "Bearer",
-            "role": "admin",
-            "scope": SCOPE,
             "expires": expires,
             "expires_in": max(0, int(expires - now)),
             "device_id": device["id"],
@@ -518,8 +765,11 @@ def owner_session(request):
 @router.get("/cli/owner/status")
 def owner_status(request: Request):
     s = owner_session(request)
+    with db() as c:
+        authorize_management(c, s)
+        authority = _authority(c, s.get("shop_id"))
     return {
-        "role": "admin",
+        **authority,
         "channel": "cli",
         "scope": SCOPE,
         "origin": ORIGIN,
@@ -539,7 +789,7 @@ def owner_logout(request: Request):
     s = owner_session(request)
     with db() as c:
         authorize_management(c, s)
-        revoke_session(c, s["digest"], "owner", "session.logout")
+        revoke_session(c, s["digest"], _actor(s.get("shop_id")), "session.logout")
     return {"ok": True, "id": s["id"], "current": True}
 
 
@@ -623,21 +873,69 @@ def verify_owner_cli_action(request, raw_body):
             f"extore-cli-owner-action-v1\n{ORIGIN}\n{device['id']}\n{s['id']}\n{ch['id']}\n{ch['challenge']}\n{request.method}\n{target}\n{body_hash}",
         )
         c.execute("DELETE FROM owner_cli_action_challenges WHERE id=?", (cid,))
-        audit(c, "owner", "cli.owner.action", s["id"])
+        audit(c, _actor(s.get("shop_id")), "cli.owner.action", s["id"])
     request.state.owner_cli_action_verified = True
     return True
 
 
-def revoke_owner_devices(c, actor="owner"):
-    for row in c.execute("SELECT id FROM owner_cli_devices WHERE revoked=0").fetchall():
+def invalidate_pending_owner_approvals(c, shop_id):
+    """Invalidate reviewed factors in the same transaction as a policy change."""
+    request_ids = [
+        row["id"]
+        for row in c.execute(
+            "SELECT id FROM owner_cli_requests WHERE scope_bound=1 AND shop_id IS ? AND state IN ('pending','approved')",
+            (shop_id,),
+        )
+    ]
+    c.execute(
+        "DELETE FROM owner_cli_password_challenges WHERE shop_id IS ?", (shop_id,)
+    )
+    c.execute(
+        "DELETE FROM owner_cli_approval_challenges WHERE request_id IN (SELECT id FROM owner_cli_requests WHERE scope_bound=1 AND shop_id IS ?)",
+        (shop_id,),
+    )
+    c.execute(
+        "UPDATE owner_cli_requests SET state='denied' WHERE scope_bound=1 AND shop_id IS ? AND state IN ('pending','approved')",
+        (shop_id,),
+    )
+    for rid in request_ids:
+        audit(c, _actor(shop_id), "cli.owner.approval.invalidate", rid)
+
+
+def revoke_owner_devices(c, actor="owner", *, shop_id=_ALL_SHOPS):
+    from .link_access import revoke_session
+
+    where, args = (
+        ("", ()) if shop_id is _ALL_SHOPS else (" WHERE shop_id IS ?", (shop_id,))
+    )
+    devices = c.execute("SELECT id FROM owner_cli_devices" + where, args).fetchall()
+    for row in devices:
+        for item in c.execute(
+            "SELECT digest FROM sessions WHERE owner_device_id=? AND revoked=0",
+            (row["id"],),
+        ).fetchall():
+            revoke_session(c, item["digest"], actor)
         c.execute("UPDATE owner_cli_devices SET revoked=1 WHERE id=?", (row["id"],))
         audit(c, actor, "cli.owner.device.revoke", row["id"])
-    c.execute("DELETE FROM owner_cli_action_challenges")
-    c.execute("DELETE FROM owner_cli_challenges")
-    c.execute("DELETE FROM owner_cli_approval_challenges")
-    c.execute(
-        "UPDATE owner_cli_requests SET state='denied' WHERE state IN ('pending','approved')"
-    )
+        c.execute(
+            "DELETE FROM owner_cli_action_challenges WHERE device_id=?", (row["id"],)
+        )
+        c.execute("DELETE FROM owner_cli_challenges WHERE device_id=?", (row["id"],))
+    request_ids = [
+        row["id"]
+        for row in c.execute("SELECT id FROM owner_cli_requests" + where, args)
+    ]
+    for rid in request_ids:
+        c.execute(
+            "DELETE FROM owner_cli_approval_challenges WHERE request_id=?", (rid,)
+        )
+        c.execute(
+            "DELETE FROM owner_cli_password_challenges WHERE request_id=?", (rid,)
+        )
+        c.execute(
+            "UPDATE owner_cli_requests SET state='denied' WHERE id=? AND state IN ('pending','approved')",
+            (rid,),
+        )
 
 
 @router.get("/admin/cli-owner-devices")
@@ -648,6 +946,9 @@ def list_owner_devices(request: Request):
         now = time.time()
         return [
             {
+                "shop_id": r["shop_id"],
+                "shop_name": r["shop_name"] or "平台管理",
+                "superadmin": r["shop_id"] is None,
                 "id": r["id"],
                 "role": "admin",
                 "scope": SCOPE,
@@ -657,9 +958,14 @@ def list_owner_devices(request: Request):
                 "last_seen": r["last_seen"],
                 "expires": r["expires"],
                 "revoked": bool(r["revoked"]),
-                "active": not r["revoked"] and r["expires"] > now,
+                "active": not r["revoked"]
+                and r["expires"] > now
+                and (r["shop_id"] is None or r["shop_enabled"] == 1),
             }
-            for r in c.execute("SELECT * FROM owner_cli_devices ORDER BY created DESC")
+            for r in c.execute(
+                "SELECT d.*,shops.name AS shop_name,shops.enabled AS shop_enabled FROM owner_cli_devices d LEFT JOIN shops ON shops.id=d.shop_id WHERE (? IS NULL OR d.shop_id=?) ORDER BY d.created DESC",
+                (s.get("shop_id"), s.get("shop_id")),
+            )
         ]
 
 
@@ -675,9 +981,11 @@ def revoke_owner_device(device_id: str, request: Request):
         ).fetchone()
         if row is None:
             fail("商家 CLI 设备不存在", 404)
+        if s.get("shop_id") is not None and row["shop_id"] != s["shop_id"]:
+            fail("无权撤销其他店铺的 CLI 设备", 403)
         if not row["revoked"]:
             c.execute("UPDATE owner_cli_devices SET revoked=1 WHERE id=?", (device_id,))
-            audit(c, "owner", "cli.owner.device.revoke", device_id)
+            audit(c, _actor(s.get("shop_id")), "cli.owner.device.revoke", device_id)
         c.execute("DELETE FROM owner_cli_challenges WHERE device_id=?", (device_id,))
         c.execute(
             "DELETE FROM owner_cli_action_challenges WHERE device_id=?", (device_id,)
@@ -687,5 +995,5 @@ def revoke_owner_device(device_id: str, request: Request):
             (device_id,),
         ).fetchall()
         for row in rows:
-            revoke_session(c, row["digest"], "owner")
+            revoke_session(c, row["digest"], _actor(s.get("shop_id")))
         return {"ok": True, "id": device_id, "revoked_sessions": len(rows)}

@@ -4,7 +4,7 @@
   let active = null;
   const labels = {
     unused: "未兑换",
-    needs_input: "需重试",
+    needs_input: "需要重试",
     queued: "排队中",
     processing: "处理中",
     succeeded: "已完成",
@@ -244,7 +244,7 @@
       ];
       node("#cards-stats").innerHTML =
         `<div class="grid cards-summary">${metrics.map(([label, key]) => `<div class="panel cards-metric"><p class="caption">${label}</p><h2>${count(summary[key])}</h2></div>`).join("")}</div>
-        <p class="caption">剩余未兑换包含未提交及退回后需重试的有效卡密（${count(summary.states?.needs_input)} 张），已退回的卡密不计入已使用。处理失败、可重试的卡密 ${count(summary.states?.failed_retryable)} 张另行统计，不计入未兑换数量。</p>
+        <p class="caption">剩余未兑换包含未提交及需要重试的有效卡密（${count(summary.states?.needs_input)} 张），已退回的卡密不计入已使用。处理失败、可重试的卡密 ${count(summary.states?.failed_retryable)} 张另行统计，不计入未兑换数量。</p>
         <p class="caption">已验码 ${count(summary.verified)} · 已领取 ${count(summary.viewed)} · 已完成 ${count(summary.completed)} · 失败 ${count(summary.failed)} · 已拒绝 ${count(summary.rejected)} · 已撤销 ${count(summary.states?.revoked)} · 已过期 ${count(summary.states?.expired)}</p>`;
       if (Array.isArray(stats.variants) && stats.variants.length) {
         const total = stats.variants.reduce(
@@ -607,7 +607,7 @@
         "fulfillment.progress": "更新处理进度",
         "fulfillment.succeeded": "兑换完成",
         "fulfillment.failed": "兑换失败",
-        "fulfillment.needs_input": "退回，请补充信息后重试",
+        "fulfillment.needs_input": "需要重试",
         "fulfillment.rejected": "拒绝兑换",
         "delivery.viewed": "领取内容",
         "delivery.revealed": "领取内容",

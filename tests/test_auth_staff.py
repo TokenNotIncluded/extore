@@ -35,7 +35,7 @@ def test_password_disabled_if_key_exists(client):
             c, "bootstrap_password", PasswordHasher().hash("testing-password-123")
         )
         c.execute(
-            "INSERT INTO credentials VALUES (?,?,?,?,?)",
+            "INSERT INTO credentials(id,public_key,sign_count,name,created) VALUES (?,?,?,?,?)",
             ("fake", b"fake", 0, "test", time.time()),
         )
     assert (

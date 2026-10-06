@@ -1,4 +1,4 @@
-"""Manual review outcomes, distinct from genuine fulfillment failures."""
+"""Queue retry and rejection outcomes without consuming redemption codes."""
 
 import time
 
@@ -9,14 +9,26 @@ from .security import fail
 from .service import job, job_product, progress_snapshot
 
 
-def apply_queue_outcome(c, jid, action, message, actor):
+def apply_queue_outcome(
+    c, jid, action, message, actor, *, retry_mode="revise", reason_type="customer_input"
+):
     """The caller authorizes queue.process and product scope in its transaction."""
-    states = {"request_changes": "needs_input", "reject": "rejected"}
+    states = {
+        "request_changes": "needs_input",
+        "request_retry": "needs_input",
+        "reject": "rejected",
+    }
     if action not in states:
         fail("未定义的队列审核操作")
+    if retry_mode not in ("revise", "reuse") or reason_type not in (
+        "customer_input",
+        "external",
+        "processor",
+    ):
+        fail("未定义的重试方式或原因类别")
     reason = message.strip()
     if not reason or len(reason) > 1000:
-        fail("请填写退回补充或拒绝的原因，最多一千字符")
+        fail("请填写需要重试或拒绝处理的原因，最多一千字符")
     row = job(c, jid)
     p = job_product(c, row)
     if p["mode"] != "manual":
@@ -30,8 +42,8 @@ def apply_queue_outcome(c, jid, action, message, actor):
     state = states[action]
     c.execute(
         "UPDATE jobs SET state=?,message=?,content=NULL,result_json=NULL,retryable=0,"
-        "claimed_by=NULL,lease=NULL,updated=? WHERE id=?",
-        (state, reason, time.time(), jid),
+        "claimed_by=NULL,lease=NULL,retry_mode=?,retry_reason_type=?,updated=? WHERE id=?",
+        (state, reason, retry_mode, reason_type, time.time(), jid),
     )
     c.execute(
         "UPDATE cards SET state=? WHERE id=?",

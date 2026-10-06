@@ -16,7 +16,7 @@ test("private CLI prompts use stdin and only export whitelisted reference metada
   assert.match(prompt, /uv tool install --upgrade 'extore>=0\.6\.0'/);
   assert.match(prompt, /extore manage login --link-stdin/);
   assert.match(prompt, /extore manage queues --all/);
-  assert.match(prompt, /extore manage request-changes JOB_ID --product PRODUCT_ID --reason/);
+  assert.match(prompt, /extore manage request-retry JOB_ID --product PRODUCT_ID --reason/);
   assert.match(prompt, /extore manage reject JOB_ID --product PRODUCT_ID --reason/);
   assert.match(prompt, /--view processed/);
   assert.match(prompt, /--steps-file steps\.json/);

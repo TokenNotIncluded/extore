@@ -115,6 +115,16 @@ def _offset(value):
     return number
 
 
+def cleanup_limit(value):
+    try:
+        number = int(value)
+    except ValueError:
+        raise argparse.ArgumentTypeError("limit must be 1 to 500") from None
+    if not 1 <= number <= 500:
+        raise argparse.ArgumentTypeError("limit must be 1 to 500")
+    return number
+
+
 def add_commands(subcommands):
     product = _group(subcommands, "product", ("get", "update", "schema", "prompt"))
     product["get"].add_argument(
@@ -148,9 +158,16 @@ def add_commands(subcommands):
     cards["issue"].add_argument(
         "--expires", type=float, help="future Unix timestamp, omitted for no expiry"
     )
-    links = _group(subcommands, "links", ("list", "create", "revoke"))
+    links = _group(subcommands, "links", ("list", "create", "revoke", "cleanup"))
     _json_arguments(links["create"])
     links["revoke"].add_argument("id", help="child management-link ID")
+    links["list"].add_argument(
+        "--view", choices=("active", "history", "all"), default="active"
+    )
+    links["cleanup"].add_argument(
+        "--apply", action="store_true", help="apply cleanup; the default is a preview"
+    )
+    links["cleanup"].add_argument("--limit", type=cleanup_limit, default=100)
     events = _group(subcommands, "events", ("list", "retry"))
     events["list"].add_argument("--limit", type=_limit, default=50)
     events["retry"].add_argument("id")
@@ -169,7 +186,7 @@ def add_commands(subcommands):
         help="same-origin JSON escape hatch for known product-scoped management routes",
     )
     _scope(api)
-    api.add_argument("method", choices=("GET", "POST", "PUT", "DELETE"))
+    api.add_argument("method", choices=("GET", "POST", "PUT", "PATCH", "DELETE"))
     api.add_argument("path", help="relative /api/manage/ route without query strings")
     api.add_argument(
         "--query", action="append", default=[], help="query KEY=VALUE; repeat as needed"
@@ -222,6 +239,17 @@ def _public(value):
         "digest",
         "public_key",
         "codes",
+        "password",
+        "new_password",
+        "smtp_password",
+        "password_hash",
+        "backup_code",
+        "backup_codes",
+        "totp_secret",
+        "pending_totp_secret",
+        "secret",
+        "ciphertext",
+        "configuration_ciphertext",
     }
     result = {}
     for key, item in value.items():
@@ -241,10 +269,14 @@ def _public(value):
                 if isinstance(item, dict)
                 else "[redacted]"
             )
-        elif key in hidden or (
-            key == "url"
-            and isinstance(item, str)
-            and any(prefix in item for prefix in ("/staff#", "/cli#", "/receipt#"))
+        elif (
+            key in hidden
+            and not (key == "secret" and isinstance(item, bool))
+            or (
+                key == "url"
+                and isinstance(item, str)
+                and any(prefix in item for prefix in ("/staff#", "/cli#", "/receipt#"))
+            )
         ):
             result[key] = "[redacted]"
         else:
@@ -592,7 +624,7 @@ def product_command(client, grant, args):
             )
             if specification is None:
                 raise ManageError(
-                    "Select an official processor from the catalog",
+                    "Select a product processor from the catalog",
                     code="invalid_input",
                 )
             for key in ("parameters", "outputs", "delivery"):
@@ -814,6 +846,20 @@ def cards_command(client, grant, args):
 
 
 def links_command(client, grant, args):
+    if args.operation == "cleanup":
+        return _object(
+            _request(
+                client,
+                grant,
+                "POST",
+                "/api/manage/links/cleanup",
+                json={
+                    "dry_run": not args.apply,
+                    "limit": args.limit,
+                    "product_id": grant["product_id"],
+                },
+            )
+        )
     if args.operation == "create":
         body = read_json(args)
         if body.get("product_id", grant["product_id"]) != grant["product_id"]:
@@ -845,7 +891,9 @@ def links_command(client, grant, args):
         return _request(
             client, grant, "POST", f"/api/manage/links/{quote(args.id, safe='')}/revoke"
         )
-    items = _objects(_request(client, grant, "GET", "/api/manage/links"))
+    items = _objects(
+        _request(client, grant, "GET", "/api/manage/links", params={"view": args.view})
+    )
     fields = (
         "id",
         "product_id",
@@ -884,6 +932,7 @@ _API_ROUTES = (
     ("GET", r"links", "links.delegate"),
     ("POST", r"links", "links.delegate"),
     ("POST", r"links/[^/]+/revoke", "links.delegate"),
+    ("POST", r"links/cleanup", "links.delegate"),
     ("GET", r"events", "events.manage"),
     ("POST", r"events/[^/]+/retry", "events.manage"),
     ("GET", r"sessions", ""),

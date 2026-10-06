@@ -68,7 +68,17 @@ def rate_limit(request, bucket, limit=30, window=60):
         )
 
 
-def create_session(c, response: Response, role, staff_id=None, request=None):
+def create_session(
+    c,
+    response: Response,
+    role,
+    staff_id=None,
+    request=None,
+    *,
+    shop_id=None,
+    auth_at=None,
+    auth_method=None,
+):
     from .db import audit
     from .link_access import cleanup_sessions, request_metadata, revoke_session
 
@@ -77,9 +87,22 @@ def create_session(c, response: Response, role, staff_id=None, request=None):
     if role not in ("admin", "bootstrap", "staff"):
         raise ValueError("Unknown login role")
     if role == "staff":
-        staff_authorization(c, staff_id)
+        authorization = staff_authorization(c, staff_id)
+        if shop_id is not None and shop_id != authorization["shop_id"]:
+            raise ValueError("Management-link shop does not match the login")
+        shop_id = authorization["shop_id"]
+    elif role == "admin" and shop_id is not None:
+        from .shops import shop_row
+
+        shop_row(c, shop_id)
+    elif role == "bootstrap" and shop_id is not None:
+        raise ValueError("Bootstrap sessions cannot own a shop")
     actor = (
-        staff_id if role == "staff" else ("owner" if role == "admin" else "bootstrap")
+        staff_id
+        if role == "staff"
+        else (f"shop:{shop_id}" if shop_id is not None else "owner")
+        if role == "admin"
+        else "bootstrap"
     )
     if request is not None:
         previous = digest(request.cookies.get("extore_session", ""))
@@ -91,8 +114,8 @@ def create_session(c, response: Response, role, staff_id=None, request=None):
     sid = str(uuid.uuid4())
     ip, ua = request_metadata(request)
     c.execute(
-        "INSERT INTO sessions(digest,role,staff_id,expires,created,id,last_seen,ip,ua,revoked) "
-        "VALUES (?,?,?,?,?,?,?,?,?,0)",
+        "INSERT INTO sessions(digest,role,staff_id,expires,created,id,last_seen,ip,ua,revoked,shop_id,auth_at,auth_method) "
+        "VALUES (?,?,?,?,?,?,?,?,?,0,?,?,?)",
         (
             digest(value),
             role,
@@ -103,6 +126,9 @@ def create_session(c, response: Response, role, staff_id=None, request=None):
             now,
             ip,
             ua,
+            shop_id,
+            now if auth_at is None else auth_at,
+            auth_method or ("management_link" if role == "staff" else "legacy"),
         ),
     )
     audit(c, actor, "session.create", sid)
@@ -160,8 +186,15 @@ def session(request: Request, roles=("admin",)):
                 (now, row["digest"]),
             )
             result["last_seen"] = now
-        if row["role"] == "staff" or channel == "cli":
+        if row["role"] in ("admin", "staff"):
             authorize_management(c, result)
+        expected_scope = request.headers.get("x-extore-shop-scope")
+        expected_session = request.headers.get("x-extore-session-id")
+        actual_scope = result.get("shop_id") or "platform"
+        if (expected_scope is not None and expected_scope != actual_scope) or (
+            expected_session is not None and expected_session != result["id"]
+        ):
+            fail("登录账号已切换，请刷新页面后重试", 409)
         return result
 
 
@@ -175,7 +208,7 @@ def _cli_route_allowed(request, role):
     if role != "admin":
         return False
     return (
-        path.startswith(("/api/admin/", "/api/manage/"))
+        path.startswith(("/api/admin/", "/api/manage/", "/api/platform/", "/api/shop/"))
         or (method, path)
         in (
             ("GET", "/api/cli/owner/status"),
@@ -185,6 +218,12 @@ def _cli_route_allowed(request, role):
             ("GET", "/api/auth/passkeys"),
             ("POST", "/api/auth/register/options"),
             ("POST", "/api/auth/register/verify"),
+            ("POST", "/api/auth/reauth/password"),
+            ("POST", "/api/auth/password/change"),
+            ("POST", "/api/auth/totp/setup"),
+            ("POST", "/api/auth/totp/confirm"),
+            ("POST", "/api/auth/totp/disable"),
+            ("POST", "/api/auth/totp/backup-codes"),
         )
         or (method == "DELETE" and path.startswith("/api/auth/passkeys/"))
     )
@@ -224,7 +263,7 @@ def staff_authorization(c, staff_id):
             fail("商品管理链接已过期或撤销", 401)
         seen.add(current_id)
         row = c.execute("SELECT * FROM staff WHERE id=?", (current_id,)).fetchone()
-        if not row or row["revoked"]:
+        if not row or row["revoked"] or ("archived" in row.keys() and row["archived"]):
             fail("商品管理链接已过期或撤销", 401)
         try:
             expires = float(row["expires"])
@@ -251,6 +290,15 @@ def staff_authorization(c, staff_id):
         fail("商品管理链接已过期或撤销", 401)
     result["permissions"] = effective_permissions
     result["expires"] = effective_expires
+    from .shops import default_shop, shop_row
+
+    product = c.execute(
+        "SELECT shop_id FROM products WHERE id=?", (result["product_id"],)
+    ).fetchone()
+    if product is None:
+        fail("商品管理链接已失效", 401)
+    result["shop_id"] = product["shop_id"] or default_shop(c)
+    shop_row(c, result["shop_id"])
     return result
 
 
@@ -259,7 +307,7 @@ def authorize_management(c, s, permission=None):
     from .models import LINK_PERMISSIONS
 
     current = c.execute(
-        "SELECT role,staff_id,channel,device_id,owner_device_id FROM sessions WHERE digest=? AND revoked=0 AND expires>?",
+        "SELECT role,staff_id,channel,device_id,owner_device_id,shop_id FROM sessions WHERE digest=? AND revoked=0 AND expires>?",
         (s.get("digest", ""), time.time()),
     ).fetchone()
     if (
@@ -269,6 +317,7 @@ def authorize_management(c, s, permission=None):
         or current["channel"] != s.get("channel", "browser")
         or current["device_id"] != s.get("device_id")
         or current["owner_device_id"] != s.get("owner_device_id")
+        or (current["role"] == "admin" and current["shop_id"] != s.get("shop_id"))
     ):
         fail("请先登录", 401)
     if current["channel"] == "cli":
@@ -282,6 +331,8 @@ def authorize_management(c, s, permission=None):
             ):
                 fail("商家 CLI 登录凭证无效", 401)
             device = owner_device(c, current["owner_device_id"])
+            if device["shop_id"] != current["shop_id"]:
+                fail("商家 CLI 设备与店铺不匹配", 401)
             s.update(
                 scope="shop.owner",
                 fingerprint=device["fingerprint"],
@@ -305,11 +356,22 @@ def authorize_management(c, s, permission=None):
                 (time.time(), device["id"]),
             )
     if s["role"] == "admin":
+        from .shops import shop_row
+
+        if current["shop_id"] is not None:
+            shop_row(c, current["shop_id"])
+        s["shop_id"] = current["shop_id"]
+        s["account_id"] = (
+            f"shop:{current['shop_id']}" if current["shop_id"] is not None else "owner"
+        )
         s["permissions"] = list(LINK_PERMISSIONS)
     elif s["role"] == "staff":
         staff = staff_authorization(c, s.get("staff_id"))
+        if current["shop_id"] not in (None, staff["shop_id"]):
+            fail("商品管理登录与店铺不匹配", 401)
         s.update(
             product_id=staff["product_id"],
+            shop_id=staff["shop_id"],
             permissions=staff["permissions"],
             name=staff["name"],
             link_expires=staff["expires"],

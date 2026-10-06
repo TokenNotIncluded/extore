@@ -1,3 +1,4 @@
+import json
 import os
 import stat
 import subprocess
@@ -197,7 +198,9 @@ def test_bootstrap_writes_private_password_file_without_printing_secret(
 def test_reset_auth_cancellation_keeps_credentials_and_password(monkeypatch):
     with db() as c:
         set_setting(c, "bootstrap_password", "existing-hash")
-        c.execute("INSERT INTO credentials VALUES ('passkey',X'01',0,'Existing',0)")
+        c.execute(
+            "INSERT INTO credentials(id,public_key,sign_count,name,created) VALUES ('passkey',X'01',0,'Existing',0)"
+        )
     monkeypatch.setattr("builtins.input", lambda prompt: "CANCEL")
     monkeypatch.setattr(cli.getpass, "getpass", forbid_init)
     with pytest.raises(SystemExit, match="Cancelled"):
@@ -212,12 +215,15 @@ def test_reset_auth_keeps_product_and_card_data(monkeypatch, tmp_path):
     product = Product(name="Existing product")
     with db() as c:
         c.execute(
-            "INSERT INTO products VALUES ('product',?,0)", (product.model_dump_json(),)
+            "INSERT INTO products(id,config,created) VALUES ('product',?,0)",
+            (product.model_dump_json(),),
         )
         c.execute(
             "INSERT INTO cards(id,digest,product_id,created) VALUES ('card','digest','product',0)"
         )
-        c.execute("INSERT INTO credentials VALUES ('passkey',X'01',0,'Existing',0)")
+        c.execute(
+            "INSERT INTO credentials(id,public_key,sign_count,name,created) VALUES ('passkey',X'01',0,'Existing',0)"
+        )
     monkeypatch.setattr("builtins.input", lambda prompt: "RESET")
     monkeypatch.setattr(
         cli.getpass, "getpass", lambda prompt: "cli-test-recovery-password"
@@ -235,7 +241,9 @@ def test_reset_auth_keeps_product_and_card_data(monkeypatch, tmp_path):
 def test_integration_key_rotation_does_not_change_authentication(monkeypatch, capsys):
     with db() as c:
         set_setting(c, "bootstrap_password", "existing-hash")
-        c.execute("INSERT INTO credentials VALUES ('passkey',X'01',0,'Existing',0)")
+        c.execute(
+            "INSERT INTO credentials(id,public_key,sign_count,name,created) VALUES ('passkey',X'01',0,'Existing',0)"
+        )
     monkeypatch.setattr(cli, "token", lambda: "cli-test-platform-key")
     cli.main(["integration-key"])
     with db() as c:
@@ -249,7 +257,12 @@ def test_demo_command_keeps_approved_processor_behavior(capsys):
     cli.main(["demo"])
     with db() as c:
         product = c.execute("SELECT config FROM products").fetchone()[0]
-        assert '"processor_id":"personalized_text"' in product
+        assert json.loads(product)["processor_id"] == "personalized_text"
+        assert json.loads(product)["processor_config"] == {}
+        assert (
+            c.execute("SELECT count(*) FROM processor_product_bindings").fetchone()[0]
+            == 1
+        )
         assert c.execute("SELECT count(*) FROM cards").fetchone()[0] == 1
     assert "演示卡密" in capsys.readouterr().out
     with pytest.raises(SystemExit, match="empty database"):

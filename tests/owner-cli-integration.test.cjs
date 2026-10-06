@@ -208,8 +208,9 @@ test("the approval module loads before app startup with the same new asset revis
   const scripts = [...html.matchAll(/<script\b([^>]*\bsrc="([^"]+)"[^>]*)>/g)];
   const owner = scripts.findIndex((script) => script[2].startsWith("/static/owner-cli.js"));
   const app = scripts.findIndex((script) => script[2].startsWith("/static/app.js"));
-  assert.ok(owner >= 0 && app > owner);
+  const account = scripts.findIndex((script) => script[2].startsWith("/static/account.js"));
+  assert.ok(owner >= 0 && account > owner && app > account);
   assert.match(scripts[owner][1], /\bdefer\b/);
-  assert.match(scripts[owner][2], /\?v=20261007-2$/);
-  assert.match(scripts[app][2], /\?v=20261007-2$/);
+  assert.match(scripts[owner][2], /\?v=20261007-shops$/);
+  assert.match(scripts[app][2], /\?v=20261007-shops$/);
 });

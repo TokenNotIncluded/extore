@@ -2,7 +2,7 @@
 
 Extore 把顾客兑换、领取和商家日常处理操作注册成浏览器原生工具。工具调用沿用页面的 API、Cookie 会话和服务端权限；没有独立管理员凭证，也不增加远程 MCP 服务端。
 
-命令行接入使用独立的[商品管理、顾客和店主 CLI](cli.md)，浏览器原生工具仍为下文的 49 个。店主 CLI 首次设备批准必须通过正常页面和真实 Passkey，原生工具不代办 WebAuthn；后续设备续签与操作签名由 CLI 完成。商品管理的短期 CLI 票据也只能由已登录浏览器生成，CLI Bearer 不能生成新的绑定票据。
+命令行接入使用独立的[商品管理、顾客和店主 CLI](cli.md)，浏览器原生工具见下方目录。店主可通过 CLI 邮箱密码及第二因素或真实 Passkey 批准设备，平台管理员使用 Passkey；原生工具不代办账号登录或 WebAuthn。后续设备续签与操作签名由 CLI 完成。商品管理的短期 CLI 票据也只能由已登录浏览器生成，CLI Bearer 不能生成新的绑定票据。
 
 实现位于 [`extore/static/webmcp.js`](../extore/static/webmcp.js)，通过 `window.ExtoreWebMCP` 与页面连接。没有 WebMCP 的浏览器继续使用普通界面，不安装 polyfill，不伪造 `document.modelContext` 或 `navigator.modelContext`。
 
@@ -78,7 +78,7 @@ window.ExtoreWebMCP.dispose();
 | `queue.process` | 领取队列任务、更新进度、提交结果、标记失败；人或获授权的 AI 都可处理 |
 | `queue.retry` | 核实后放行该商品失败任务重试 |
 | `product.edit` | 查看并修改该商品基本配置，如名称、说明、图片、参数和队列输出展示文本 |
-| `fulfillment.configure` | 配置发货方式、交付/查看规则、官方处理器、Webhook、重试规则，以及队列输出字段结构 |
+| `fulfillment.configure` | 配置发货方式、交付/查看规则、预设处理器、Webhook、重试规则，以及队列输出字段结构 |
 | `cards.manage` | 查询、发行、撤销该商品卡密 |
 | `events.manage` | 查看与重投该商品事件 |
 | `links.delegate` | 创建严格更小权限的子管理链接、管理下级授权 |
@@ -96,6 +96,7 @@ window.ExtoreWebMCP.dispose();
 | 当前领取页 | `extore_product_parameters` | 读取当前商品的参数定义与教程 |
 | 当前领取页 | `extore_receipt_status` | 查询当前兑换与队列状态，不领取内容 |
 | 当前领取页 | `extore_redemption_submit`、`extore_redemption_retry` | 提交当前商品参数，或在规则允许时重试 |
+| 当前领取页 | `extore_redemption_retry_original` | needs_input/reuse 且可重试时，明确使用选中卡密的原资料和附件 |
 | 当前领取页：包含文件输入 | `extore_redemption_file_upload` | 为当前有效卡密上传文件，返回用于兑换参数的文件 ID |
 | 当前领取页 | `extore_receipt_reveal`、`extore_receipt_destroy` | 明确领取内容，或永久销毁本站交付内容 |
 | 商家商品标签 | `extore_product_create` | 创建商品，商品管理链接不能新增商品 |
@@ -103,21 +104,23 @@ window.ExtoreWebMCP.dispose();
 | 商品标签：商家或 `product.edit` | `extore_products_admin_list` | 列出当前身份可管理的商品，商品管理链接只返回自身商品 |
 | 商品标签：商家或 `product.edit` | `extore_product_admin_get`、`extore_product_update` | 读取、更新商品配置，秘密字段脱敏；管理链接限于自身商品，没有商品删除接口 |
 | 商品标签：商家或 `product.edit` | `extore_product_export_prompt` | 导出跨平台创建商品用的安全文本提示词；不写剪贴板，不创建外部商品 |
-| 商品标签：商家或 `product.edit` | `extore_processors_list` | 获取官方处理器的配置、输入与输出 Schema，不返回实际配置秘密 |
+| 商品标签：商家或 `product.edit` | `extore_processors_list` | 获取预设处理器的配置、输入与输出 Schema，不返回实际配置秘密 |
 | 卡密标签：商家或 `cards.manage` | `extore_cards_list`、`extore_cards_issue`、`extore_card_revoke` | 查询、批量发行、撤销卡密 |
 | 卡密标签：商家或 `cards.manage` | `extore_card_stats`、`extore_card_inventory`、`extore_card_history` | 只读统计、分页库存与卡密生命周期，均不返回完整卡密 |
 | 管理链接标签：商家或 `links.delegate` | `extore_staff_list`、`extore_staff_authorize`、`extore_staff_revoke` | 查询、创建或撤销商品管理链接；委托限于下级授权 |
 | 任务标签：商家或 `queue.view` | `extore_queue_products`、`extore_queue_select`、`extore_jobs_list` | 选择和查看商品独立队列 |
 | 任务标签：商家或 `queue.view` | `extore_jobs_files_list`、`extore_jobs_file_read` | 查看任务附件元数据、受限读取文件 |
-| 任务标签：商家或 `queue.process` | `extore_jobs_claim`、`extore_jobs_progress`、`extore_jobs_complete`、`extore_jobs_fail`、`extore_jobs_request_changes`、`extore_jobs_reject` | 批量处理队列任务，退回补充或拒绝须说明原因，仍限于授权商品 |
+| 任务标签：商家或 `queue.process` | `extore_jobs_claim`、`extore_jobs_progress`、`extore_jobs_complete`、`extore_jobs_fail`、`extore_jobs_request_retry`、兼容 `extore_jobs_request_changes`、`extore_jobs_reject` | 批量处理队列任务，要求重试或拒绝须说明原因，仍限于授权商品 |
 | 任务标签：商家或 `queue.process` | `extore_jobs_file_upload` | 为自己领取的任务上传交付文件 |
 | 任务标签：商家或 `queue.retry` | `extore_jobs_allow_retry` | 核实失败任务后放行顾客重试 |
 | 事件标签：商家或 `events.manage` | `extore_events_list`、`extore_event_retry` | 查看事件，重投已停止投递的 Webhook |
 | 商家安全标签 `security` | `extore_passkeys_list` | 只读 Passkey 列表 |
+| 管理链接标签 `staff`：商家或 `links.delegate` | `extore_staff_cleanup_preview`、`extore_staff_cleanup` | 预览或确认归档有权管理的失效链接，保留祖先墓碑 |
+| 商家 `events/staff` 标签 | `extore_maintenance_status`、`extore_records_cleanup_preview`、`extore_records_cleanup` | 本账号范围的保留策略、清理预览或明确确认执行 |
 | 会话标签 `sessions`：商家或已登录管理链接 | `extore_sessions_list`、`extore_session_revoke`、`extore_audit_list` | 查看安全会话与登录审计元数据，撤销授权范围内的会话 |
 | 已登录商家后台或管理链接页 | `extore_session_logout` | 退出当前会话 |
 
-共有 49 个工具定义，按页面、标签和权限动态注册，不会同时全部暴露。实际工具的 `inputSchema` 是调用参数的权威说明。每次切换页面后重新发现工具，不能缓存之前的工具对象继续操作。
+工具按页面、标签和权限动态注册，不会同时全部暴露。实际发现到的工具目录与 `inputSchema` 是可用操作和调用参数的权威说明。每次切换页面后重新发现工具，不能缓存之前的工具对象继续操作。
 
 ## 输入与确认
 
@@ -145,9 +148,10 @@ window.ExtoreWebMCP.dispose();
 | `code_verify` | `code`，1–8000 字符，不能全是空白；支持最多 30 张同商品卡密，用换行、空格、逗号或分号分隔 |
 | `ui_navigate` | `page`: `home` / `admin` / `staff`；`tab?` 允许后台页，值为 `products` / `jobs` / `cards` / `staff` / `events` / `security` / `sessions`，管理链接只可打开已授权标签与自身 sessions，security 仅商家 |
 | `redemption_submit`、`redemption_retry` | 恰好一种：单卡 `params`，或批量 `items:[{card_id,params}]`（1–30 项，ID 不重复）+ confirm；参数值为字符串，单项最多 10000 字符；逐卡按输入快照验证 |
+| `redemption_retry_original` | confirm；重新读取当前卡状态，仅允许 needs_input/reuse/can_retry=true，批量时先选中卡密 |
 | `redemption_file_upload` | `field_key`、`filename`、`base64`、`content_type?` + confirm；限当前已验证卡密的文件参数 |
 | `receipt_reveal`、`receipt_destroy`、`session_logout` | confirm |
-| `products_admin_list`、`processors_list`、`staff_list`、`events_list`、`passkeys_list`、`queue_products`、`sessions_list` | `{}` |
+| `products_admin_list`、`processors_list`、`events_list`、`passkeys_list`、`queue_products`、`sessions_list` | `{}` |
 | `session_revoke` | `session_id`（UUID）+ confirm；仅撤销服务端授权范围内的会话 |
 | `audit_list` | `limit?`，整数 1–200，使用服务端限定的登录/授权审计范围 |
 | `queue_select` | `product_id`，必须是当前身份可处理的商品 |
@@ -174,7 +178,12 @@ window.ExtoreWebMCP.dispose();
 | `jobs_complete` | `product_id`、`ids`、`message?`、`progress_steps?`、`output?`、`content?` + confirm；成功会自动完成全部步骤；执行时读取目标任务的输出快照严格验证，批内交付类型、字段代码、类型和必填规则必须相同；仅默认单 content 快照兼容 content，服务型任务只提交成功状态 |
 | `jobs_fail` | `product_id`、`ids`、`message?`、`progress_steps?`、`retryable?` + confirm；仅确认未交付时设置 retryable=true |
 | `jobs_request_changes`、`jobs_reject` | `product_id`、`ids`、`reason` + confirm；reason 为非空白、最多 1000 字符的顾客可见原因；只处理自己领取的 processing 队列任务 |
+| `jobs_request_retry` | 同上，另可传 `retry_mode=revise/reuse` 与 `reason_type=customer_input/external/processor`；默认 customer_input/revise |
 | `event_retry` | `event_id` + confirm |
+| `staff_list` | `view=active/history/all`，默认 active；不返回原链接凭证 |
+| `staff_cleanup_preview`、`staff_cleanup` | 可选 product_id、limit（1–500）；实际清理须 confirm，只归档有权管理的失效链接 |
+| `maintenance_status` | 无参数；本账号范围的保留策略与摘要计数 |
+| `records_cleanup_preview`、`records_cleanup` | 可选 areas（links/events/audit）、product_id、limit（1–500）；实际执行须 confirm |
 
 任务 `message` 最多 1000 字符。未提供列表 `limit` 时使用后端默认值；不是无限查询。
 
@@ -186,7 +195,7 @@ window.ExtoreWebMCP.dispose();
 
 `jobs_list` 返回每个任务的 `steps:[{id,label,done}]` 与 `completed_steps`。填写已完成步骤时必须使用这个任务的快照 ID，不应根据商品当前默认计划猜测。`completed_steps` 只接受最多 30 个不重复的 slug；省略保留现有集合，明确传入时须包含当前尝试已经完成的步骤，服务端拒绝未知步骤和撤回。步骤型任务的百分比由服务端计算，处理过程中最高 99，成功后自动完成全部步骤并显示 100；没有计划的旧任务仍支持百分比进度。
 
-`jobs_request_changes` 与 `jobs_reject` 调用 `/api/manage/batch`，分别使用 `action=request_changes` / `reject`，把 `reason` 映射为 API 的 `message`。退回补充不等于发货失败：顾客可以沿用原任务重新提交，attempt 增加，不受商品失败重试次数限制；过期或撤销仍阻止重提。拒绝为终态，卡密同时禁用，原领取链接显示原因。两个工具都要求当前所选商品、最新权限和任务领取者匹配，且不能覆盖自动处理任务。
+`jobs_request_retry`、兼容 `jobs_request_changes` 与 `jobs_reject` 调用 `/api/manage/batch`，对应 action 为 request_retry / request_changes / reject，把 `reason` 映射为 API 的 `message`。要求重试不等于发货失败；`revise` 要求修改后重提，`reuse` 允许原资料重试，原因可来自顾客资料、外部服务或处理程序。实际重试沿用原任务与计划，attempt 增加，不受商品失败重试次数限制；过期、撤销或店铺停用仍阻止重提。拒绝为终态，卡密同时禁用，原领取链接显示原因。这些工具都要求当前所选商品、最新权限和任务领取者匹配，且不能覆盖自动处理任务。
 
 对于尚无计划、无已完成步骤且处于排队或处理状态的任务，`jobs_claim`、`jobs_progress`、`jobs_complete`、`jobs_fail` 可附带 `progress_steps`，一次绑定 1–30 项自定义步骤；计划一经绑定便不能替换。整批仍由服务端验证和原子更新。放行重试不清空完成集合；顾客真正提交新一次尝试时才重置步骤完成情况和进度，保留计划快照。`receipt_status` 使用字段白名单返回步骤、完成标记、`queue_position`、`support_email` 等公开状态，交付结果仍只通过明确的领取工具返回。
 
@@ -214,7 +223,7 @@ window.ExtoreWebMCP.dispose();
 
 管理链接调用 `product_update` 时，只要 `changes` 明确包含任一受保护发货配置字段，就额外检查当前页面和最新会话中的 `fulfillment.configure`，即使传入值与旧值相同也需要权限。队列输出字段的展示名称、教程、折叠状态可以凭 `product.edit` 修改；仅调整字段数组顺序也不改变权限结构。改变代码名、类型或必填规则则需要 `fulfillment.configure`。只更新基本字段时，工具允许保留服务端脱敏的空密钥，再由后端恢复原值验证。后端同样拒绝未授权的发货配置变更；即使拥有这项权限，WebMCP 的普通返回结果仍脱敏密钥。
 
-已知为 Webhook 或官方处理器自动处理的任务不会提供队列领取、进度、完成和失败工具；具有相应权限的管理者仍可查询状态，并在核实未交付后放行失败任务重试。
+已知为 Webhook 或预设处理器自动处理的任务不会提供队列领取、进度、完成和失败工具；具有相应权限的管理者仍可查询状态，并在核实未交付后放行失败任务重试。
 
 原生工具的 `product` 和 `changes` 接受以下字段：`name`、`description`、`logo`、`image`、`public`、`variants`、`progress_steps`、`support_email`、`mode`、`delivery`、`view_policy`、`allow_retry`、`max_attempts`、`parameters`、`outputs`、`webhook_url`、`webhook_secret`、`processor_id`、`processor_config`。原生 Schema 拒绝 `script` 字段，包括空字符串；协议商品查询中的 `script:""` 只用于兼容旧客户端，不能执行任意脚本。输入/输出字段支持 `key`、`label`、`description`、`collapsed`、`required`、`type`，类型均可使用 `text` / `email` / `url` / `textarea` / `number` / `file`。商品图片与 Webhook URL 必须为 HTTPS，Webhook 需明确提供至少 32 字符的密钥。更新已有 Webhook 商品时，未传新密钥会内部保留旧密钥，不把它返回代理。
 
@@ -223,6 +232,10 @@ window.ExtoreWebMCP.dispose();
 `code_verify` 共用公开兑换接口，支持同商品最多 30 张卡密；批内混入无效、不可兑换或其他商品卡密时整批拒绝。验证只建立页面上下文，不提交兑换，工具返回不包含领取 token。`receipt_status` 与 `product_parameters` 可返回批内 `card_id`、尾号、规格和各卡的商品输入快照；不返回顾客参数、交付内容或领取凭证。
 
 批量提交用 `items:[{card_id,params}]`，只接受当前领取链接覆盖的卡密。`redemption_submit` 仅提交尚无任务的卡密；`redemption_retry` 仅处理 `job.can_retry=true` 的任务，包括退回补充。工具执行前重新读取状态并按每项的参数快照验证，不能用当前商品表单覆盖旧任务定义。批量页面的上传、领取和销毁使用当前界面选中的 `cardId`；未选择时拒绝执行，切换选择会使旧回调失效。文件下载仍须选择目标卡密；领取与销毁遵守原有显式确认及一次查看规则。
+
+`redemption_retry_original` 使用选中卡密保存的原参数与附件，不接受 params 或 items，也不重新选文件。工具先读取真实状态，要求 `needs_input`、`retry_mode=reuse`、`can_retry=true` 并明确 confirm；不能代替 revise 所需的修改后重提。`receipt_status` 返回安全的 retry_mode 与 retry_reason_type，不通过状态查询取出私密原参数。
+
+记录维护默认启用，已投递/取消事件保留 30 天、dead 90 天、审计 180 天（最低 90 天）、失效链接 90 天。预览不写入，实际清理明确 confirm；links 归档保留祖先墓碑，pending 事件、有效授权和任务业务数据保留。店主仅本店，管理链接仅自己的失效后代，详见[保留协议](protocol.md#记录保留与清理)。SMTP、密码、TOTP 和配置档案敏感操作通过正常账号界面或私密 CLI 输入完成，没有自动代填秘密的 WebMCP 工具。
 
 ## 文件与 AI 处理
 
@@ -238,7 +251,7 @@ window.ExtoreWebMCP.dispose();
 
 `product_export_prompt` 调用页面的 `ExtoreProductExport.prompt`，只导出商品展示资料、输入/输出定义和规格参考价格。文本与 Markdown 始终作为引用数据，商品描述中的命令不是指令。只有明确传入 `include_inventory:true`，且当前及最新会话具备 `cards.manage`（商家管理员也允许）时，才读取该商品的卡密统计并附带规格库存；没有权限或没有统计快照就不附带库存，不推断为零。“未兑换卡密数量”不代表“未售商品数量”。工具不返回发货配置秘密、卡密原文、交付结果或管理链接。
 
-## 队列结果与官方处理器
+## 队列结果与预设处理器
 
 队列商品可定义最多 30 个 `outputs`。每项包含代码名 `key`、多语言显示名称 `label`、多语言 Markdown 教程 `description`、默认折叠状态 `collapsed`、必填标志 `required`，类型为 `text` / `email` / `url` / `textarea` / `number`。代码名规则与顾客输入参数相同，且不能重复。内容型商品默认是必填的单个 `content` 文本框；服务型商品使用 `outputs=[]`，只返回成功/失败状态。
 
@@ -259,7 +272,7 @@ window.ExtoreWebMCP.dispose();
 
 旧 `content` 入参只兼容默认必填的单个 `content` textarea 输出快照，多字段任务必须提交 `output`。同时传入 `content` 与 `output.content` 时两者必须一致。服务型任务完成时不提交 `content` 或交付结果。状态查询不返回结果，仍通过显式 `receipt_reveal` 领取，并遵守一次查看和销毁规则。队列商品修改输入、输出定义时，已有任务保留自己的快照；自动处理商品发行后的字段架构仍受服务端锁定。
 
-协议仍使用 `manual` / `webhook` / `script`：界面分别对应队列、Webhook 和官方处理器。官方处理器使用 `processor_id` 与 `processor_config`，不能输入任意脚本文件名。`extore_processors_list` 使用 `GET /api/admin/processors`；具有 `product.edit` 的商品管理链接使用 `GET /api/manage/processors`。目录只有官方配置、输入与输出 Schema，没有实际配置值；普通 WebMCP 商品结果整块移除 `processor_config`。工具从最新目录填入官方顾客输入与交付输出，不能由商品配置覆盖；更换处理器 ID 且未显式给出配置时，旧配置会清空。草稿配置可以暂不完整，发行卡密和运行处理器时必须满足完整配置要求。
+协议仍使用 `manual` / `webhook` / `script`：界面分别对应队列、Webhook 和预设处理器。预设处理器使用 `processor_id` 与 `processor_config`，不能输入任意脚本文件名。`extore_processors_list` 使用 `GET /api/admin/processors`；具有 `product.edit` 的商品管理链接使用 `GET /api/manage/processors`。目录只有代码配置、输入与输出 Schema，没有实际配置值；普通 WebMCP 商品结果整块移除 `processor_config`。工具从最新目录填入代码定义的顾客输入与交付输出，不能由商品配置覆盖；更换处理器 ID 且未显式给出配置时，旧配置会清空。草稿配置可以暂不完整，发行卡密和运行处理器时必须满足完整配置要求。
 
 ## 卡密统计、库存与历史
 

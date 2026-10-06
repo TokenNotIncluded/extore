@@ -104,6 +104,16 @@ class OwnerMerchant:
                 json={
                     "status": "approved" if self.approved else "pending",
                     "expires": time.time() + 600,
+                    **(
+                        {
+                            "role": "admin",
+                            "scope": "shop.owner",
+                            "shop_id": None,
+                            "superadmin": True,
+                        }
+                        if self.approved
+                        else {}
+                    ),
                 },
             )
         if path == prefix + "/claim":
@@ -125,6 +135,8 @@ class OwnerMerchant:
                     "device_id": "owner-device",
                     "role": "admin",
                     "scope": "shop.owner",
+                    "shop_id": None,
+                    "superadmin": True,
                     "client_name": "Owner bot",
                     "fingerprint": "public-fingerprint",
                     "expires": time.time() + 30 * 86400,
@@ -158,6 +170,8 @@ class OwnerMerchant:
                     "access_token": "short-lived-owner-secret",
                     "role": "admin",
                     "scope": "shop.owner",
+                    "shop_id": None,
+                    "superadmin": True,
                     "expires": time.time() + 28800,
                 },
             )
@@ -218,6 +232,8 @@ class OwnerMerchant:
                     "device_id": "owner-device",
                     "role": "admin",
                     "scope": "shop.owner",
+                    "shop_id": None,
+                    "superadmin": True,
                 },
             )
         if path == "/api/admin/products":

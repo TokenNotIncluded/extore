@@ -8,7 +8,7 @@
 | --- | --- | --- |
 | `extore manage` | 商品配置、卡密、队列、附件、管理链接、事件与会话 | 单个商品管理链接绑定的设备，可保存多个独立授权 |
 | [`extore customer`](cli-customer.md) | 验码、填参、上传材料、跟踪状态、领取和销毁 | 卡密或已有领取链接，不使用商家权限 |
-| [`extore admin`](cli-owner.md) | 全店商品、队列、卡密、安全和设备管理 | 首次由真实 Passkey 批准的店主 CLI 设备 |
+| [`extore admin`](cli-owner.md) | 本店商品、队列、卡密、安全；平台账号可维护店铺和 SMTP | 固定到账号的 CLI 设备；店主支持邮箱密码及第二因素或真实 Passkey 批准，平台管理员使用 Passkey |
 | `extore init / serve / worker …` | 本机初始化、运行与服务器恢复 | 服务器用户，见[运行指南](getting-started.md) |
 
 下面介绍 `manage`。一个授权只管理一个商品；客户端可以保存多个授权并聚合查看，每次写入仍使用其中一个授权，不合并权限。示例中的大写 ID 与路径是占位符，请用当前操作返回的实际值替换。
@@ -79,21 +79,23 @@ extore manage complete JOB_ID --product PRODUCT_ID --output-file result.json --m
 
 有步骤计划时，用可重复的 `--completed-step STEP_ID` 传入完整已完成集合，进度由服务端计算，不能撤回当前尝试已经完成的步骤。`claim` 和 `progress` 可用 `--steps-file steps.json` 为尚无计划的任务绑定一次 1–30 项步骤计划，格式为 `[{"id":"verify","label":{"zh-CN":"核实资料"}}]`，已有计划不能覆盖。`claim` 可接受多个同商品任务 ID；其他操作逐任务执行，避免把一位顾客的结果交给另一位顾客。
 
-### 退回补充、拒绝与失败
+### 要求重试、拒绝与失败
 
 ```sh
-extore manage request-changes JOB_ID --product PRODUCT_ID --reason "请补充账户邮箱截图。"
+extore manage request-retry JOB_ID --product PRODUCT_ID --reason "请补充账户邮箱截图。" --reason-type customer_input --retry-mode revise
+extore manage request-retry JOB_ID --product PRODUCT_ID --reason "外部服务恢复后重试，无需修改资料。" --reason-type external --retry-mode reuse
 extore manage reject JOB_ID --product PRODUCT_ID --reason "提供的账户不符合商品条件。"
 extore manage fail JOB_ID --product PRODUCT_ID --message "确认未交付" --retryable
 extore manage retry JOB_ID --product PRODUCT_ID
 ```
 
-- `request-changes`：任务变为 `needs_input`，顾客可修改资料后重新提交；沿用原任务和快照，`attempt` 增加。不受发货失败的重试开关或次数限制，过期、撤销仍阻止重提。
+- `request-retry`：任务变为 `needs_input`，附顾客可见原因。`--reason-type` 为 `customer_input`、`external` 或 `processor`；`--retry-mode revise` 要求修改后重提，`reuse` 允许顾客原资料重试。默认是 `customer_input/revise`。沿用原任务和快照，顾客实际重试时才增加 `attempt`；不受发货失败的重试开关或次数限制，过期、撤销仍阻止重提。
+- `request-changes`：兼容旧命令，默认仍是修改后重提；新接入优先使用 `request-retry` 明确表达原因和方式。
 - `reject`：任务和卡密进入拒绝终态，顾客在原领取链接看到原因，不能重新提交或领取内容。
 - `fail`：真正的处理失败；只有确认未交付时才传 `--retryable`，顾客重试还须符合商品规则。
 - `retry`：具有 `queue.retry` 的管理者核实后放行失败重试，实际新尝试由顾客提交。
 
-前两种审核必须提供非空白、最多 1000 字符的原因；这段文字会显示给顾客。处理、审核和交付都限于自己已领取的 `processing` 队列任务，不能覆盖 Webhook 或官方处理器的自动任务。
+要求重试与拒绝必须提供非空白、最多 1000 字符的原因；这段文字会显示给顾客。处理、审核和交付都限于自己已领取的 `processing` 队列任务，不能覆盖 Webhook 或预设处理器的自动任务。原因不应包含令牌或原始异常；外部故障用 `external/reuse` 即可，不必让顾客重复上传材料。
 
 ## 附件
 
@@ -122,15 +124,16 @@ extore manage upload JOB_ID --product PRODUCT_ID --field deliverable --file ./re
 | `cards history CARD_ID` | 单张卡密的安全时间线 |
 | `cards issue` | `--count`（1–1000，默认 1）、`--variant`（默认 default）、`--label`、`--expires FUTURE_UNIX`；卡密保存到私密 JSON 文件 |
 | `cards revoke CARD_ID` | 撤销仍符合服务端规则的卡密 |
-| `links list` | 当前商品有权查看的授权范围与两类额度 |
+| `links list` | 当前商品有权查看的授权范围与两类额度；`--view active` 默认，history 看失效记录，all 含归档墓碑 |
 | `links create` | `--json-file LINK.json` 或 `--json-stdin`；新链接保存到私密 JSON 文件 |
 | `links revoke LINK_ID` | 撤销有权管理的链接分支及后代 |
+| `links cleanup` | 默认预览可归档的失效链接；`--apply` 才执行，`--limit` 为 1–500 |
 | `events list` | `--limit`，默认 50；默认投递摘要，`--detail` 读取安全事件元数据 |
 | `events retry EVENT_ID` | 重新投递已停止的事件 |
 | `sessions list / revoke SESSION_ID` | 查看或撤销当前授权可管理的会话 |
 | `devices list / revoke DEVICE_ID` | 查看或撤销商品 CLI 设备；撤销设备阻止继续续签 |
 | `audit` | `--limit`，默认 50，服务端最高 200；登录、设备和授权审计 |
-| `processors` | 官方预设摘要；`--detail` 查询配置与输入输出定义 |
+| `processors` | 内置预设摘要；`--detail` 查询配置与输入输出定义 |
 | `source` | 当前服务器的源码信息；可用 `--origin` 选择服务器，不要求商品 ID |
 
 列表 `--limit` 为 1–500；商品管理权限仍由服务器检查。卡密 `--status` 支持 `unused`、`needs_input`、`queued`、`processing`、`succeeded`、`failed_retryable`、`failed_terminal`、`destroyed`、`revoked`、`expired`、`rejected`。`remaining` 包含未到期的未提交与退回补充卡密，退回补充仍归原顾客任务使用。
@@ -144,7 +147,7 @@ extore manage cards issue --product PRODUCT_ID --variant standard --count 10 --l
 extore manage links create --product PRODUCT_ID --json-file link.json
 ```
 
-`product get --include-secrets --output NEWFILE` 必须由同一个授权同时具备 `product.edit` 与 `fulfillment.configure`，实际配置只保存到新 0600 文件，禁止输出到终端。官方处理器的模板和资源地址也属于秘密配置，普通 `--detail` 仍脱敏。
+`product get --include-secrets --output NEWFILE` 必须由同一个授权同时具备 `product.edit` 与 `fulfillment.configure`，获授权的 Webhook 等配置只保存到新 0600 文件，禁止输出到终端。处理器配置档案的模板、资源地址等秘密不会出现在商品导出中；它们由店主通过独立的[配置档案命令](shops.md#处理器配置档案)更新，读取只返回元数据。
 
 `patch.json` 只填写需要改动的顶层字段，例如 `{"name":"新名称","description":"新的领取说明"}`。数组或嵌套对象在显式提供时整体替换，不是递归合并；修改未来任务的表单仍遵守快照和已发卡冻结规则。
 
@@ -163,7 +166,7 @@ extore manage api GET /api/manage/jobs --product PRODUCT_ID --query view=active 
 extore manage api PUT /api/manage/product --product PRODUCT_ID --json-file product.json
 ```
 
-`api` 接受 `GET / POST / PUT / DELETE` 和已支持的相对 `/api/manage/…` 路径，用可重复的 `--query KEY=VALUE` 传查询，JSON 用 `--json-file` 或 `--json-stdin`。它不会接受外部 URL、跟随重定向或扩大权限。商品写入的底层 API 使用完整 Product；需要局部改动时优先用 `product update`。队列 GET 默认 compact 与 active，`--detail` 按需读取完整详情。制卡与创建管理链接的 API 响应仍自动保存到私密文件。
+`api` 接受 `GET / POST / PUT / PATCH / DELETE` 和已支持的相对 `/api/manage/…` 路径，用可重复的 `--query KEY=VALUE` 传查询，JSON 用 `--json-file` 或 `--json-stdin`。它不会接受外部 URL、跟随重定向或扩大权限。商品写入的底层 API 使用完整 Product；需要局部改动时优先用 `product update`。队列 GET 默认 compact 与 active，`--detail` 按需读取完整详情。制卡与创建管理链接的 API 响应仍自动保存到私密文件。
 
 ## 输出与本地配置
 

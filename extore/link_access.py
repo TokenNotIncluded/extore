@@ -40,6 +40,7 @@ AUDIT_ACTIONS = (
     "cli.owner.action",
     "staff.create",
     "staff.revoke",
+    "staff.archive",
 )
 
 
@@ -146,7 +147,10 @@ def consume_link(c, row, request=None, channel="browser"):
 def session_actor(row):
     if row["role"] == "staff":
         return row["staff_id"]
-    return "owner" if row["role"] == "admin" else "bootstrap"
+    if row["role"] == "admin":
+        shop_id = row["shop_id"]
+        return f"shop:{shop_id}" if shop_id is not None else "owner"
+    return "bootstrap"
 
 
 def revoke_session(c, session_digest, actor=None, action="session.revoke"):
@@ -154,7 +158,7 @@ def revoke_session(c, session_digest, actor=None, action="session.revoke"):
     if action not in AUDIT_ACTIONS or not action.startswith("session."):
         raise ValueError("Unknown session audit action")
     row = c.execute(
-        "SELECT id,role,staff_id,revoked FROM sessions WHERE digest=?",
+        "SELECT id,role,staff_id,revoked,shop_id FROM sessions WHERE digest=?",
         (session_digest,),
     ).fetchone()
     if row is None or row["revoked"]:
@@ -163,6 +167,8 @@ def revoke_session(c, session_digest, actor=None, action="session.revoke"):
     audit(c, actor or session_actor(row), action, row["id"])
     if row["role"] == "staff":
         _release_last_staff_session(c, row["staff_id"])
+    elif row["role"] == "admin" and row["shop_id"] is not None:
+        _release_last_shop_session(c, row["shop_id"])
     return row["id"]
 
 
@@ -176,8 +182,9 @@ def _release_last_staff_session(c, staff_id):
     jobs = c.execute(
         "SELECT jobs.id FROM jobs JOIN products ON products.id=jobs.product_id "
         "WHERE jobs.claimed_by=? AND jobs.state='processing' "
+        "AND jobs.product_id=(SELECT product_id FROM staff WHERE id=?) "
         "AND COALESCE(json_extract(products.config,'$.mode'),'manual')='manual'",
-        (staff_id,),
+        (staff_id, staff_id),
     ).fetchall()
     for job in jobs:
         c.execute(
@@ -188,6 +195,29 @@ def _release_last_staff_session(c, staff_id):
         # Preserve params, result drafts, files and progress so a replacement
         # processor can continue rather than repeat completed work.
         audit(c, staff_id, "job.release", job["id"])
+
+
+def _release_last_shop_session(c, shop_id):
+    if c.execute(
+        "SELECT 1 FROM sessions WHERE role='admin' AND shop_id=? AND revoked=0 "
+        "AND expires>? LIMIT 1",
+        (shop_id, time.time()),
+    ).fetchone():
+        return
+    actor = f"shop:{shop_id}"
+    jobs = c.execute(
+        "SELECT jobs.id FROM jobs JOIN products ON products.id=jobs.product_id "
+        "WHERE products.shop_id=? AND jobs.claimed_by=? AND jobs.state='processing' "
+        "AND COALESCE(json_extract(products.config,'$.mode'),'manual')='manual'",
+        (shop_id, actor),
+    ).fetchall()
+    for job in jobs:
+        c.execute(
+            "UPDATE jobs SET state='queued',claimed_by=NULL,lease=NULL,updated=? "
+            "WHERE id=? AND state='processing' AND claimed_by=?",
+            (time.time(), job["id"], actor),
+        )
+        audit(c, actor, "job.release", job["id"])
 
 
 def revoke_staff_sessions(c, staff_id, actor="owner"):
@@ -238,7 +268,16 @@ def request_metadata(request):
 def _link_scope(c, s):
     authorize_management(c, s)
     if s["role"] == "admin":
-        return None
+        if s.get("shop_id") is None:
+            return None
+        return {
+            row["id"]
+            for row in c.execute(
+                "SELECT staff.id FROM staff JOIN products ON products.id=staff.product_id "
+                "WHERE products.shop_id=?",
+                (s["shop_id"],),
+            )
+        }
     ids = [s["staff_id"]]
     if "links.delegate" in s["permissions"]:
         ids = link_descendant_ids(c, s["staff_id"])
@@ -252,23 +291,26 @@ def _link_scope(c, s):
     }
 
 
-def _session_rows(c, scope):
+def _session_rows(c, scope, shop_id=None):
     sql = (
         "SELECT sessions.*,staff.name AS link_name,staff.product_id AS product_id,"
         "products.config AS product_config,COALESCE(cli_devices.fingerprint,owner_cli_devices.fingerprint) AS device_fingerprint,"
         "COALESCE(cli_devices.revoked,owner_cli_devices.revoked) AS device_revoked,owner_cli_devices.expires AS owner_grant_expires FROM sessions "
         "LEFT JOIN staff ON staff.id=sessions.staff_id "
         "LEFT JOIN products ON products.id=staff.product_id"
-        " LEFT JOIN cli_devices ON cli_devices.id=sessions.device_id"
-        " LEFT JOIN owner_cli_devices ON owner_cli_devices.id=sessions.owner_device_id"
+        " LEFT JOIN cli_devices ON cli_devices.id=sessions.device_id AND cli_devices.staff_id=sessions.staff_id"
+        " LEFT JOIN owner_cli_devices ON owner_cli_devices.id=sessions.owner_device_id AND owner_cli_devices.shop_id IS sessions.shop_id"
     )
     values = ()
     if scope is not None:
-        if not scope:
+        if not scope and shop_id is None:
             return []
-        sql += " WHERE sessions.role='staff' AND sessions.staff_id IN ("
-        sql += ",".join("?" for _ in scope) + ")"
+        sql += " WHERE (sessions.role='staff' AND sessions.staff_id IN ("
+        sql += ",".join("?" for _ in scope) + "))"
         values = tuple(sorted(scope))
+        if shop_id is not None:
+            sql += " OR (sessions.role='admin' AND sessions.shop_id=?)"
+            values += (shop_id,)
     return c.execute(
         sql + " ORDER BY sessions.created DESC,sessions.id", values
     ).fetchall()
@@ -284,11 +326,31 @@ def _session_view(c, row, current_digest):
         row["owner_grant_expires"] is None or row["owner_grant_expires"] <= time.time()
     ):
         active = False
+    if active and row["owner_device_id"]:
+        from fastapi import HTTPException
+
+        from .owner_cli_auth import owner_device
+
+        try:
+            device = owner_device(c, row["owner_device_id"])
+            if device["shop_id"] != row["shop_id"]:
+                active = False
+        except HTTPException:
+            active = False
     if active and row["role"] == "staff":
         from fastapi import HTTPException
 
         try:
             staff_authorization(c, row["staff_id"])
+        except HTTPException:
+            active = False
+    elif active and row["shop_id"] is not None:
+        from fastapi import HTTPException
+
+        from .shops import shop_row
+
+        try:
+            shop_row(c, row["shop_id"])
         except HTTPException:
             active = False
     name = None
@@ -300,6 +362,7 @@ def _session_view(c, row, current_digest):
     return {
         "id": row["id"],
         "role": row["role"],
+        "shop_id": row["shop_id"],
         "link_id": row["staff_id"],
         "link_name": row["link_name"],
         "product_id": row["product_id"],
@@ -326,7 +389,10 @@ def _list_sessions(request, roles):
         scope = _link_scope(c, s)
         current_digest, _ = session_credential_digest(request)
         return [
-            _session_view(c, row, current_digest) for row in _session_rows(c, scope)
+            _session_view(c, row, current_digest)
+            for row in _session_rows(
+                c, scope, s.get("shop_id") if s["role"] == "admin" else None
+            )
         ]
 
 
@@ -337,7 +403,15 @@ def _revoke_session_by_id(session_id, request, roles):
         row = c.execute("SELECT * FROM sessions WHERE id=?", (session_id,)).fetchone()
         if row is None or (
             scope is not None
-            and (row["role"] != "staff" or row["staff_id"] not in scope)
+            and not (
+                (row["role"] == "staff" and row["staff_id"] in scope)
+                or (
+                    s["role"] == "admin"
+                    and row["role"] == "admin"
+                    and s.get("shop_id") is not None
+                    and row["shop_id"] == s["shop_id"]
+                )
+            )
         ):
             fail("登录会话不存在", 404)
         current = hmac.compare_digest(
@@ -358,13 +432,22 @@ def _list_audit(request, roles, limit):
         sql = f"SELECT * FROM audit WHERE action IN ({placeholders})"
         values = list(AUDIT_ACTIONS)
         if scope is not None:
-            session_ids = {r["id"] for r in _session_rows(c, scope)}
+            shop_id = s.get("shop_id") if s["role"] == "admin" else None
+            session_ids = {r["id"] for r in _session_rows(c, scope, shop_id)}
             device_ids = {
                 r["id"]
                 for r in c.execute("SELECT id,staff_id FROM cli_devices")
                 if r["staff_id"] in scope
             }
             targets = scope | session_ids | device_ids
+            if shop_id is not None:
+                for table in ("owner_cli_devices", "owner_cli_requests"):
+                    targets |= {
+                        row["id"]
+                        for row in c.execute(
+                            f"SELECT id FROM {table} WHERE shop_id=?", (shop_id,)
+                        )
+                    }
             if not targets:
                 return []
             sql += " AND target IN (" + ",".join("?" for _ in targets) + ")"
@@ -389,7 +472,13 @@ def _list_audit(request, roles, limit):
             for row in rows
             if row["target"] in safe_targets
             and (
-                row["actor"] in ("owner", "bootstrap", "ssh", "pending")
+                row["actor"] in ("owner", "bootstrap", "ssh", "pending", "system")
+                or (
+                    row["actor"].startswith("shop:")
+                    and c.execute(
+                        "SELECT 1 FROM shops WHERE id=?", (row["actor"][5:],)
+                    ).fetchone()
+                )
                 or c.execute(
                     "SELECT 1 FROM staff WHERE id=?", (row["actor"],)
                 ).fetchone()
@@ -402,8 +491,8 @@ def _audit_metadata(c, row):
     # credential or free-form contents of the common audit table.
     target = c.execute(
         "SELECT sessions.channel,sessions.client_name,COALESCE(cli_devices.fingerprint,owner_cli_devices.fingerprint) AS fingerprint "
-        "FROM sessions LEFT JOIN cli_devices ON cli_devices.id=sessions.device_id "
-        "LEFT JOIN owner_cli_devices ON owner_cli_devices.id=sessions.owner_device_id "
+        "FROM sessions LEFT JOIN cli_devices ON cli_devices.id=sessions.device_id AND cli_devices.staff_id=sessions.staff_id "
+        "LEFT JOIN owner_cli_devices ON owner_cli_devices.id=sessions.owner_device_id AND owner_cli_devices.shop_id IS sessions.shop_id "
         "WHERE sessions.id=?",
         (row["target"],),
     ).fetchone()
