@@ -328,16 +328,31 @@ def output_file_scope(c, row, *, flow_epoch, node_id=None):
 
     if not task_flow.is_flow(c, row):
         return None
-    execution = task_flow.execution(c, row)
+    # Receiving an output does not need (and must not reopen) the original
+    # OTP/input values. They may have been erased while this process is running.
+    execution = task_flow.frozen_authority(c, row, flow_epoch, attempt=row["attempt"])
+    run = c.execute(
+        "SELECT * FROM task_flow_runs WHERE job_id=?", (row["id"],)
+    ).fetchone()
     if (
-        execution is None
-        or execution["flow_epoch"] != flow_epoch
+        run is None
+        or run["attempt"] != row["attempt"]
+        or run["flow_epoch"] != flow_epoch
+        or run["node_id"] != execution["node_id"]
+        or run["phase"] != "processing"
         or row["state"] != "processing"
         or (node_id is not None and node_id != execution["node_id"])
-        or execution["deadline"] <= time.time()
+        or (run["deadline"] is not None and run["deadline"] <= time.time())
     ):
         fail("上传所属处理步骤已改变或超时", 409)
-    return execution
+    snapshot = task_flow.card_snapshot(c, row["card_id"])
+    node = next(
+        (n for n in snapshot["definition"]["nodes"] if n["id"] == execution["node_id"]),
+        None,
+    )
+    if node is None or node["kind"] != "process":
+        fail("当前处理步骤没有附件输出", 409)
+    return {**execution, "outputs": node["outputs"]}
 
 
 def private_worker_file_scope(c, row, execution, field_key, kind, file_id=None):
@@ -346,12 +361,37 @@ def private_worker_file_scope(c, row, execution, field_key, kind, file_id=None):
     from .files import _file
 
     if kind == "output":
-        field = next((f for f in execution["outputs"] if f["key"] == field_key), None)
+        current = output_file_scope(
+            c, row, flow_epoch=execution["flow_epoch"], node_id=execution["node_id"]
+        )
+        if (
+            current is None
+            or current["action_id"] != execution["action_id"]
+            or current["attempt"] != execution["attempt"]
+        ):
+            fail("附件输出的处理动作已改变", 409)
+        field = next((f for f in current["outputs"] if f["key"] == field_key), None)
         if field is None or field["type"] not in ATTACHMENT_TYPES:
             fail("当前处理步骤没有这个附件输出字段")
         return field
     if kind != "input" or not file_id:
         fail("附件请求无效")
+    from . import task_flow
+
+    current = task_flow.execution(c, row)
+    if current is None or any(
+        current[key] != execution[key]
+        for key in (
+            "product_id",
+            "job_id",
+            "attempt",
+            "node_id",
+            "flow_epoch",
+            "action_id",
+        )
+    ):
+        fail("附件输入的处理步骤已改变或过期", 409)
+    execution = current
     params = execution["params"]
     field = next(
         (f for f in execution.get("parameters", []) if f["key"] == field_key), None

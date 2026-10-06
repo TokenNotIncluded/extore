@@ -64,6 +64,8 @@ def private_job(owner, setup_product, monkeypatch):
         return context
 
     def update(c, row, value, epoch):
+        if row["state"] not in ("queued", "processing"):
+            fail("Current step changed", 409)
         counts["updates"] += 1
         assert isinstance(value, JobUpdate)
         c.execute(
@@ -416,6 +418,11 @@ def private_files(private_job, monkeypatch):
         counts["files_bound"] = counts.get("files_bound", 0) + 1
 
     adapter.private_worker_file_scope = file_scope
+    adapter.output_file_scope = lambda c, row, **kwargs: (
+        context
+        if row["state"] in ("queued", "processing")
+        else fail("Current step changed", 409)
+    )
     adapter.bind_private_worker_file = bind
     monkeypatch.setitem(sys.modules, "extore.flow_adapter", adapter)
     monkeypatch.setattr(extore, "flow_adapter", adapter, raising=False)
@@ -425,7 +432,7 @@ def private_files(private_job, monkeypatch):
 
     def field_store(*args, field):
         assert field["type"] == "file" and field["key"] == "document"
-        return store(*args)
+        return store(*args, field=field)
 
     monkeypatch.setattr(files, "_store", field_store)
     return private_job

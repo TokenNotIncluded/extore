@@ -370,7 +370,7 @@ def _transaction():
         fail("此处理步骤已超时，请刷新任务状态", 409)
 
 
-def _active(c, row, scope):
+def _active(c, row, scope, *, output=False):
     from . import task_flow
 
     # execution() intentionally returns None for expired or sensitive inputs.
@@ -389,7 +389,14 @@ def _active(c, row, scope):
         )
         finalize_task_flow(c, effect)
         raise _DeadlineReached
-    context = task_flow.execution(c, row)
+    if output:
+        from .flow_adapter import output_file_scope
+
+        context = output_file_scope(
+            c, row, flow_epoch=scope.flow_epoch, node_id=scope.node_id
+        )
+    else:
+        context = task_flow.execution(c, row)
     if (
         context is None
         or WorkerScope.from_context(context) != scope
@@ -430,7 +437,6 @@ async def result(product_id: str, job_id: str, request: Request):
         receipt = _receipt(c, scope, body["result_id"], body_digest)
         if receipt is not None:
             return receipt
-        _active(c, row, scope)
         from . import task_flow
         from .service import finalize_task_flow
 
@@ -512,7 +518,7 @@ async def upload(
             c, scope, result_id, claimed_digest, kind="file:" + field_key
         )
         if previous_receipt is None:
-            context = _active(c, row, scope)
+            context = _active(c, row, scope, output=True)
             _file_scope(c, row, context, field_key, "output")
     # A database write transaction never spans awaiting an untrusted stream.
     # Every byte is reserved before it is written to a bounded spool.
@@ -533,7 +539,7 @@ async def upload(
         with receiving_upload() as reservation:
             with _transaction() as c:
                 row, _ = _verify(c, request, scope, claimed_digest, consume=False)
-                context = _active(c, row, scope)
+                context = _active(c, row, scope, output=True)
                 _file_scope(c, row, context, field_key, "output")
                 reservation.bind_product(c, scope.product_id)
             with tempfile.SpooledTemporaryFile(
@@ -551,7 +557,7 @@ async def upload(
                     if receipt is not None:
                         reservation.finish(c)
                         return receipt
-                    context = _active(c, row, scope)
+                    context = _active(c, row, scope, output=True)
                     field = _file_scope(c, row, context, field_key, "output")
                     upload_file = UploadFile(
                         spool,
