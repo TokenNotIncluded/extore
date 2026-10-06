@@ -8,6 +8,7 @@
 - 后端 101 项测试、WebMCP 52 项 Node 测试、领取页面上下文 6 项 Node 测试通过，共 159 项。Ruff、Python 编译、JavaScript 语法与 0.2.0 wheel 构建通过。
 - Chromium 154 开启 `--enable-features=WebMCP`，确认实际使用 `document.modelContext`。真实原生工具完成商品创建、制卡、卡密验证、参数提交、店长创建下级链接、处理者完成人工交付、顾客查看及销毁。连续工具调用保持同一上下文注册稳定。
 - 浏览器中注册两个独立虚拟验证器（internal / USB），分别独立登录成功；密码禁用。未进行真实手机或硬件 Passkey 验收。
+- 上级管理链接撤销后，店长与处理者的原生工具调用均返回 `forbidden`，下级会话立即失效。
 - 上述业务操作使用本地隔离数据库，没有向生产增加测试商品、卡密或 Passkey。
 - UI 检测器缺少 HTML 解析依赖而降级为正则检查；渲染结果另经浏览器检查，不将降级扫描视为完整界面检测。
 
@@ -65,3 +66,15 @@ ssh -t archczy 'sudo -u extore extore-admin reset-auth'
 ```
 
 维护升级应在目标服务器重新构建原生包，再用 pacman 更新；系统 Python 大版本改变后也须重建该包。CLI 通过 `extore-admin` 加载 `/etc/extore/extore.env`，无需激活虚拟环境或使用打包时的路径。
+
+
+## 0.2.0 生产更新（2026-10-06）
+
+- 运行代码：`e4ce8a1b9f766cb9bb9c1602b5e365e7ed76c1e3`；Arch 原生包 `extore 0.2.0-1`，在目标 Python 3.14.7 构建。后续仅验收文档提交不改变运行代码。
+- 源码 SHA-256：`293d460bde5182a20f50e8c46e8fbded7e8df944553ee60e5c290909d18e47a0`，服务器构建已校验。[代码 CI](https://github.com/TokenNotIncluded/extore/actions/runs/37454866120) 全部通过。
+- 升级前受保护备份：`/var/backups/extore/20261006-0.2.0`。数据库既有字段逐表指纹与发行密钥、配置文件校验一致；保留商家已注册的 1 个 Passkey，密码登录仍禁用。生产商品、卡密、任务、管理链接均无测试数据。
+- SQLite 结构版本升到 2，`integrity_check=ok`；`pacman -Qkk extore` 为 1507 个文件、0 被修改。
+- API 与 worker enabled、active/running，`NRestarts=0`。数据目录 0700、数据库与发行密钥 0600。
+- HTTPS 首页、健康检查与 WebMCP 静态资源 200；公网 JS、CSS、虚线 SVG 与提交内容逐字节一致。
+- 开启 WebMCP 的真实 Chromium 在公网确认 `document.modelContext` 与首页 5 个原生工具，实际执行公开商品查询；连续点击 Logo 5 次进入 Passkey 登录页，匿名后台只注册上下文和导航工具。
+- 未启用 WebMCP 的 Chromium 正常显示兑换表单，未伪造浏览器 API。生产未执行 Passkey 注册或重置。
