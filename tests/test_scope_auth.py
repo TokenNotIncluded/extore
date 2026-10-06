@@ -449,7 +449,7 @@ def test_schema13_additive_migration_preserves_old39_tables(owner):
         }
     init()
     with db() as c:
-        assert c.execute("PRAGMA user_version").fetchone()[0] == 13
+        assert c.execute("PRAGMA user_version").fetchone()[0] == 14
         for name, (ddl, rows) in before.items():
             assert (
                 c.execute(
