@@ -797,6 +797,9 @@ td pre {
   background: var(--paper);
 }
 @media (max-width: 760px) {
+  input, select, textarea {
+    font-size: 16px;
+  }
   header {
     padding: 20px;
   }
