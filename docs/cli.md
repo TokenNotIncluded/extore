@@ -2,7 +2,7 @@
 
 [返回项目首页](../README.md) · [运行指南](getting-started.md) · [顾客 CLI](cli-customer.md) · [店主 CLI](cli-owner.md) · [AI 接入提示词](ai-prompts.md) · [接口协议](protocol.md)
 
-完整 CLI 要求 **0.6.0 及以上**，本文设备码登录要求 **0.7.0 及以上**；也可在该版本源码目录用 `uv run extore …` 运行。查看本机版本可用 `extore --version`。
+完整 CLI 要求 **0.6.0 及以上**，设备码登录要求 **0.7.0 及以上**；本文的原子领取、顾客跨商品批量兑换、多步流程与签名兑换路由要求 **0.8.0 及以上**。也可在对应版本源码目录用 `uv run extore …` 运行。查看本机版本可用 `extore --version`。
 
 | 入口 | 用途 | 授权 |
 | --- | --- | --- |
@@ -11,6 +11,8 @@
 | [`extore admin`](cli-owner.md) | 本店商品、队列、卡密、安全；平台账号可维护店铺和 SMTP | 固定到账号的 CLI 设备；店主支持邮箱密码及第二因素或真实 Passkey 批准，平台管理员使用 Passkey |
 | `extore init / serve / worker …` | 本机初始化、运行与服务器恢复 | 服务器用户，见[运行指南](getting-started.md) |
 
+顾客多卡验码默认逐卡处理，同一服务器可以包含不同商品，坏码不阻止有效卡。`customer schema --receipt RECEIPT_ID` 按兼容输入返回商品分组；`redeem --group GROUP_ID` 共用文本，`--card-file CARD:FIELD=PATH` 独立绑定各卡附件。查看逐项结果后只修正失败项，已上传文件按卡缓存。单张可用 `exchange --batch`，需要旧同商品整组规则才用 `--atomic`，详见[顾客批量卡密](cli-customer.md#批量卡密)。
+
 下面介绍 `manage`。每个商品有独立设备授权；店铺流水线申请可一次批准多个商品，客户端逐商品保存并聚合查看，每次操作仍使用其中一个授权，不合并权限。示例中的大写 ID 与路径是占位符，请用当前操作返回的实际值替换。
 
 ## 安装与登录
@@ -18,7 +20,7 @@
 需要 Linux、Python 3.12+ 和 [uv](https://docs.astral.sh/uv/)：
 
 ```sh
-uv tool install --upgrade 'extore>=0.7.0'
+uv tool install --upgrade 'extore>=0.8.0'
 extore manage --help
 extore manage login --device-code --origin https://extore.lmm.best --product PRODUCT_ID --client-name '我的 AI Bot'
 ```
@@ -102,6 +104,25 @@ extore manage job JOB_ID --product PRODUCT_ID
 
 ## 处理一个任务
 
+### 等到任务后原子领取
+
+机器人优先使用 `next`，由服务器在同一事务内选择并领取当前可执行任务，避免先查列表再抢任务：
+
+```sh
+extore manage next --product PRODUCT_ID --wait 25 --limit 1
+extore manage next --all --origin https://extore.example.com --watch
+```
+
+`--wait` 为 0–25 秒，默认 25；`--limit` 为 1–10，默认 1。选择 `--all`，或明确 `--product` / `--grant`，不能同时使用两种范围；一次等待只连接一个服务器，多服务器配置必须选 `--origin`。各商品必须各自拥有完整的 `queue.view` 和 `queue.process` 授权，客户端不会拼接不同授权的权限。
+
+普通 `next` 等待一次，空队列返回 `idle:true`。`--watch` 在当前进程内继续有界长轮询，收到第一批任务就输出一行 JSON 并退出；它不是后台守护进程，也不会自动制作、上传或交付。`--watch` 不接受 `--wait 0`。空等待期间不重复打印商品列表或教程。
+
+返回的每项包含 `product_id`、`grant_id`、已领取的 `job` 与当前 `execution`。按该项的商品、授权和 `job.attempt` 处理；流程任务还要使用当前 `execution.flow_epoch` 与 `execution.action_id`。`execution` 只提供当前动作所需的输入输出定义和参数，不授权读取未来步骤或其他顾客任务。`next` 已领取任务，无需再 `claim`。
+
+网络中断或 Ctrl+C 后，保持相同 profile、服务器、范围、`--wait` 和 `--limit`，重复原命令恢复同一次领取结果。本地申请和服务器响应有 10 分钟恢复窗口；如果返回 `stale:true`，先查看原任务状态，不能把旧结果当成新工作。`--new-request` 明确放弃旧申请，可能领取另一项任务；只有核实原任务与租约后才使用，不能用它掩盖丢失的领取结果。
+
+### 读取与提交当前动作
+
 先读取任务自己的快照，再领取和交付：
 
 ```sh
@@ -120,6 +141,15 @@ extore manage complete JOB_ID --product PRODUCT_ID --output-file result.json --m
 字段必须符合目标任务的 `outputs` 快照，不能照搬商品后来修改的表单。服务商品完成时省略输出；默认单个 `content` 文本任务也可用 `--content-file` 读取 UTF-8 文件。`succeed` 是 `complete` 的别名。
 
 有步骤计划时，用可重复的 `--completed-step STEP_ID` 传入完整已完成集合，进度由服务端计算，不能撤回当前尝试已经完成的步骤。`claim` 和 `progress` 可用 `--steps-file steps.json` 为尚无计划的任务绑定一次 1–30 项步骤计划，格式为 `[{"id":"verify","label":{"zh-CN":"核实资料"}}]`，已有计划不能覆盖。`claim` 可接受多个同商品任务 ID；其他操作逐任务执行，避免把一位顾客的结果交给另一位顾客。
+
+多步流程的一个队列动作不一定是整单的最终交付。读取 `next` 的 `execution` 或当前 `job`，按这次动作的输出定义提交；成功后可能回到顾客输入或确认步骤。所有写操作以当前任务为准：
+
+```sh
+extore manage progress JOB_ID --product PRODUCT_ID --grant GRANT_ID --attempt ATTEMPT --flow-epoch FLOW_EPOCH --action-id ACTION_ID --progress 30 --message "正在检查资料"
+extore manage complete JOB_ID --product PRODUCT_ID --grant GRANT_ID --attempt ATTEMPT --flow-epoch FLOW_EPOCH --action-id ACTION_ID --output-file result.json
+```
+
+这里的大写值取自本次领取结果，不是固定示例数字。`--attempt` 防止覆盖重试后的任务；流程动作的 `--flow-epoch` 和 `--action-id` 防止旧动作交付给新步骤。超时、取消、重试或步骤变化后先刷新状态，不重用旧文件 ID 或动作标识。普通队列任务无需流程选项。
 
 ### 要求重试、拒绝与失败
 
@@ -148,6 +178,17 @@ extore manage upload JOB_ID --product PRODUCT_ID --field deliverable --file ./re
 ```
 
 上传返回文件 ID，把它填入 `complete --output-file` 使用的对应输出字段。文件上传是交付材料，不是安装处理器代码。下载要求新的目标文件，客户端不覆盖已有文件；下载文件使用私有权限保存。服务端的单文件、单卡密和全站存储限制仍适用，默认值见[运行指南](getting-started.md#文件上传与存储)。
+
+`complete` 也可以显式上传本地交付文件，并将返回 ID 填入输出：
+
+```sh
+extore manage complete JOB_ID --product PRODUCT_ID --output-file result.json --file delivery_file=./document.docx
+extore manage complete JOB_ID --product PRODUCT_ID --file previews=./one.png --file previews=./two.png
+```
+
+`--file FIELD=PATH` 的字段必须在当前任务 `outputs` 中，且为 `file`、`image` 或 `images`。前两者只接收一个文件；只有 `images` 可以重复同一字段，按提供顺序组成文件 ID 集合，并受该字段 `max_items` 限制。相同字段不能同时出现在 `--output-file` 与 `--file` 中。流程交付同时带当前 `--attempt`、`--flow-epoch` 和 `--action-id`；所有路径先检查再上传，上传仍不等于完成。
+
+富类型输出仍使用字符串值的 JSON 对象：`select` 写选项的 `value`，`boolean` 写 `"true"` / `"false"`，`image` 写已上传文件 ID，`images` 写包含文件 ID 数组的 JSON **字符串**。例如 `{"approved":"true","previews":"[\"FILE_ID_1\",\"FILE_ID_2\"]"}` 只是结构示例，必须替换为真实的当前任务文件 ID；不要填远程图片 URL、Base64 或虚构附件。可编辑文档与 PPT 使用 `file` 字段交付实际 DOCX/PPTX。
 
 ## 商品、卡密与授权管理
 

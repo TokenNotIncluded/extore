@@ -1,5 +1,7 @@
 # Python SDK
 
+本页保留固定预设处理器和 Webhook v1 的用法。0.8.0 流程私有 Worker 使用独立的 [`FlowScope`、`PrivateWorkerClient`、`verify_flow_event`](python-sdk-v2.md)，不能拿旧 v1 签名更新某个流程节点。图定义和当前节点身份见[任务流程](task-flow.md)。
+
 SDK 位于 `extore/sdk/`，任务和回调模块只使用 Python 标准库。二次开发服务可以使用项目包中的 `extore.sdk`；单独分发时需保留包层级及 `extore/variants.py` 默认规格辅助模块。安装 SDK 不会向主网站添加处理器。
 
 ## 预设自动处理器
@@ -149,9 +151,11 @@ if __name__ == "__main__":
 
 ### 结构化交付结果
 
+交付继续使用字符串对象。`select` 是声明过的选项代码，`boolean` 是 `"true"` / `"false"`，`image` 是本任务上传的文件 ID，`images` 是保持顺序的文件 ID JSON 数组字符串，例如 `json.dumps(file_ids, separators=(",", ":"))`。文件 ID 不能从另一张卡密或另一个节点复制；图片必须通过实际内容校验。普通字段与范围见[协议](protocol.md#输入与输出)，流程 Worker 的附件上传使用 v2 客户端。
+
 新代码使用 `Result.success(output={...}, message=...)` 和 `Client.update(..., output={...})`。`output` 必须是 `dict[str, str]`，键匹配商品定义的 `outputs`，成功时校验必填、类型和未知字段，所有值合计最多 100000 字符。
 
-- 输出类型支持 `text`、`textarea`、`email`、`number`、`url`、`file`。文本保留换行和缩进；邮箱、数字、链接去掉首尾空白。数字必须有限，链接仅允许 HTTP/HTTPS 且不能含用户信息。文件值是该任务当前尝试、对应字段的已上传文件 ID。
+- 输出类型支持 `text`、`textarea`、`email`、`number`、`url`、`file`、`select`、`boolean`、`image`、`images`。文本保留换行和缩进；邮箱、数字、链接去掉首尾空白。数字必须有限，链接仅允许 HTTP/HTTPS 且不能含用户信息。文件值是该任务当前尝试、对应字段的已上传文件 ID。
 - 旧 `content` 参数只兼容唯一输出字段为 `content` 的商品。同时传 `content` 与 `output` 时，两者的 `content` 值必须相同。
 - 服务型商品 `outputs=[]`，成功只返回状态和说明，不传交付结果；非空 `output` 会被拒绝，旧 `content` 会被忽略。
 - 普通任务状态和 Webhook 事件不包含交付结果。授权领取接口返回 `{content, output, files?}`，其中 `content` 是兼容文本；一次性领取清除两种结果，附件每文件下载时独立消费一次额度。立即销毁同时清除结果与该卡密全部输入、输出文件。

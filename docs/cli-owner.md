@@ -54,7 +54,7 @@ extore admin complete JOB_ID --product PRODUCT_ID --output-file result.json
 
 默认商品和队列列表使用摘要，不反复输出长教程、顾客参数或完整字段结构。`queues` 默认聚合全店商品的 active 队列，`--product` 可限定一个；写操作仍明确指定商品。用 `job` 按需读取任务输入输出快照和步骤 ID。
 
-`jobs / job / claim / progress / complete / succeed / fail / retry / request-retry / request-changes / reject / files / upload / download` 沿用[商品队列命令](cli.md#处理一个任务)的参数。`--view active / processed / all`、`--state`、`--limit` 用于列表；步骤计划用 `--steps-file`，完成集合用可重复的 `--completed-step`。
+`jobs / job / claim / progress / complete / succeed / fail / retry / request-changes / reject / files / upload / download` 提供本店队列操作。`--view active / processed / all`、`--state`、`--limit` 用于列表；步骤计划用 `--steps-file`，完成集合用可重复的 `--completed-step`。
 
 上传交付文件后，用返回的 ID 填入输出 JSON，再明确完成任务：
 
@@ -63,7 +63,11 @@ extore admin upload JOB_ID --product PRODUCT_ID --field deliverable --file ./res
 extore admin complete JOB_ID --product PRODUCT_ID --output-file result.json
 ```
 
-上传不会自动标记成功。要求重试用 `request-retry --reason … --reason-type external --retry-mode reuse`，或指定 `customer_input/revise` 要求补充资料；旧 `request-changes` 默认仍为修改后重提。拒绝用 `reject --reason`。这些操作都要求自己已领取的 processing 队列任务，顾客能看到原因，自动处理任务仍不能由队列操作覆盖。
+上传不会自动标记成功。当前店主入口用 `request-changes JOB_ID --product PRODUCT_ID --reason …` 要求顾客修改后重提，用 `reject --reason` 拒绝；两者要求自己已领取的 processing 队列任务，顾客能看到原因，自动处理任务仍不能由队列操作覆盖。需细分 `customer_input/external/processor` 与 `revise/reuse` 时，使用单独授权的[商品处理 CLI](cli.md#要求重试拒绝与失败) `request-retry`。
+
+0.8 的原子等待 `next --watch`、当前流程动作的 `--attempt/--flow-epoch/--action-id` 与 `complete --file FIELD=PATH` 属于 `extore manage`；当前 `admin` 快捷命令没有这些选项。店主身份与商品处理设备分开授权，不能把全店设备凭证替代成商品设备或拼接权限。AI 执行流水线时，先申请对应商品范围，再按 [当前动作](cli.md#读取与提交当前动作)处理。
+
+富类型交付可通过店主现有 `upload` 上传真实文件，再在 `complete --output-file` 中填写返回 ID。值仍是字符串：`select` 写定义中的选项代码、`boolean` 写 `"true"` / `"false"`、`image` 写单个文件 ID、`images` 写 JSON 数组的字符串。文件必须属于当前任务的字段；多张图片每张分别上传，数量服从 `max_items`。图片支持 PNG、JPEG、WebP；不能用图片 URL 或 Base64 代替附件。
 
 ## 全店命令
 
@@ -95,6 +99,8 @@ extore admin complete JOB_ID --product PRODUCT_ID --output-file result.json
 | `platform settings get / update` | 仅平台管理员：注册开关与加密 SMTP |
 | `platform shops list / create / invite / enable / disable / quota` | 仅平台管理员：创建店铺、发送邀请、启停和附件额度 |
 | `maintenance status / policy / cleanup` | 本店保留策略与清理；cleanup 默认预览，`--apply` 才执行 |
+| `proxy identities list / create` | 本店签名发行身份；create 需 `--name`，不导出私钥 |
+| `proxy routes list / create / import / export / enable / disable / default` | 固定兑换目的地及本店启用、默认发行设置；平台 root 必须明确 `--shop` |
 
 本店 `sessions`、`devices`、`events`、`audit`、`processors` 和 `api` 可省略 `--product`；队列写入、已有商品修改、制卡等明确指定商品。平台管理员跨店创建商品或配置档案时显式选店，不合并店主身份；相关输入、确认和命令示例见[多店与账号](shops.md)。保存了多台服务器或设备时，用 `--origin SERVER`、`--grant DEVICE_ID` 选择，避免隐式选择。
 
@@ -117,6 +123,30 @@ extore admin product get --product PRODUCT_ID --output ./private-product.json
 `product create` 输入为完整 Product 对象，字段与默认值见[商品配置](protocol.md#商品配置)。`product update` 则是顶层局部修改，内部读取并保留未提供配置；显式传入的数组或对象整体替换。已经发行的自动商品仍受处理方式、字段结构和凭证冻结规则限制，店主权限不会绕过这些业务约束。
 
 普通标准输出与 `--detail` 都脱敏认证凭证和秘密配置。店主特例是 `product get --output NEWFILE`：显式导出到新 0600 文件时可包含获授权的 Webhook 配置，不要求商品管理命令的 `--include-secrets`；`products --output` 也可导出。处理器配置档案、SMTP、TOTP 的秘密始终不在商品导出或读取接口里。制卡、创建管理链接或快速创建时，一次性凭证自动保存到私密文件，标准输出只显示保存路径与摘要。
+
+## 配置签名兑换路由
+
+在发行站 B 创建本店身份和指向本站的发行路由：
+
+```sh
+extore admin proxy identities create --name "本店发行"
+extore admin proxy routes create --name "本站兑换" --identity IDENTITY_ID
+extore admin proxy routes default ROUTE_ID
+extore admin proxy routes export ROUTE_ID --output ./route-public.json
+```
+
+在入口站 A 使用本店独立设备登录，核对 B 的目标地址和公钥后导入：
+
+```sh
+extore admin proxy routes import --json-file ./route-public.json
+extore admin proxy routes list
+extore admin proxy routes disable ROUTE_ID
+extore admin proxy routes enable ROUTE_ID
+```
+
+平台管理员在每条命令上加 `--shop SHOP_ID`；店主可省略，始终限制在自己的店铺。`export` 只提供 `route_id`、`issuer_id`、`name`、`origin`、`path`、`public_key` 六项公开字段，可交给另一站的 `import`；没有卡密、私钥、访问凭据或秘密摘要。目标 origin 必须是公网 HTTPS，当前发行路径为 `/`，不是任意重定向 URL。
+
+同一公开路由可由不同店铺分别绑定，但目标、标识和公钥必须完全一致，不允许覆盖成另一个目标。默认发行设置只作用于本店以后新发的卡，不改写旧卡；导入的下游路由不能成为本店发行默认。发行站可用 `proxy routes default LOCAL_ROUTE_ID --clear` 停止默认包装新卡。切换目标时创建新路由，停用不会重写现有卡密。完整操作说明见[兑换路由](proxy-config.md)。
 
 ## 记录维护
 

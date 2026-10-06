@@ -1,4 +1,6 @@
-# 协议 v1
+# 接口与事件协议
+
+既有通知事件与 `/api/callbacks/{product_id}` 保持 v1。0.8.0 新增的流程私有 Worker 使用独立 v2 签名；任务流程定义本身为 `version:1`，三者不是同一个版本号。
 
 所有 JSON 使用 UTF-8。API 错误为 `{"detail":"说明"}`，HTTP 400/422 是输入错误，401/403 是认证或权限，404 是不存在，409 是状态冲突，410 是凭证、卡密或领取已失效，408 是上传超时，413 是上传大小或数量超限，429 是限流，507 是服务器文件存储额度或磁盘空间不足。外部平台不访问商家会话接口。
 
@@ -27,6 +29,10 @@
 
 ```mermaid
 stateDiagram-v2
+  [*] --> waiting: 流程卡准备任务
+  waiting --> queued: 当前输入提交，进入处理节点
+  processing --> waiting: 节点完成，等待顾客输入或确认
+  waiting --> succeeded: 到达成功结束节点
   [*] --> queued: 提交兑换
   queued --> processing: 管理者领取 / worker / 平台进度
   queued --> succeeded: 平台直接完成
@@ -39,6 +45,8 @@ stateDiagram-v2
   failed --> queued: 允许重试且未超过次数
   succeeded --> destroyed: 顾客销毁
 ```
+
+`waiting` 用于流程的待开始、顾客输入和展示确认，不能作为商品队列的可领取任务。顾客等待状态不等于处理者在运行。流程中的一个处理节点成功也不等于整单交付，正常成功路径须到成功结束节点才交付；取消、拒绝、处理超时及不可安全继续的失败可直接终止，不必走到配置的 end；详细状态与 `flow_epoch` / `revision` 规则见[任务流程](task-flow.md)。
 
 任务 ID 在失败重试或退回补充后保持不变，`attempt` 从 1 递增。平台必须以稳定任务 ID 去重外部交付，以 `(task_id, attempt)` 区分状态回调。旧尝试的回调 HTTP 409。终态不能覆盖；外部回调重复报告相同的成功或失败终态时返回当前结果，不修改内容。有步骤计划时，进度由已完成步骤计算，处理中最高 99%，成功强制为 100%；没有步骤计划时保留原来的百分比接口，处理中进度不能倒退。
 
@@ -163,13 +171,28 @@ Content-Type: application/json
 }
 ```
 
-代码名匹配 `[a-z][a-z0-9_]{0,39}`，输入和输出各自唯一、各最多 30 个。类型支持 `text` / `email` / `url` / `textarea` / `number` / `file`，输入值最多 10000 字符。未知字段拒绝；服务端验证必填、邮箱、HTTP/HTTPS 链接与有限数字。`file` 的值为上传后返回的文件 ID，不能用任意字符串、路径或 URL 代替。字段名称和 Markdown 描述按当前语言展示，`collapsed` 决定教程默认折叠或展开。
+代码名匹配 `[a-z][a-z0-9_]{0,39}`，输入和输出各自唯一、各最多 30 个。类型支持 `text` / `email` / `url` / `textarea` / `number` / `file` / `select` / `boolean` / `image` / `images`，输入值最多 10000 字符。未知字段拒绝；服务端验证必填、邮箱、HTTP/HTTPS 链接与有限数字。值继续使用字符串，字段名称和 Markdown 描述按当前语言展示，`collapsed` 决定教程默认折叠或展开。
+
+| 类型 | 值与定义 |
+| --- | --- |
+| `select` | 值为已定义的选项代码。普通商品配置 `options` 为 1–100 项 `{value,label}`；代码为最多 100 字符的稳定 ASCII，匹配 `[A-Za-z0-9][A-Za-z0-9_.-]{0,99}`，显示名称使用 i18n 文本。流程节点最多 50 个选项。 |
+| `boolean` | 字符串 `"true"` 或 `"false"`；可选字段还允许空字符串。`"false"` 是有效回答，不能当作未填写。 |
+| `file` / `image` | 服务端上传后返回的一个文件 ID。`image` 必须是服务端实际解码通过的静态 PNG、JPEG 或 WebP，不能用路径、外部 URL 或 data URL 替代。 |
+| `images` | 字符串中的 JSON 文件 ID 数组，例如 `"[\"UUID_1\",\"UUID_2\"]"`。保留顺序、拒绝重复，默认最多 10 张，`max_items` 可设 1–20。可选空集合规范为 `"[]"`。 |
+
+图片每张分别上传、计量和绑定；每张最多沿用当前单文件上限（默认 20 MiB），最多 1600 万像素，拒绝 SVG、GIF、动画和无效容器。服务端保留原文件字节，不自动删除 EXIF 等元数据。`sensitive:true` 仅允许任务流程的文本输入，不能设在普通商品参数或交付输出上；短期输入的显示与有效期规则见[任务流程](task-flow.md#短期敏感输入)。
 
 内容商品必须有输出字段。省略 `outputs` 时默认一个必填的 `content` 文本字段，兼容旧商品。服务商品 `delivery="service"` 必须使用 `outputs=[]`，仅返回状态，不产生交付内容。
 
 每个任务在首次提交时冻结自己的 `parameters` 与 `outputs`。队列商品后续可调整输入输出定义，包括新增文件字段，修改只影响尚未创建任务的卡密；已有任务的提交重试、结果校验、领取和附件均使用原定义。旧任务首次读取时补存快照，编辑商品前会先冻结尚未绑定的旧任务，避免套用新定义。
 
 发过卡密的商品仍不能改变处理方式、交付类型、查看规则、处理器 ID 或签名密钥。Webhook 商品还不能改变输入输出的代码名、类型或必填规则，仍可改善名称、Markdown 和折叠偏好；预设处理器的字段由代码定义，不能自改。需要改变这些冻结设置时创建新商品。
+
+### 可选任务流程与文本库存
+
+`task_flow=null` 保留普通兑换。配置的声明式流程包含输入、处理、展示和结束节点，可使用有限条件分支、字段引用与超时路径；它不能包含代码、模板执行、命令、任意处理器选择或动态联网权限。图和对应处理配置在卡密发行时冻结，后续编辑只影响之后发行的卡密；缺少快照的旧卡不会继承新图。见[完整定义与示例](task-flow.md)。
+
+`mode="stock"` 为一卡一文本，`delivery="content"`，不接收顾客参数、不进入处理队列、不运行处理器或 task_flow。管理者选择规格，通过 `POST /api/manage/cards/import-text` 或 `/api/admin/cards/import-text` 导入 UTF-8 文本；每个非空行绑定一张新随机卡密，本次相同文本行去重，后续可明确重复补货。导入额度、原文返回与领取规则见[一卡一文本](text-stock.md)。
 
 ### 处理步骤与联系邮箱
 
@@ -243,6 +266,8 @@ Content-Type: application/json
 复杂文档与 PPT 商品使用队列，由外部 AI 通过已授权 CLI 读取需求、处理材料并上传成品；它们不在这个内置离线运行环境中生成。隔离不能防止处理器把它有权读取的秘密故意放入输出，所以仍不接受任意商家上传脚本。升级商品处理器需审核源码与字段定义，再更新主仓库固定提交并发布程序包。未来需要联网或写盘的处理器须另行设计受控服务与 cgroup 资源管理；支付类能力还须按店铺校验目标、额度和幂等键。当前没有这些 broker，也不允许通过工作流打开直连付款。其他自动化可使用独立的 HTTPS 公网 Webhook 服务。
 
 ## Webhook 事件
+
+本节是兼容的 v1 通知。流程私有执行内容走加密的独立派发记录，普通事件、事件查询和重投不携带该执行信封或短期敏感值。只有按当前节点授权的私有 Worker v2 能取得该节点明确映射的输入，见[私有 Worker 协议](private-worker.md)。
 
 商品配置 `webhook_url` 和 `webhook_secret`（至少 32 字符）。所有处理方式都可配置通知 URL；只有 `webhook` 处理方式接受外部状态回调。交付内容不写入事件；用户参数仅在 `redemption.requested` 携带。
 
@@ -327,6 +352,14 @@ Content-Type: application/json
 
 签名算法与事件相同。服务器持久化 nonce，在有效签名时间窗口内拒绝重放；相同 nonce 再到达 HTTP 409。商品不能跨商品更新任务，旧 attempt 或已销毁任务返回 409。签名不依赖浏览器 Origin 或 Cookie。
 
+### 流程私有 Worker v2
+
+流程处理节点的派发与回调使用独立 v2，不将全图、其他节点输入或短期敏感值放入 v1 事件。执行身份为 `{shop_id,product_id,job_id,attempt,node_id,flow_epoch,action_id}`；服务器按发行快照取得 URL、签名密钥和当前节点范围。方向、准确 HTTPS audience、HTTP 方法、实际路径、时间、nonce、正文 SHA-256 及全部身份字段都被签名。
+
+Worker 使用 `POST /api/callbacks/v2/{product_id}/{job_id}/result` 回调，JSON 为 `{version:2,result_id,update}`。`update.attempt` 必须与已验签执行一致；节点、flow_epoch 和 action_id 由已验签请求头中的 scope 决定，若正文提供 flow_epoch 或 action_id 也必须一致，否则返回 409。SDK 自动附带对应更新字段。有效范围内同一结果重试使用相同 result_id 和相同正文、新的传输 nonce；相同 ID 改正文返回 409。上传和下载另有按节点字段限制的签名接口，不能用普通管理 Cookie 或 CLI Bearer 代替。
+
+这里的「私有」指商家自己的处理服务，目标仍须是 HTTPS 公网地址；不允许私有 IP、重定向、查询参数或由顾客输入改变目标。完整签名编码、附件、重放和超时规则见[私有 Worker v2](private-worker.md)，SDK 用法见[SDK v2](python-sdk-v2.md)。
+
 ## 顾客接口
 
 顾客浏览器的写入请求需要配置的 `Origin`，防止跨站操作。
@@ -340,20 +373,42 @@ Content-Type: application/json
 | `POST /api/receipt` | `{token}` | 商品、发行规格 `variant` 与状态；退回补充时包含原 `params` 供顾客修改，不返回交付结果 |
 | `POST /api/receipt/reveal` | `{token,card_id?}` | 显式领取 `{output,content,files?}`；`content` 为兼容可读文本，一次领取原子消费 |
 | `POST /api/receipt/destroy` | `{token,card_id?}` | 永久关闭应用内交付内容 |
+| `POST /api/task-flow/start` | `{token,card_id?,flow_epoch,expected_revision}` | 明确开始当前 input 或初始 display，返回当前 job_view；开始前不展示输入题目或计时 |
+| `POST /api/task-flow/answer` | 同上，另加 `values` 字符串对象 | 提交当前输入，按冻结路径进入下一步 |
+| `POST /api/task-flow/continue` | `{token,card_id?,flow_epoch,expected_revision}` | 明确离开当前展示步骤 |
+| `POST /api/task-flow/cancel`、`POST /api/task-flow/restart` | 同上 | 取消或在规则允许时重新开始流程，旧 epoch 失效 |
 
 不能根据商品 UUID 直接打开非公开商品。兑换凭证、商品管理链接和卡密都是秘密，不记录在分析工具中，不植入第三方前端脚本。状态、任务列表与事件不自动返回私密结果。一次领取会清除结构化 `output` 和兼容 `content`，附件另按每文件一次下载处理；销毁会同时清除结果及该卡密的全部输入、输出附件。销毁只关闭 Extore 内的领取，不撤销上游资源链接。
 
-### 多张卡密共用领取链接
+### 旧批量接口兼容
 
-`POST /api/exchange` 的 `code` 可包含最多 30 张同商品卡密，用换行、空格、逗号或分号分隔，重复卡密只计一次。完整输入最多 8000 字符；原来单张卡密用空格替代连字符的格式保持兼容。原生 WebMCP 的 `extore_code_verify` 也支持同一批量输入。混入其他商品、无效或不可兑换的卡密时整批拒绝，不创建领取链接。
+`POST /api/exchange` 的 `code` 可包含最多 30 张同商品卡密，用换行、空格、逗号或分号分隔，重复卡密只计一次。完整输入最多 8000 字符；原来单张卡密用空格替代连字符的格式保持兼容。网页与原生工具的调用语义见各自的[WebMCP 说明](webmcp.md#多张卡密兑换)，不要将新 partial 端点与本节旧整批端点混用。混入其他商品、无效或不可兑换的卡密时整批拒绝，不创建领取链接。
 
 多张卡密响应为 `{token,batch:true,product,items}`；`POST /api/receipt` 返回相同的批量状态结构。每项包含 `card_id`、末尾 `suffix`、发行规格 `variant`、自己的 `product` 定义与已有 `job`。未提交的卡密使用当前商品输入定义，已有任务和重试使用自己的结构快照。一个链接覆盖这批卡密，有效期 30 天，不返回原卡密。
 
 提交使用 `{token,items:[{card_id,params}]}`，每项单独填写参数；允许只提交部分卡密，整次请求在同一事务中提交或回滚。重复 `card_id` 或不属于该链接的卡密会被拒绝。领取、销毁、上传输入文件和下载交付文件均传入目标 `card_id`；未选择卡密或跨链接访问会被拒绝。单张卡密继续使用原有 `{token,params}` 请求。
 
+### 逐卡校验与部分提交
+
+0.8.0 的网页与顾客 CLI 多卡操作使用独立 `/api/batch/*` 端点，保留上述旧接口的整批语义；CLI 显式 `--atomic` 使用旧兼容模式。不同商品、规格，乃至同站不同店铺的有效卡密可以共用一个领取链接；新验码和提交仍逐张检查商品启用状态与卡密归属，卡密不能借此跨站试探或读取其他卡的附件。店铺停用后，原链接中已受理任务仍按原规则保留只读状态与交付，不能继续提交或上传。
+
+| 接口 | 请求与结果 |
+| --- | --- |
+| `POST /api/batch/exchange` | `{code}`，最多 30 个输入项、8000 字符。返回 `{batch:true,partial:true,token,items,summary}`；全无可接受项时 HTTP 200 且 `token:null`。 |
+| `POST /api/batch/receipt` | `{token}`，逐卡读取已有批量授权，返回 `{batch:true,partial:true,items,summary}`，不回显 token。旧批量 token 兼容，单卡旧授权返回 404。 |
+| `POST /api/batch/redeem` | `{token,items:[{card_id,params}]}`，每卡显式独立参数对象；返回逐卡状态、`results` 和 `submission_summary`。一项错误在该卡的保存点回滚，不影响其他成功项。 |
+
+校验项包含 `index`（原输入位置，从 0 开始）、安全尾号 `suffix`、`status`、`accepted`、`error` 与 `http_status`，仅 accepted 项包含 card_id、product、variant、job，不回传完整卡密。`status` 为 `valid`、`used`、`needs_retry`、`invalid` 或 `duplicate`；重复项另带 `duplicate_of`。`used/accepted=true` 表示该卡已有可查看任务，不是可以新建第二单；一次性卡已用不能重新建立授权，原领取链接仍按原查看规则领取。
+
+提交的 `results` 按请求位置返回 `submitted`、`unchanged`、`error` 或 `duplicate`，以及安全错误与 HTTP 状态；card_id 只在属于当前链接时返回，job 只在成功项返回。`submission_summary` 是 `{total,succeeded,failed}`，调用方必须检查每项结果，不能把 HTTP 200 当作全部成功。请求整体不是对象、token 无效或 items 超过上限等错误仍会拒绝整个请求。
+
+网页按商品、规格和完全兼容的冻结输入定义分组，相同组的非附件要求只填一次；已保存内容不同的卡分开。每张的附件分别上传、绑定、计量，不复用另一张的文件 ID。流程卡提交 `params:{}` 只创建 waiting 任务；必须由顾客逐卡显式 start，不能在粘贴、验码或批量准备时开始全部计时。一次领取、销毁或已撤销卡的单项失败不遮住其他卡的状态。
+
+签名路由卡先在浏览器本地验签和分组，明确选择目标站点后才向发行站提交，不将完整下游卡密发给入口站后端。协议见[兑换路由](proxy-routing.md)。CLI 支持范围以当前[顾客命令](cli-customer.md)为准，不能把网页的新 partial 语义套到仍使用旧端点的调用方。
+
 ## 输入与交付附件
 
-附件工作流面向队列商品：商家在 `parameters` 或 `outputs` 中定义 `type="file"`，顾客或处理者上传后，把返回的文件 ID 放入对应字段。上传文件作为数据保存，不安装或执行代码；预设自动处理器的字段仍由审核代码定义。
+附件工作流面向队列与流程：商家在输入或输出中定义 `file`、`image` 或 `images`，上传后填入对应文件 ID 或有序 ID 数组字符串。上传文件作为数据保存，不安装或执行代码；预设自动处理器的字段仍由审核代码定义。流程附件另按节点、尝试、flow_epoch 和当前字段校验，上传不能跳过当前阶段。
 
 | 接口 | 认证与请求 | 结果 |
 |---|---|---|
@@ -365,7 +420,9 @@ Content-Type: application/json
 | `GET /api/manage/files/{file_id}/download` | 管理会话，`queue.view`，同商品 | 有权访问任务的附件下载，不消费顾客一次下载额度 |
 | `POST /api/files/download` | JSON：`{token,file_id,card_id?}` | 已显式领取的输出附件下载 |
 
-上传只能包含表中规定的字段和一个文件。默认单文件 20 MiB、每张卡密现存附件合计 100 MiB、最多 100 个，可通过服务器环境变量降低或调整相应额度；当前单文件最高 20 MiB。超限返回 413。输入文件必须属于这张卡密及对应输入字段；提交后不能替换，只有允许失败重试或处于退回补充时才能上传或重用输入。输出文件必须属于当前任务、尝试和对应输出字段，只有领取了该队列任务的处理者可上传。成功提交后绑定所选附件，未选草稿会清理；新尝试删除旧输出，保留可重用输入直到重新绑定。
+流程顾客上传还必须带 multipart 文本字段 `flow_epoch`、`expected_revision` 与 `node_id`，与当前 input 一致；流程管理上传必须带 `flow_epoch`，另可带 `action_id`，提供时须与当前 process 一致。这些字段从最新状态取得，不能用旧题目的编号。私有 Worker 使用独立 v2 签名上传，不使用这套管理表单。
+
+上传只能包含规定的字段和一个文件。默认单文件 20 MiB、每张卡密现存附件合计 100 MiB、最多 100 个，可通过服务器环境变量降低或调整相应额度；当前单文件最高 20 MiB。超限返回 413。输入文件必须属于这张卡密及对应输入字段；普通单次兑换提交后不能替换，只有允许失败重试或需要重试时才能上传或重用输入，流程则只接受当前 input 字段。输出文件必须属于当前任务、尝试和对应输出字段，只有领取了该队列任务的处理者可上传。成功提交后绑定所选附件，未选草稿会清理；新尝试删除旧输出，保留可重用输入直到重新绑定。
 
 新店默认附件额度 1 GiB，全站逻辑容量默认 5 GiB；店铺与全站均计入保留的 BLOB 和正在接收的实际文件字节。平台管理员调整单店额度不能低于该店当前存储与上传占用，也不能超过全站额度。同时最多 4 个上传，单次接收期限 5 分钟，实际磁盘至少保留 512 MiB 并另留写入空间。额度或磁盘不足返回 507，并发超限返回 429，接收超时返回 408。临时文件与数据库位于同一受检查的文件系统；所有容量和期限配置见[运行指南](getting-started.md#文件上传与存储)。
 
@@ -373,7 +430,7 @@ Content-Type: application/json
 
 `reveal` 只释放本次结果实际引用的输出附件，返回文件描述（含 `id,field_key,filename,content_type,size` 等）。顾客下载还必须提交有效兑换凭证；文件 ID 本身没有下载权限。凭证只放在 POST JSON 或 multipart 请求体，不能拼成 GET 下载链接或 URL 查询参数。管理者 GET 下载依赖其浏览器会话或 CLI Bearer，不使用顾客凭证。
 
-`repeat` 允许重复下载；`once` 的每个文件第一次下载在事务内清除文件内容，第二次返回 410，多文件各有独立的一次额度。应先保存 `reveal` 返回的文件 ID，再逐个下载；再次 `reveal` 不能恢复已消费的结果或附件。销毁删除该卡密全部附件，包括顾客上传的输入。下载按附件返回，不以内联网页方式渲染上传内容。
+`repeat` 允许重复下载；`once` 的每个文件第一次下载在事务内清除文件内容，第二次返回 410，多文件各有独立的一次额度。应先保存 `reveal` 返回的文件 ID，再逐个下载；再次 `reveal` 不能恢复已消费的结果或附件。销毁删除该卡密全部附件，包括顾客上传的输入。普通文件作为下载附件，图片展示也需有效授权；网页明确预览一次性图片时消费一次额度，然后从本地 Blob 预览和保存，不再次请求服务器。切换卡密、页面或销毁会清理本地 Blob URL。
 
 ## 商家接口
 
@@ -785,9 +842,13 @@ body_sha256
 
 ## 商品队列
 
+获批的商品 CLI 设备还可使用 `POST /api/manage/next` 原子领取，`wait_seconds` 为 0–25、limit 为 1–10。每个商品设备对完整请求范围签名，不能把不同授权的权限拼接成一份；等待时不占数据库事务，醒来重新校验设备、授权祖先、店铺、商品和可领取节点。请求 ID、范围和结果身份有 10 分钟恢复回执，响应丢失不应另领一单。`next --watch` 由 CLI 继续短等待，空队列不输出给模型；完整 CLI 用法与显式放弃恢复请求的边界见[AI 队列处理](automation-cli.md)。
+
+流程任务只让处理者读取当前处理节点明确映射的 inputs 和 outputs，写入另带 flow_epoch、action_id；旧节点、旧尝试或失效领取不能覆盖新结果。顾客输入和展示阶段不参与原子领取，处理节点成功后按图进入下一阶段，成功 end 才形成整单交付；超时、取消或不可安全继续的失败可直接终止。
+
 队列按商品分开。`GET /api/manage/products` 返回有权管理的商品概要；商品管理链接只得到授权商品。商家查询 `GET /api/manage/jobs?product_id=<商品 UUID>` 必须指定商品，链接持有人可省略并默认使用授权商品；查看队列需要 `queue.view`。默认任务列表包含各任务冻结的输入输出定义、规格、步骤及安全附件描述，不应使用商品当前表单去填写旧任务结果。`compact=true` 改为摘要列表，不返回顾客参数或输入输出结构，只带状态、进度、规格、步骤和附件数量/容量等处理元数据；CLI 的 queues/jobs 使用此视图。需要资料时通过 `job_id` 精确读取任务详情，省略 compact 或使用 compact=false。
 
-队列默认 `view=active`，返回排队、处理中、失败待核实与退回补充的任务。`view=processed` 返回已完成、已销毁与已拒绝任务，`view=all` 返回全部历史；记录保留，切换视图不会删除任务。显式 `state` 优先按指定状态查询；通过 `job_id` 精确定位时可读取历史任务，商品权限限制保持不变。网页和原生 WebMCP 的默认列表都省略已处理任务，避免重复传递历史参数。
+队列默认 `view=active`，返回等待顾客动作、排队、处理中、失败待核实与需要重试的任务。`view=processed` 返回已完成、已销毁与已拒绝任务，`view=all` 返回全部历史；记录保留，切换视图不会删除任务。显式 `state` 优先按指定状态查询；通过 `job_id` 精确定位时可读取历史任务，商品权限限制保持不变。网页和原生 WebMCP 的默认列表都省略已处理任务，避免重复传递历史参数。
 
 `queue_ahead` 统计同商品中排序在本任务前的 `queued` 与 `processing` 任务，顺序为 `(created,id)`。活跃任务的 `queue_position=queue_ahead+1`，终态为 0；其他商品不影响排位。这是当前队列位置，不估算完成时间。顾客状态同时返回 `steps=[{id,label,done}]`、`completed_steps`、`message`、`support_email` 与 `variant`。
 

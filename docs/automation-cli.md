@@ -14,7 +14,7 @@ extore manage next --all --origin https://extore.example --wait 25 --limit 1
 extore manage next --all --origin https://extore.example --watch
 ```
 
-CLI 内部继续等待，每次服务端等待最多 25 秒；空队列不输出给模型。领取后只返回当前任务和当前处理节点的需求、输入/输出定义、`flow_epoch`、`action_id`，以及该任务应使用的本地 `grant_id`。默认一次一单，`--limit` 最多 10。无需重复读取商品介绍、历史任务或整个队列。
+CLI 内部继续等待，每次服务端等待最多 25 秒；空队列不输出给模型。拿到首批任务后输出并退出，`--watch` 不是后台守护进程；持续 Bot 在处理完这一批后再次执行该命令。领取后只返回当前任务和当前处理节点的需求、输入/输出定义、`flow_epoch`、`action_id`，以及该任务应使用的本地 `grant_id`。默认一次一单，`--limit` 最多 10。无需重复读取商品介绍、历史任务或整个队列。
 
 服务端短事务原子领取；等待时不占数据库事务，醒来再次检查设备、全部授权祖先、店铺与商品范围。并发 AI 不会领取同一单。不同 AI 建议分别申请设备授权、使用各自私有 CLI profile，便于审计与撤销。
 

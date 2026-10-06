@@ -37,11 +37,13 @@ Extore 接手支付之后的兑换与交付：验证卡密，将顾客带到对�
 | 能力 | 说明 |
 | --- | --- |
 | 商品与规格 | 多商品、SKU 档位、参考价与属性；卡密绑定商品和规格。支持私有商品、快速模板、中英文参数名称与 Markdown 教程。 |
-| 卡密管理 | 使用密码学安全随机数生成卡密，批量发行、复制与下载；按商品、规格、批次和状态跟踪库存与生命周期。原卡密只在发行时显示。 |
-| 独立商品队列 | 每个商品独立领取、筛选和批处理任务，显示真实步骤、处理消息与商品内排位。人或获授权的 AI 使用同一套接口。 |
-| 灵活交付 | 链接、文本、账户信息或文件，也可只返回服务状态。支持一次领取、重复查看、失败重试、退回补充、附原因的拒绝，以及顾客主动销毁内容。 |
+| 卡密管理 | 密码学安全随机卡密，按商品、规格、批次和状态跟踪。文本库存可按非空行生成一卡一文本，复制或下载新卡及对应表。原卡密只在发行时显示。 |
+| 独立商品队列 | 每个商品独立处理，显示真实步骤、消息与排位。获授权的 AI 可用 `next` 原子领取当前任务，`--watch` 在客户端等待，空队列不反复送进模型。 |
+| 分步任务流程 | 商品可定义输入、处理、展示和结束节点，引用前一步结果并配置分支与超时。先准备任务，再逐卡明确开始；已有卡密固定发行时的流程与处理配置。 |
+| 灵活交付 | 文本、链接、文件、图片与有序图片集合，支持下拉选项和是／否字段，也可只返回服务状态。一次领取、重复查看、需要重试、附原因的拒绝及主动销毁沿用同一套规则。 |
+| 批量兑换与路由 | 网页与 CLI 校验多张卡密，按商品、规格及兼容的冻结输入分组；坏码不挡有效卡，附件每卡独立。签名路由卡先本地验签，再交给固定发行站。 |
 | 权限与认证 | 平台管理员使用多个 Passkey；店主可用邮箱密码、可选 TOTP 或多个 Passkey 登录。注册默认关闭，由平台管理员邀请店主。商品链接默认 1 次浏览器登录与 1 个 CLI 绑定，支持委派和会话审计。 |
-| 自动化与二次开发 | 开源商品处理器、店铺加密配置与工作流变量、只写秘密、冻结运行限制、代码定义输入输出与步骤、Python SDK、签名事件与回调；原生定义 **49 个 WebMCP 工具**，按页面、身份与权限动态提供。 |
+| 自动化与二次开发 | 开源商品处理器、店铺加密配置、只写秘密与冻结运行限制；Python SDK、兼容的 Webhook v1 和按节点授权的私有 Worker v2，原生 WebMCP 工具按页面、身份与权限动态提供。 |
 | 命令行操作 | `manage` 管理商品授权，`customer` 兑换与领取，`admin` 用固定账号的设备管理本店或平台；默认精简输出，凭证保存到私密文件。AI 主动申请单商品或当前整店队列权限，店长用设备码审批，可追加权限、集中审计与撤销。 |
 | 界面与存储 | SQLite 持久化任务、事件和投递重试；单文件、单卡、单店与全站附件额度，磁盘余量保护；撕纸与分段虚线界面，明暗和语言默认自动。 |
 
@@ -50,7 +52,7 @@ Extore 接手支付之后的兑换与交付：验证卡密，将顾客带到对�
 ## 兑换流程
 
 ```text
-卡密 → 对应商品与规格 → 填写参数 / 上传材料 → 处理任务 → 领取内容 / 查看结果
+卡密 → 对应商品与规格 → 填写参数 / 分步提交 → 商品队列或处理器 → 领取内容 / 查看结果
 ```
 
 1. 商家创建商品，配置输入、输出、处理方式和查看规则，按规格发行卡密。
@@ -59,6 +61,10 @@ Extore 接手支付之后的兑换与交付：验证卡密，将顾客带到对�
 4. 队列管理者、预设处理器或外部平台完成任务，顾客通过领取链接查看进度和结果。
 
 队列商品可修改未来任务的输入输出，已有任务保留各自的结构快照。自动商品发行卡密后锁定处理器和输入输出结构。SKU 的 `price` 字段是参考价，仅供外部商城配置参考。Extore 只负责兑换与交付，不收款；实际售价、收款和销售库存由商家在上游平台管理。
+
+可选的[任务流程](https://github.com/TokenNotIncluded/extore/blob/main/docs/task-flow.md)把顾客输入、处理和展示串起来。验证或批量准备不会替顾客开始计时；顾客只看到当前允许的题目和明确展示的结果。流程在发行卡密时固定，旧卡没有流程快照时继续走原来的兑换方式。短期敏感输入有有效期，只传给当前获授权的处理节点，不能放到展示、普通事件或最终交付中。
+
+[一卡一文本](https://github.com/TokenNotIncluded/extore/blob/main/docs/text-stock.md)适合已有交付内容的库存；[签名兑换路由](https://github.com/TokenNotIncluded/extore/blob/main/docs/proxy-routing.md)适合多个 Extore 站点共用入口。普通旧卡密不会被拿去逐个试探其他站点，入口站后端不接收下游路由卡密。
 
 需要重试时，处理者须说明原因并选择「修改后重提」或「原资料重试」；外部故障也能作为原因。拒绝处理会禁用卡密。原任务、规格和步骤计划保留，重新开始后进度归零。
 
@@ -118,6 +124,9 @@ uv run extore worker
 extore manage login --device-code --origin https://extore.example.com --product PRODUCT_ID
 extore manage queues --all
 
+# 原子领取；持续等待由 CLI 完成，不反复把空队列交给模型
+extore manage next --all --origin https://extore.example.com --watch --limit 1
+
 # 本店当前全部队列商品：先申请，再由店长核对商品清单和权限
 extore manage login --device-code --origin https://extore.example.com --shop SHOP_ID --pipelines-all --no-wait
 
@@ -139,6 +148,8 @@ SMTP 凭据、TOTP 密钥与店铺处理器配置加密保存。店主可以回�
 
 设备码登录要求 **0.7.0 及以上**。网页可一键复制不含凭证的商品机器人提示词：机器人申请设备码，你在 `/cli/device` 输入短码，核对商品、权限、设备指纹与期限，再明确批准。主动商品申请不要求先创建管理链接；本店流水线只给队列权限，商品管理的额外权限须单独明确申请。既有商品管理链接通过 `--existing-link` 设备码流程绑定，浏览器与 CLI 绑定次数独立。[文档里的提示词](https://github.com/TokenNotIncluded/extore/blob/main/docs/ai-prompts.md)也可直接复制，配合已授权的 CLI 使用。上传只保存材料，提交或交付需明确执行下一步；持续运行机器人由接入方安排。
 
+任务流程、富类型字段、文本库存、签名兑换路由和 `next --watch` 是 **0.8.0** 的接口能力。`next` 返回当前任务、当前节点和应使用的授权；断线后先恢复同一请求，不能直接另领一单。详见[AI 队列处理](https://github.com/TokenNotIncluded/extore/blob/main/docs/automation-cli.md)。Extore 不内置持续运行的通用 AI 模型；复杂文档或 PPT 的制作质量、持续运行、外部付款和真实提供商交付需要分别验收，接口可用不等于这些工作已经完成。
+
 ## 文档
 
 | 文档 | 内容 |
@@ -149,12 +160,17 @@ SMTP 凭据、TOTP 密钥与店铺处理器配置加密保存。店主可以回�
 | [顾客 CLI](https://github.com/TokenNotIncluded/extore/blob/main/docs/cli-customer.md) · [店主 CLI](https://github.com/TokenNotIncluded/extore/blob/main/docs/cli-owner.md) | 批量兑换、材料与交付；Passkey 设备批准和全店操作 |
 | [多店与账号](https://github.com/TokenNotIncluded/extore/blob/main/docs/shops.md) | 平台与店主边界、邮箱邀请、TOTP、SMTP、加密处理器配置与存储额度 |
 | [可复制 AI 提示词](https://github.com/TokenNotIncluded/extore/blob/main/docs/ai-prompts.md) | 商品处理、店主运营与顾客领取的操作模板 |
-| [原生 WebMCP](https://github.com/TokenNotIncluded/extore/blob/main/docs/webmcp.md) | 49 个工具、浏览器支持、权限范围与确认要求 |
+| [任务流程](https://github.com/TokenNotIncluded/extore/blob/main/docs/task-flow.md) · [一卡一文本](https://github.com/TokenNotIncluded/extore/blob/main/docs/text-stock.md) | 冻结的分步流程、当前题目、计时与敏感输入；按规格导入交付库存 |
+| [AI 队列处理](https://github.com/TokenNotIncluded/extore/blob/main/docs/automation-cli.md) | 原子领取、等待、断线恢复与按当前节点交付 |
+| [兑换路由协议](https://github.com/TokenNotIncluded/extore/blob/main/docs/proxy-routing.md) · [路由配置](https://github.com/TokenNotIncluded/extore/blob/main/docs/proxy-config.md) | 本地验签、公开路由配置和固定发行站 |
+| [原生 WebMCP](https://github.com/TokenNotIncluded/extore/blob/main/docs/webmcp.md) | 原生工具、浏览器支持、权限范围与确认要求 |
 | [Python SDK](https://github.com/TokenNotIncluded/extore/blob/main/docs/python-sdk.md) | 预设处理器协议、任务结果、外部验签与回调示例 |
+| [私有 Worker v2](https://github.com/TokenNotIncluded/extore/blob/main/docs/private-worker.md) · [SDK v2](https://github.com/TokenNotIncluded/extore/blob/main/docs/python-sdk-v2.md) | 按店铺、任务、尝试和节点签名派发，结果与附件幂等回调 |
+| [0.8.0 更新说明](https://github.com/TokenNotIncluded/extore/blob/main/docs/releases/0.8.0.md) | 本轮能力、兼容性与仍需单独验收的边界 |
 | [验收记录](https://github.com/TokenNotIncluded/extore/blob/main/docs/acceptance.md) | 已记录的验证结果、对接边界与限制 |
 | [产品定义](https://github.com/TokenNotIncluded/extore/blob/main/PRODUCT.md) · [设计说明](https://github.com/TokenNotIncluded/extore/blob/main/DESIGN.md) | 项目范围、交互和视觉原则 |
 
-服务运行后，`/docs` 提供交互式 OpenAPI 文档。事件与回调协议版本为 **v1**。
+服务运行后，`/docs` 提供交互式 OpenAPI 文档。普通事件和既有回调保持 **v1**；流程私有 Worker 使用独立的 **v2** 签名与节点范围。
 
 ## 贡献
 
