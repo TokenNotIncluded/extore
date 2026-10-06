@@ -13,6 +13,7 @@ let lang = preferences.resolved.language,
   receiptViewKey = "",
   receiptMotion = null,
   ownerCliApproval = null,
+  deviceCliApproval = null,
   accountView = null,
   authStatus = {},
   waitingAnimationPaused = false,
@@ -423,7 +424,7 @@ window.addEventListener("popstate", start);
 window.addEventListener("hashchange", () => {
   if (location.pathname === "/cli/owner") start();
 });
-window.addEventListener("pagehide", () => ownerCliApproval?.dispose());
+window.addEventListener("pagehide", () => { ownerCliApproval?.dispose(); deviceCliApproval?.dispose(); });
 
 async function home() {
   queueLoadId++;
@@ -1062,9 +1063,9 @@ async function copyManagementLink(url, input, isCurrent = () => true) {
   return false;
 }
 async function copyCLIPrompt(options, host, isCurrent = () => true) {
-  const prompt = (options.owner ? window.ExtoreCliPrompts.buildOwner : window.ExtoreCliPrompts.build)({ language: lang, ...options });
+  const prompt = (options.owner ? window.ExtoreCliPrompts.buildOwner : window.ExtoreCliPrompts.build)({ language: lang, ...options, deviceCode: !options.owner });
   if (!isCurrent()) return;
-  host.innerHTML = `<div class="field"><label for="cli-ai-prompt">${tr("给 AI 的 CLI 提示词", "CLI prompt for AI")}</label><textarea id="cli-ai-prompt" readonly spellcheck="false" rows="12">${esc(prompt)}</textarea></div><p class="caption">${options.owner ? tr("不含授权凭证。首次登录须由商家核对设备，再用 Passkey 明确批准全店管理权限。", "No credentials are included. The merchant must review the device and explicitly approve full shop access with a Passkey at first login.") : tr("包含授权链接时请私下交付，不要公开发布。", "Share authorization prompts privately; do not publish them.")}</p>`;
+  host.innerHTML = `<div class="field"><label for="cli-ai-prompt">${tr("给 AI 的 CLI 提示词", "CLI prompt for AI")}</label><textarea id="cli-ai-prompt" readonly spellcheck="false" rows="12">${esc(prompt)}</textarea></div><p class="caption">${options.owner ? tr("不含授权凭证。首次登录须由商家核对设备，再用 Passkey 明确批准全店管理权限。", "No credentials are included. The merchant must review the device and explicitly approve full shop access with a Passkey at first login.") : tr("不含授权凭证。AI 会显示设备码，请你在浏览器核对商品和权限后授权。", "No credentials are included. The AI displays a device code for you to review the product and permissions in your browser.")}</p>`;
   const input = $("#cli-ai-prompt");
   const copied = await writeClipboard(prompt);
   if (!isCurrent()) return;
@@ -1145,7 +1146,7 @@ async function renderJobs(filter = "", requestedProductId = queueProductId, requ
   const closeBatchDialog = () => { batchDialogGeneration++; $("#batch-form").innerHTML = ""; };
   $("#workspace").innerHTML = `
     <div class="field queue-picker"><label for="queue-product">选择商品队列</label><select id="queue-product" ${role === "staff" ? "disabled" : ""}>${available.map((p) => `<option value="${esc(p.id)}" ${p.id === productId ? "selected" : ""}>${esc(p.name)}</option>`).join("")}</select></div>
-    <div class="queue-heading"><h2>${esc(selectedProduct.name)} · 处理队列</h2><button id="copy-queue-ai" class="secondary">复制给 AI 的提示词</button><p class="caption">${manual ? "本队列只处理这个商品。先领取任务，再更新进度或提交结果。" : "本商品由程序自动处理，这里查看进度与处理记录。"}</p>${role === "staff" ? `<p class="caption">CLI 剩余绑定次数：${managementRemainingCLIUses}。${managementRemainingCLIUses ? "复制提示词会生成五分钟有效的 CLI 绑定票据。" : "请使用已绑定的 CLI 设备；不会创建新的授权票据。"}</p>` : ""}</div><div id="queue-ai-prompt"></div>
+    <div class="queue-heading"><h2>${esc(selectedProduct.name)} · 处理队列</h2><button id="copy-queue-ai" class="secondary">复制给 AI 的提示词</button><p class="caption">${manual ? "本队列只处理这个商品。先领取任务，再更新进度或提交结果。" : "本商品由程序自动处理，这里查看进度与处理记录。"}</p>${role === "staff" ? `<p class="caption">CLI 剩余绑定次数：${managementRemainingCLIUses}。${managementRemainingCLIUses ? "复制提示词后，由你在网页确认设备码来绑定 CLI。" : "请使用已绑定的 CLI 设备和原来的配置文件。"}</p>` : ""}</div><div id="queue-ai-prompt"></div>
     <div class="toolbar"><select id="job-view" aria-label="队列视图"><option value="active" ${view === "active" ? "selected" : ""}>待处理</option><option value="processed" ${view === "processed" ? "selected" : ""}>已处理</option><option value="all" ${view === "all" ? "selected" : ""}>全部</option></select><select id="job-state" aria-label="任务状态"><option value="">全部状态</option>${Object.entries(
       states,
     )
@@ -1163,13 +1164,8 @@ async function renderJobs(filter = "", requestedProductId = queueProductId, requ
   bindManagementDownloads(rows.flatMap((row) => (row.files || []).filter((file) => file.kind === "input")), active, requestOptions);
   on("#copy-queue-ai", async () => {
     if (!active()) return;
-    let authorization = { origin: location.origin };
-    if (role === "staff" && managementRemainingCLIUses > 0) {
-      const ticket = await api("/manage/cli-ticket", {});
-      if (!active()) return;
-      if (ticket.product_id !== productId) throw new Error("授权票据不属于当前商品。");
-      authorization = { origin: ticket.origin, link: ticket.origin + "/cli#" + ticket.token, expires: ticket.expires };
-    }
+    const authorization = { origin: location.origin,
+      reuseDevice: role === "staff" && managementRemainingCLIUses <= 0 };
     await copyCLIPrompt({ ...authorization, product: selectedProduct, permissions: role === "staff" ? permissions : [], reuseDevice: role === "staff" && managementRemainingCLIUses === 0 }, $("#queue-ai-prompt"), active);
   });
   $("#queue-product").addEventListener("change", () =>
@@ -1638,6 +1634,8 @@ async function start() {
   accountView = null;
   ownerCliApproval?.dispose();
   ownerCliApproval = null;
+  deviceCliApproval?.dispose();
+  deviceCliApproval = null;
   receiptGeneration++;
   receiptMotion?.dispose();
   window.ExtoreMotion?.disposeHome?.(app);
@@ -1672,7 +1670,13 @@ async function start() {
     const auth = await api("/auth/status");
     if (!active()) return;
     acceptAuth(auth);
-    if (pathname === "/account" || pathname.startsWith("/account/")) {
+    if (pathname === "/cli/device") {
+      currentToken = ""; currentBatch = null; batchSelection = ""; batchRetryOnly = false;
+      currentProduct = null; currentJob = null; currentVariant = null; queueProduct = null;
+      $("#header-context").textContent = tr("CLI 设备授权", "CLI device authorization");
+      deviceCliApproval = window.ExtoreDeviceLogin.mount({ root: app, api, auth, passkey,
+        language: () => lang, isCurrent: active, onAuth: acceptAuth, navigate });
+    } else if (pathname === "/account" || pathname.startsWith("/account/")) {
       const accountRoute = window.ExtoreAccount.route(pathname, hash);
       $("#header-context").textContent = tr("店铺账户", "Shop account");
       accountView = window.ExtoreAccount.mount({ root: app, api, auth, ...accountRoute,
@@ -1709,6 +1713,7 @@ window.ExtoreWebMCP?.configure({
         "/admin": "admin",
         "/staff": "staff",
         "/cli/owner": "owner_cli",
+        "/cli/device": "cli_device",
       }[location.pathname] || "home",
     role,
     shopId: authStatus.shop_id ?? null,

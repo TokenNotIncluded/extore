@@ -1088,7 +1088,7 @@ def test_legacy_database_migration_retains_browser_sessions_and_separate_cli_quo
         database.init()
         database.init()
         with database.db() as c:
-            assert c.execute("PRAGMA user_version").fetchone()[0] == 11
+            assert c.execute("PRAGMA user_version").fetchone()[0] == 12
             assert not c.execute("PRAGMA foreign_key_check").fetchall()
             rows = [dict(row) for row in c.execute("SELECT * FROM sessions")]
             assert len(rows) == 2

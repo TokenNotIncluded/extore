@@ -270,7 +270,7 @@ def test_starttls_runs_before_authentication_and_payload_is_erased_on_delivery(s
     assert len(message["From"].addresses) == 1
     assert message["From"].addresses[0].addr_spec == "store@example.test"
     assert message["From"].addresses[0].display_name == "Extore 店铺"
-    assert TOKEN in message.get_content()
+    assert TOKEN in message.get_body(preferencelist=("plain",)).get_content()
     delivered = row(message_id)
     assert delivered["state"] == "delivered" and delivered["attempts"] == 1
     assert delivered["payload"] == delivered["error"] == ""
@@ -775,3 +775,85 @@ def test_display_name_cannot_add_a_second_sender_address(smtp):
     message = next(call[1] for call in smtp if call[0] == "send")
     assert len(message["From"].addresses) == 1
     assert message["From"].addresses[0].addr_spec == "store@example.test"
+
+
+@pytest.mark.parametrize("explicit_html", [False, True])
+def test_mail_has_utf8_html_and_the_original_plaintext_alternative(smtp, explicit_html):
+    from extore.mail_templates import account_message
+
+    configure()
+    body = "店铺邀请\n\nhttps://extore.test/account/invite#" + TOKEN
+    kwargs = (
+        {"html": account_message("invite", body.splitlines()[-1])}
+        if explicit_html
+        else {}
+    )
+    message_id = enqueue(body=body, **kwargs)
+    if explicit_html:
+        encrypted = row(message_id)["payload"]
+        assert TOKEN not in encrypted and "接受店铺邀请" not in encrypted
+    assert asyncio.run(mail.process_outbox_once()) is True
+    message = next(call[1] for call in smtp if call[0] == "send")
+    assert message.get_content_type() == "multipart/alternative"
+    assert [part.get_content_type() for part in message.iter_parts()] == [
+        "text/plain",
+        "text/html",
+    ]
+    plain = message.get_body(preferencelist=("plain",))
+    html = message.get_body(preferencelist=("html",))
+    assert plain.get_content_charset() == html.get_content_charset() == "utf-8"
+    assert plain.get_content().strip() == body
+    assert TOKEN in html.get_content() and "Extore" in html.get_content()
+    assert row(message_id)["payload"] == ""
+
+
+@pytest.mark.parametrize("html", [123, {}, "", " ", "\x00", "文" * mail.MAX_BODY_BYTES])
+def test_invalid_or_oversized_html_is_never_enqueued(html):
+    configure()
+    with pytest.raises(ValueError, match="Invalid mail body"):
+        enqueue(html=html)
+    with db() as c:
+        assert c.execute("SELECT count(*) FROM mail_outbox").fetchone()[0] == 0
+
+
+def test_plain_and_html_parts_share_one_outbox_size_limit():
+    configure()
+    with pytest.raises(ValueError, match="Invalid mail body"):
+        enqueue(
+            body="x" * (mail.MAX_BODY_BYTES // 2 + 1),
+            html="y" * (mail.MAX_BODY_BYTES // 2),
+        )
+
+
+@pytest.mark.parametrize(
+    "body", ["x" * mail.MAX_BODY_BYTES, "x\n\n" * (mail.MAX_BODY_BYTES // 3)]
+)
+def test_preexisting_large_plain_messages_still_send_without_expanding_the_limit(
+    smtp, body
+):
+    configure()
+    message_id = enqueue(body=body)
+    assert asyncio.run(mail.process_outbox_once()) is True
+    message = next(call[1] for call in smtp if call[0] == "send")
+    assert message.get_content_type() == "text/plain"
+    assert message.get_content().rstrip("\n") == body.rstrip("\n")
+    assert row(message_id)["state"] == "delivered"
+
+
+@pytest.mark.parametrize("html", [None, 42, "\x00", " ", "x" * mail.MAX_BODY_BYTES])
+def test_worker_revalidates_invalid_html_and_erases_it_before_smtp(smtp, html):
+    configure()
+    message_id = enqueue()
+    with db() as c:
+        payload = mail._seal(
+            {"to": RECIPIENT, "subject": "Subject", "body": TOKEN, "html": html},
+            "mail",
+            message_id,
+            "synthetic-shop",
+        )
+        c.execute("UPDATE mail_outbox SET payload=? WHERE id=?", (payload, message_id))
+    assert asyncio.run(mail.process_outbox_once()) is True
+    message = row(message_id)
+    assert message["state"] == "dead" and message["error"] == "invalid_mail_payload"
+    assert message["payload"] == ""
+    assert not smtp

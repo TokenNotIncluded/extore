@@ -148,7 +148,7 @@ def verify_shop_password(c, shop, password, code=None, backup_code=None):
         or not shop["verified"]
         or not _password_valid(shop["password_hash"], password)
     ):
-        fail("登录信息或二次验证码错误", 401)
+        fail("登录信息或 2FA 验证码错误", 401)
     _verify_second_factor(c, shop, code, backup_code)
     return shop
 
@@ -185,7 +185,7 @@ def _verify_second_factor(c, shop, code, backup_code):
     if not shop["totp_secret"]:
         return
     if bool(code) == bool(backup_code):
-        fail("请输入二次验证码或恢复码", 401)
+        fail("请输入 2FA 验证码或恢复码", 401)
     if code:
         counter = match_counter(
             _secret(shop["totp_secret"], shop["id"]),
@@ -194,7 +194,7 @@ def _verify_second_factor(c, shop, code, backup_code):
             shop["last_totp_counter"],
         )
         if counter is None:
-            fail("登录信息或二次验证码错误", 401)
+            fail("登录信息或 2FA 验证码错误", 401)
         c.execute(
             "UPDATE shops SET last_totp_counter=? WHERE id=?", (counter, shop["id"])
         )
@@ -202,11 +202,11 @@ def _verify_second_factor(c, shop, code, backup_code):
         try:
             wanted = backup_digest(backup_code)
         except ValueError:
-            fail("登录信息或二次验证码错误", 401)
+            fail("登录信息或 2FA 验证码错误", 401)
         remaining = json.loads(shop["totp_backup_digests"])
         found = next((x for x in remaining if hmac.compare_digest(x, wanted)), None)
         if found is None:
-            fail("登录信息或二次验证码错误", 401)
+            fail("登录信息或 2FA 验证码错误", 401)
         remaining.remove(found)
         c.execute(
             "UPDATE shops SET totp_backup_digests=? WHERE id=?",
@@ -267,6 +267,7 @@ def _shop_view(c, row):
 
 def _mail_token(c, kind, email, sid=None, *, password_hash=None, name=None):
     from .mail import enqueue, get_settings
+    from .mail_templates import account_message
 
     if not get_settings(c)["enabled"]:
         fail("邮箱服务尚未启用，请联系管理者", 503)
@@ -288,11 +289,13 @@ def _mail_token(c, kind, email, sid=None, *, password_hash=None, name=None):
     }
     route = "register" if kind == "register" else kind
     url = f"{ORIGIN}/account/{route}#{raw}"
+    shop = shop_row(c, sid) if sid is not None else None
     enqueue(
         c,
         email,
         titles[kind],
         f"{titles[kind]}\n\n请打开以下链接完成操作：\n{url}\n\n链接仅可使用一次，{24 if kind == 'invite' else 0.5} 小时后失效。如果不是你请求的，请忽略。",
+        html=account_message(kind, url, shop_name=shop["name"] if shop else name),
         expires=expiry,
         shop_id=sid,
     )
@@ -454,7 +457,7 @@ def email_login(body: LoginInput, request: Request, response: Response):
         row = c.execute("SELECT * FROM shops WHERE email=?", (body.email,)).fetchone()
         valid = _password_valid(row["password_hash"] if row else None, body.password)
         if not valid or not row or not row["enabled"] or not row["verified"]:
-            fail("登录信息或二次验证码错误", 401)
+            fail("登录信息或 2FA 验证码错误", 401)
         _verify_second_factor(c, row, body.code, body.backup_code)
         if ph.check_needs_rehash(row["password_hash"]):
             c.execute(
@@ -594,7 +597,7 @@ def reauthenticate(body: ReauthInput, request: Request):
     with db() as c:
         row = shop_row(c, s["shop_id"])
         if not _password_valid(row["password_hash"], body.password):
-            fail("登录信息或二次验证码错误", 401)
+            fail("登录信息或 2FA 验证码错误", 401)
         _verify_second_factor(c, row, body.code, body.backup_code)
         c.execute(
             "UPDATE sessions SET auth_at=?,auth_method=? WHERE digest=?",
@@ -615,7 +618,7 @@ def change_password(body: PasswordChange, request: Request, response: Response):
     with db() as c:
         shop = shop_row(c, s["shop_id"])
         if not _password_valid(shop["password_hash"], body.password):
-            fail("登录信息或二次验证码错误", 401)
+            fail("登录信息或 2FA 验证码错误", 401)
         _verify_second_factor(c, shop, body.code, body.backup_code)
         c.execute(
             "UPDATE shops SET password_hash=? WHERE id=?",
@@ -646,7 +649,7 @@ def setup_totp(body: ReauthInput, request: Request):
     with db() as c:
         row = shop_row(c, s["shop_id"])
         if row["totp_secret"]:
-            fail("请先关闭现有二次验证", 409)
+            fail("请先关闭现有 2FA 双因素认证", 409)
         if not _password_valid(row["password_hash"], body.password):
             fail("登录信息错误", 401)
         c.execute(
@@ -688,7 +691,7 @@ def confirm_totp(body: TotpConfirm, request: Request):
             secret, body.code, time.time(), row["last_totp_counter"]
         )
         if counter is None:
-            fail("二次验证码错误", 401)
+            fail("2FA 验证码错误", 401)
         raw, hashes = generate_backup_codes()
         c.execute(
             "UPDATE shops SET totp_secret=?,pending_totp_secret=NULL,pending_totp_expires=NULL,last_totp_counter=?,totp_backup_digests=? WHERE id=?",
@@ -704,7 +707,7 @@ def _totp_security_write(c, s, body):
     if not row["totp_secret"] or not _password_valid(
         row["password_hash"], body.password
     ):
-        fail("登录信息或二次验证码错误", 401)
+        fail("登录信息或 2FA 验证码错误", 401)
     _verify_second_factor(c, row, body.code, body.backup_code)
     c.execute(
         "UPDATE sessions SET auth_at=?,auth_method='email_password_totp' WHERE digest=?",

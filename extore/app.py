@@ -16,6 +16,7 @@ from .card_tracking import router as card_tracking_router
 from .cli_auth import router as cli_auth_router
 from .config import ORIGIN, check_config
 from .db import audit, db, event, init, setting
+from .device_login import router as device_login_router
 from .files import (
     MAX_MULTIPART_BYTES,
     file_limit_message,
@@ -88,7 +89,7 @@ async def lifespan(app):
     yield
 
 
-app = FastAPI(title="Extore API", version="0.6.2", lifespan=lifespan)
+app = FastAPI(title="Extore API", version="0.7.0", lifespan=lifespan)
 app.include_router(auth.router)
 app.include_router(account_auth_router)
 app.include_router(card_tracking_router)
@@ -96,6 +97,7 @@ app.include_router(files_router)
 app.include_router(source_router)
 app.include_router(link_access_router)
 app.include_router(cli_auth_router)
+app.include_router(device_login_router)
 app.include_router(owner_cli_router)
 app.include_router(processor_profiles_router)
 app.include_router(maintenance_router)
@@ -107,6 +109,9 @@ async def guard(request: Request, call_next):
         "/api/cli/authorize",
         "/api/cli/challenge",
         "/api/cli/session",
+        "/api/cli/device/request",
+        "/api/cli/device/status",
+        "/api/cli/device/claim",
         "/api/cli/owner/request",
         "/api/cli/owner/status",
         "/api/cli/owner/claim",
@@ -1538,6 +1543,7 @@ app.mount("/static", StaticFiles(directory=STATIC), name="static")
 @app.api_route("/staff", methods=["GET", "HEAD"])
 @app.api_route("/receipt", methods=["GET", "HEAD"])
 @app.api_route("/cli/owner", methods=["GET", "HEAD"])
+@app.api_route("/cli/device", methods=["GET", "HEAD"])
 @app.api_route("/account", methods=["GET", "HEAD"])
 @app.api_route("/account/login", methods=["GET", "HEAD"])
 @app.api_route("/account/invite", methods=["GET", "HEAD"])

@@ -203,7 +203,7 @@ test("late admin and staff requests cannot restore their context over owner appr
   });
 });
 
-test("the approval module loads before app startup with the same new asset revision", () => {
+test("approval and QR modules load before app startup with revised assets", () => {
   const html = fs.readFileSync(path.join(__dirname, "../extore/static/index.html"), "utf8");
   const scripts = [...html.matchAll(/<script\b([^>]*\bsrc="([^"]+)"[^>]*)>/g)];
   const owner = scripts.findIndex((script) => script[2].startsWith("/static/owner-cli.js"));
@@ -212,5 +212,11 @@ test("the approval module loads before app startup with the same new asset revis
   assert.ok(owner >= 0 && account > owner && app > account);
   assert.match(scripts[owner][1], /\bdefer\b/);
   assert.match(scripts[owner][2], /\?v=20261007-shops$/);
-  assert.match(scripts[app][2], /\?v=20261007-shops$/);
+  assert.match(scripts[app][2], /\?v=20261007-device-code$/);
+  const device = scripts.findIndex((script) => script[2].startsWith("/static/device-login.js"));
+  const encoder = scripts.findIndex((script) => script[2].startsWith("/static/vendor/qrcodegen.js"));
+  const qr = scripts.findIndex((script) => script[2].startsWith("/static/totp-qr.js"));
+  assert.ok(encoder >= 0 && qr > encoder && account > qr && device > account && app > device);
+  assert.match(scripts[account][2], /\?v=20261007-mobile-2fa$/);
+  assert.match(scripts[device][2], /\?v=20261007-device-code$/);
 });

@@ -42,7 +42,7 @@ Extore 接手支付之后的兑换与交付：验证卡密，将顾客带到对�
 | 灵活交付 | 链接、文本、账户信息或文件，也可只返回服务状态。支持一次领取、重复查看、失败重试、退回补充、附原因的拒绝，以及顾客主动销毁内容。 |
 | 权限与认证 | 平台管理员使用多个 Passkey；店主可用邮箱密码、可选 TOTP 或多个 Passkey 登录。注册默认关闭，由平台管理员邀请店主。商品链接默认 1 次浏览器登录与 1 个 CLI 绑定，支持委派和会话审计。 |
 | 自动化与二次开发 | 开源预设处理器、店铺加密配置档案、代码定义输入输出与步骤、Python SDK、签名事件与回调；原生定义 **49 个 WebMCP 工具**，按页面、身份与权限动态提供。 |
-| 命令行操作 | `manage` 管理商品授权，`customer` 兑换与领取，`admin` 用固定账号的设备管理本店或平台；默认精简输出，凭证保存到私密文件，提供可复制 AI 提示词。 |
+| 命令行操作 | `manage` 管理商品授权，`customer` 兑换与领取，`admin` 用固定账号的设备管理本店或平台；默认精简输出，凭证保存到私密文件，商品授权支持浏览器设备码批准，提供可复制 AI 提示词。 |
 | 界面与存储 | SQLite 持久化任务、事件和投递重试；单文件、单卡、单店与全站附件额度，磁盘余量保护；撕纸与分段虚线界面，明暗和语言默认自动。 |
 
 顾客上传的是兑换材料，管理者上传的是交付文件。预设处理器来自审核后固定版本的[开源子模块](https://github.com/TokenNotIncluded/extore-processors)，商家在预设中选择并填写配置。浏览器 AI 需要原生 WebMCP 支持及实际授权，具体兼容性见[工具文档](https://github.com/TokenNotIncluded/extore/blob/main/docs/webmcp.md#浏览器兼容性)。
@@ -93,7 +93,7 @@ uv run extore serve
 uv run extore worker
 ```
 
-打开 <http://localhost:8000>。在 2.5 秒内点击左上角 Logo 5 次，或直接访问 `/admin`。平台管理员首次使用初始化密码注册 Passkey，之后关闭这套首次密码登录；店主账号使用独立的邮箱密码和可选 TOTP，也可添加多个 Passkey。平台管理员先配置 SMTP，再邀请店主，详见[多店与账号](https://github.com/TokenNotIncluded/extore/blob/main/docs/shops.md)。
+打开 <http://localhost:8000>。在 2.5 秒内点击左上角 Logo 5 次，或直接访问 `/admin`。平台管理员首次使用初始化密码注册 Passkey，之后关闭这套首次密码登录；店主账号使用独立的邮箱密码和可选 TOTP，也可添加多个 Passkey。平台管理员先配置 SMTP，再邀请店主。邀请、邮箱确认和密码重置邮件采用统一响应式排版，并保留纯文本版本；详见[多店与账号](https://github.com/TokenNotIncluded/extore/blob/main/docs/shops.md)。
 
 <details>
 <summary>首次登录、认证恢复与运行边界</summary>
@@ -110,8 +110,8 @@ uv run extore worker
 完整 CLI 要求 **0.6.0 及以上**；也可在该版本源码目录用 `uv run extore …` 执行。安装与完整操作见 [CLI 指南](https://github.com/TokenNotIncluded/extore/blob/main/docs/cli.md)。
 
 ```sh
-# 单商品授权：登录时隐藏输入完整管理链接
-extore manage login
+# 商品授权：CLI 显示网址和短码，由你在浏览器确认权限
+extore manage login --device-code --origin https://extore.example.com --product PRODUCT_ID
 extore manage queues --all
 
 # 顾客：卡密从私密文件标准输入读取
@@ -128,7 +128,7 @@ extore admin login --origin https://extore.example.com --email owner@example.com
 
 SMTP 凭据、TOTP 密钥与店铺处理器配置加密保存，接口只返回配置状态和修订元数据。付款适配尚未启用，供应商平台仍待确定；现有预设只交付链接或文本，不代表已完成真实付款。
 
-网页可复制带 5 分钟 CLI 绑定票据的商品机器人接入提示词；[文档里的提示词](https://github.com/TokenNotIncluded/extore/blob/main/docs/ai-prompts.md)也可直接复制，配合已授权的 CLI 使用。上传只保存材料，提交或交付需明确执行下一步；持续运行机器人由接入方安排。
+设备码登录要求 **0.7.0 及以上**。网页可一键复制不含凭证的商品机器人提示词：机器人申请设备码，你在 `/cli/device` 输入短码，核对商品、权限、设备指纹与期限，再明确批准。批准只绑定选中的既有商品授权，不扩大到整店；浏览器与 CLI 绑定次数独立。[文档里的提示词](https://github.com/TokenNotIncluded/extore/blob/main/docs/ai-prompts.md)也可直接复制，配合已授权的 CLI 使用。上传只保存材料，提交或交付需明确执行下一步；持续运行机器人由接入方安排。
 
 ## 文档
 

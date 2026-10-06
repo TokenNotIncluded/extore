@@ -11,11 +11,13 @@ import hashlib
 import json
 import math
 import os
+import re
 import secrets
 import socket
 import stat
 import sys
 import time
+import unicodedata
 from contextlib import contextmanager
 from pathlib import Path
 from urllib.parse import quote, unquote, urlsplit
@@ -34,6 +36,7 @@ MAX_DOWNLOAD_BYTES = 20 * 1024 * 1024
 MAX_OUTPUT_BYTES = 256 * 1024
 MAX_RESPONSE_BYTES = 16 * 1024 * 1024
 PROFILE_VERSION = 1
+DEVICE_LOGIN_TTL = 600
 
 
 class ManageError(Exception):
@@ -113,7 +116,8 @@ def _private_file(path, *, missing_ok=False):
         if missing_ok:
             return
         raise ManageError(
-            "No CLI authorization; run extore manage login --link-stdin", code="no_auth"
+            "No CLI authorization; run extore manage login --device-code --origin https://your-server",
+            code="no_auth",
         ) from None
     if (
         not stat.S_ISREG(info.st_mode)
@@ -138,7 +142,8 @@ def private_profile(path, *, create=False):
         info = directory.lstat()
     except FileNotFoundError:
         raise ManageError(
-            "No CLI authorization; run extore manage login --link-stdin", code="no_auth"
+            "No CLI authorization; run extore manage login --device-code --origin https://your-server",
+            code="no_auth",
         ) from None
     if (
         not stat.S_ISDIR(info.st_mode)
@@ -516,6 +521,337 @@ class ManageClient:
             "already_authorized": response.get("already_authorized", False),
         }
 
+    def device_login(self, origin, client_name, *, product=None, no_wait=False):
+        """Ask a browser to approve this locally generated key, without a link."""
+        origin = origin_from_url(origin)
+        name = client_name.strip()
+        if (
+            not name
+            or len(name) > 100
+            or any(unicodedata.category(char).startswith("C") for char in name)
+            or (
+                product is not None
+                and (
+                    not product
+                    or len(product) > 100
+                    or any(ord(char) < 33 for char in product)
+                )
+            )
+        ):
+            raise ManageError("Invalid device name or product ID", code="invalid_input")
+        pending = self.data.setdefault("device_requests", [])
+        if not isinstance(pending, list) or any(
+            not isinstance(item, dict) for item in pending
+        ):
+            raise ManageError("Invalid CLI profile", code="invalid_profile")
+        active = [
+            item
+            for item in pending
+            if item.get("expires", time.time() + 1) > time.time()
+        ]
+        if len(active) != len(pending):
+            pending[:] = active
+            self.persist()
+        request = next(
+            (
+                item
+                for item in pending
+                if item.get("origin") == origin
+                and item.get("client_name") == name
+                and item.get("requested_product") == product
+            ),
+            None,
+        )
+        if request is None:
+            device_keys = self.data.setdefault("device_keys", {})
+            if not isinstance(device_keys, dict):
+                raise ManageError("Invalid CLI profile", code="invalid_profile")
+            existing = next(
+                (
+                    item
+                    for item in self.data["grants"]
+                    if item.get("origin") == origin
+                    and item.get("device_id")
+                    and (product is None or item.get("product_id") == product)
+                ),
+                None,
+            )
+            key_scope = origin + "\n" + (product or "")
+            saved_key = device_keys.get(key_scope) or (
+                existing["private_key"] if existing else None
+            )
+            private = (
+                Ed25519PrivateKey.from_private_bytes(_unb64(saved_key))
+                if saved_key
+                else Ed25519PrivateKey.generate()
+            )
+            # The code may expire after a binding response is lost. Keep its
+            # device key so a fresh approval can recover that same binding.
+            device_keys[key_scope] = _b64(
+                private.private_bytes(Encoding.Raw, PrivateFormat.Raw, NoEncryption())
+            )
+            issued_at = int(time.time())
+            request = {
+                "origin": origin,
+                "client_name": name,
+                "requested_product": product,
+                "private_key": _b64(
+                    private.private_bytes(
+                        Encoding.Raw, PrivateFormat.Raw, NoEncryption()
+                    )
+                ),
+                "nonce": _b64(issued_at.to_bytes(8, "big") + secrets.token_bytes(24)),
+                "expires": issued_at + DEVICE_LOGIN_TTL,
+            }
+            pending.append(request)
+            # Save the key and nonce before requesting a code; the server can
+            # return the same request if its first response was interrupted.
+            self.persist()
+        private = Ed25519PrivateKey.from_private_bytes(_unb64(request["private_key"]))
+        public_raw = private.public_key().public_bytes(Encoding.Raw, PublicFormat.Raw)
+        public = _b64(public_raw)
+        fingerprint = hashlib.sha256(public_raw).hexdigest()
+        if request.get("device_id"):
+            return self._finish_device_login(request, pending)
+        if not request.get("request_id"):
+            proof = "\n".join(
+                (
+                    "extore-cli-device-request-v1",
+                    origin,
+                    public,
+                    name,
+                    request["nonce"],
+                    product or "",
+                )
+            )
+            response = _object(
+                self._json(
+                    origin,
+                    "POST",
+                    "/api/cli/device/request",
+                    json={
+                        "public_key": public,
+                        "signature": _b64(private.sign(proof.encode())),
+                        "client_name": name,
+                        "nonce": request["nonce"],
+                        "product_id": product,
+                    },
+                )
+            )
+            self._validate_device_request(response, origin, fingerprint)
+            request.update(
+                {
+                    key: response[key]
+                    for key in (
+                        "request_id",
+                        "user_code",
+                        "approval_url",
+                        "challenge",
+                        "expires",
+                        "interval",
+                        "fingerprint",
+                    )
+                }
+            )
+            self.persist()
+        self._validate_device_request(request, origin, fingerprint)
+        visible = {
+            key: request[key]
+            for key in ("user_code", "approval_url", "fingerprint", "expires")
+        }
+        print(
+            "请在浏览器打开："
+            + visible["approval_url"]
+            + "\n设备码："
+            + visible["user_code"]
+            + "\n核对设备指纹："
+            + visible["fingerprint"]
+            + "\n仅批准你刚刚发起的请求；管理链接留在浏览器中。",
+            file=sys.stderr,
+            flush=True,
+        )
+        if no_wait:
+            return {"ok": True, "pending": True, "authorization": visible}
+        print(
+            "等待浏览器授权，按 Ctrl+C 可停止；重复此命令可继续。",
+            file=sys.stderr,
+            flush=True,
+        )
+        remaining = min(DEVICE_LOGIN_TTL, request["expires"] - time.time())
+        deadline = time.monotonic() + max(0, remaining)
+        interval = request["interval"]
+        while time.monotonic() < deadline:
+            time.sleep(min(interval, max(0, deadline - time.monotonic())))
+            if time.monotonic() >= deadline:
+                break
+            proof = "\n".join(
+                ("extore-cli-device-status-v1", origin, request["request_id"], public)
+            )
+            try:
+                response = _object(
+                    self._json(
+                        origin,
+                        "POST",
+                        "/api/cli/device/status",
+                        json={
+                            "request_id": request["request_id"],
+                            "public_key": public,
+                            "signature": _b64(private.sign(proof.encode())),
+                        },
+                        timeout=min(30, max(1, deadline - time.monotonic())),
+                    )
+                )
+            except ManageError as exc:
+                if exc.code == "connection_error" or exc.status in (429, 503):
+                    interval = min(60, interval + 5)
+                    continue
+                raise
+            state = response.get("status")
+            reported_interval = response.get("interval", interval)
+            retry_after = response.get("retry_after", reported_interval)
+            if (
+                type(reported_interval) not in (int, float)
+                or not 5 <= reported_interval <= DEVICE_LOGIN_TTL
+                or not math.isfinite(reported_interval)
+                or type(retry_after) not in (int, float)
+                or not 0 <= retry_after <= DEVICE_LOGIN_TTL
+                or not math.isfinite(retry_after)
+            ):
+                raise ManageError(
+                    "Invalid device polling interval", code="invalid_response"
+                )
+            interval = max(interval, reported_interval, retry_after)
+            request["interval"] = interval
+            self.persist()
+            if state in ("pending", "slow_down"):
+                continue
+            if state in ("denied", "expired"):
+                pending.remove(request)
+                self.persist()
+                raise ManageError(
+                    "设备授权已被拒绝"
+                    if state == "denied"
+                    else "设备码已过期，请重新登录",
+                    code="authorization_denied"
+                    if state == "denied"
+                    else "device_code_expired",
+                )
+            if state not in ("approved", "claimed"):
+                raise ManageError(
+                    "Invalid device authorization status", code="invalid_response"
+                )
+            proof = "\n".join(
+                (
+                    "extore-cli-device-claim-v1",
+                    origin,
+                    request["request_id"],
+                    request["challenge"],
+                    public,
+                )
+            )
+            response = _object(
+                self._json(
+                    origin,
+                    "POST",
+                    "/api/cli/device/claim",
+                    json={
+                        "request_id": request["request_id"],
+                        "public_key": public,
+                        "signature": _b64(private.sign(proof.encode())),
+                    },
+                )
+            )
+            if (
+                not isinstance(response.get("device_id"), str)
+                or not response["device_id"]
+                or not isinstance(response.get("product_id"), str)
+                or not response["product_id"]
+                or (product and response["product_id"] != product)
+                or response.get("fingerprint") != fingerprint
+            ):
+                raise ManageError(
+                    "Invalid device authorization scope", code="invalid_response"
+                )
+            request.update(
+                {
+                    "device_id": response["device_id"],
+                    "product_id": response["product_id"],
+                    "already_authorized": response.get("already_authorized", False),
+                }
+            )
+            self.persist()
+            return self._finish_device_login(request, pending)
+        pending.remove(request)
+        self.persist()
+        raise ManageError("设备码已过期，请重新登录", code="device_code_expired")
+
+    @staticmethod
+    def _validate_device_request(response, origin, fingerprint):
+        if (
+            not isinstance(response.get("request_id"), str)
+            or not response["request_id"]
+            or len(response["request_id"]) > 100
+            or not isinstance(response.get("user_code"), str)
+            or not re.fullmatch(
+                r"[A-Z0-9]{4}-[A-Z0-9]{4}-[A-Z0-9]{4}", response["user_code"]
+            )
+            or response.get("approval_url") != origin + "/cli/device"
+            or not isinstance(response.get("challenge"), str)
+            or not re.fullmatch(r"[A-Za-z0-9_-]{43}", response["challenge"])
+            or response.get("fingerprint") != fingerprint
+            or type(response.get("expires")) not in (int, float)
+            or not 0 < response["expires"] <= time.time() + DEVICE_LOGIN_TTL + 5
+            or not math.isfinite(response["expires"])
+            or type(response.get("interval")) not in (int, float)
+            or not 5 <= response["interval"] <= DEVICE_LOGIN_TTL
+            or not math.isfinite(response["interval"])
+        ):
+            raise ManageError(
+                "Invalid device authorization response", code="invalid_response"
+            )
+
+    def _finish_device_login(self, request, pending):
+        grant = next(
+            (
+                item
+                for item in self.data["grants"]
+                if item.get("origin") == request["origin"]
+                and item.get("device_id") == request["device_id"]
+            ),
+            None,
+        )
+        if grant is None:
+            grant = {
+                "id": request["device_id"],
+                "device_id": request["device_id"],
+                "origin": request["origin"],
+                "product_id": request["product_id"],
+                "private_key": request["private_key"],
+                "client_name": request["client_name"],
+            }
+            self.data["grants"].append(grant)
+            self.persist()
+        self.session(grant, refresh_scope=True)
+        pending.remove(request)
+        device_keys = self.data.setdefault("device_keys", {})
+        device_keys[request["origin"] + "\n" + request["product_id"]] = request[
+            "private_key"
+        ]
+        unscoped = request["origin"] + "\n"
+        if device_keys.get(unscoped) == request["private_key"] and not any(
+            item.get("origin") == request["origin"]
+            and item.get("requested_product") is None
+            and item.get("private_key") == request["private_key"]
+            for item in pending
+        ):
+            del device_keys[unscoped]
+        self.persist()
+        return {
+            "ok": True,
+            "grant": _safe_grant(grant),
+            "already_authorized": request.get("already_authorized", False),
+        }
+
     def grants(self, *, product=None, origin=None, grant_id=None, permissions=()):
         matches = []
         errors = []
@@ -663,7 +999,7 @@ class ManageClient:
         )
         if not grants and not errors:
             raise ManageError(
-                "No product queue authorization; run extore manage login --link-stdin",
+                "No product queue authorization; run extore manage login --device-code --origin https://your-server",
                 code="no_scope",
             )
         queues = []
@@ -935,12 +1271,25 @@ def add_parser(commands):
     subcommands = manage.add_subparsers(dest="manage_command", required=True)
     login = subcommands.add_parser(
         "login",
-        help="bind this CLI device using a management link; does not consume browser authorization",
+        help="authorize this CLI device in a browser using a device code, or privately enter a management link",
     )
-    login.add_argument(
+    methods = login.add_mutually_exclusive_group()
+    methods.add_argument(
         "--link-stdin",
         action="store_true",
         help="read the complete private management link from standard input",
+    )
+    methods.add_argument(
+        "--device-code",
+        action="store_true",
+        help="show a public browser URL and device code; no management link is sent by the CLI",
+    )
+    login.add_argument("--origin", help="HTTPS server origin for device-code login")
+    login.add_argument("--product", help="limit browser approval to this product ID")
+    login.add_argument(
+        "--no-wait",
+        action="store_true",
+        help="return the public code immediately; repeat without this option after browser approval",
     )
     login.add_argument(
         "--client-name",
@@ -1110,6 +1459,20 @@ def dispatch(client, args, command, origin):
         return dispatch_management(client, args, origin)
     grant_id = getattr(args, "grant", None)
     if command == "login":
+        if args.device_code:
+            if not origin:
+                raise ManageError(
+                    "Device-code login requires --origin https://your-extore-server",
+                    code="invalid_input",
+                )
+            return client.device_login(
+                origin, args.client_name, product=args.product, no_wait=args.no_wait
+            )
+        if args.product or args.no_wait or origin:
+            raise ManageError(
+                "--origin, --product and --no-wait require --device-code",
+                code="invalid_input",
+            )
         if args.link_stdin:
             invitation = sys.stdin.read(4097).strip()
         else:
@@ -1143,7 +1506,61 @@ def dispatch(client, args, command, origin):
             and (not origin or item.get("origin") == origin)
             and (not grant_id or item.get("id") == grant_id)
         ]
-        return client.logout(grants)
+        result = client.logout(grants)
+        pending = client.data.get("device_requests", [])
+        removed_pending = [
+            item
+            for item in pending
+            if (
+                (
+                    not args.product
+                    or item.get("product_id", item.get("requested_product"))
+                    == args.product
+                )
+                and (not origin or item.get("origin") == origin)
+                and (not grant_id or item.get("device_id") == grant_id)
+            )
+        ]
+        client.data["device_requests"] = [
+            item for item in pending if item not in removed_pending
+        ]
+        device_keys = client.data.get("device_keys", {})
+        retired_keys = {
+            item["private_key"]
+            for item in [*grants, *removed_pending]
+            if "private_key" in item
+        }
+        retired_scopes = {
+            (
+                item["origin"],
+                item.get("product_id", item.get("requested_product")) or "",
+            )
+            for item in [*grants, *removed_pending]
+        }
+        for scope, private_key in list(device_keys.items()):
+            key_origin, _, key_product = scope.partition("\n")
+            in_use = any(
+                item.get("origin") == key_origin
+                and item.get("private_key") == private_key
+                and (
+                    not key_product
+                    or item.get("product_id", item.get("requested_product"))
+                    == key_product
+                )
+                for item in [*client.data["grants"], *client.data["device_requests"]]
+            )
+            selected = (
+                (
+                    not grant_id
+                    and (not origin or key_origin == origin)
+                    and (not args.product or key_product == args.product)
+                )
+                or (key_origin, key_product) in retired_scopes
+                or (not key_product and private_key in retired_keys)
+            )
+            if not in_use and selected:
+                del device_keys[scope]
+        return result
     permission = (
         "queue.view"
         if command in ("jobs", "job", "files", "download")
@@ -1259,6 +1676,20 @@ def main(args):
             file=sys.stderr,
         )
         raise SystemExit(1) from None
+    except KeyboardInterrupt:
+        print(
+            json.dumps(
+                {
+                    "ok": False,
+                    "error": "登录已停止；重复相同的设备码登录命令可继续",
+                    "code": "interrupted",
+                },
+                ensure_ascii=False,
+                separators=(",", ":"),
+            ),
+            file=sys.stderr,
+        )
+        raise SystemExit(130) from None
     except (OSError, ValueError, KeyError, TypeError):
         print(
             json.dumps(

@@ -31,6 +31,7 @@ def clean():
             "challenges",
             "credentials",
             "sessions",
+            "cli_device_requests",
             "owner_cli_action_challenges",
             "owner_cli_password_challenges",
             "owner_cli_approval_challenges",

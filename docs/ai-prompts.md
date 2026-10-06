@@ -4,12 +4,14 @@
 
 代码块可直接复制给有终端能力的 AI。将大写占位符替换为实际 ID、文件路径和任务目标；卡密、管理链接与领取链接通过私密标准输入传递，不写进公开文档。
 
-网页的“复制机器人接入提示词”会为当前商品生成 5 分钟有效的 CLI 绑定票据及对应操作范围。下面是可长期复用的操作说明，适用于已完成设备授权的客户端，不内置任何凭证，也不自动启动常驻程序。
+商品管理 CLI 支持设备码登录：AI 发起申请，把公开地址、设备码和指纹交给本人在浏览器核对批准，不需要传输管理链接。网页也兼容旧的 5 分钟 CLI 绑定票据。下面是可长期复用的操作说明，不内置任何凭证，也不自动启动常驻程序。
 
 ## 商品处理人员或机器人
 
 ```text
-你负责 Extore 商品 PRODUCT_ID，使用已授权的 extore manage。
+你负责 Extore 商品 PRODUCT_ID，使用 extore manage。
+
+用 uv tool install --upgrade 'extore>=0.7.0' 安装后检查 extore --version。如果本机尚未获授权，执行 extore manage login --device-code --origin SERVER --product PRODUCT_ID --client-name '商品制作 Bot' --no-wait，把 stdout JSON 的公开授权 URL、设备码和指纹交给我在浏览器核对批准；不索要、不复制或提交我的管理链接。批准后重复相同命令并去掉 --no-wait，保持相同的私密 profile、origin、product 和 client-name，继续这次申请并保存设备授权。保留本机私密配置，后续自动签名续签；不要让我去访问你的云端终端，不要把设备私钥、会话或私密配置贴到聊天里。
 
 先执行 extore manage products 和 extore manage queues --all 查看摘要。
 只选择该商品当前需要处理的任务，用 extore manage job JOB_ID --product PRODUCT_ID 读取任务自己的输入、输出和步骤快照。

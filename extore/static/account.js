@@ -13,13 +13,13 @@
     return { mode: ["login", "invite", "register", "reset", "security"].includes(mode) ? mode : "login", token: legacy ? legacy[2] : hash.replace(/^#/, "") };
   };
   const field = (id, label, type = "text", attrs = "", value = "") => `<div class="field"><label for="${id}">${esc(label)}</label><input id="${id}" type="${type}" ${attrs} value="${esc(value)}"></div>`;
-  const secret = (id, label, attrs = "") => field(id, label, "password", `autocomplete="off" ${attrs}`);
-  const factors = (prefix) => `<div class="grid">${secret(prefix + "-code", "二次验证码（已启用时填写）", 'inputmode="numeric" maxlength="6"')}${secret(prefix + "-backup", "恢复码（与验证码二选一）", 'maxlength="100"')}</div>`;
+  const secret = (id, label, attrs = "") => field(id, label, "password", attrs.includes("autocomplete=") ? attrs : `autocomplete="off" ${attrs}`);
+  const factors = (prefix, tr = (cn) => cn) => `<div class="grid">${secret(prefix + "-code", tr("2FA 验证码（已启用时填写）", "2FA code (if enabled)"), 'inputmode="numeric" autocomplete="one-time-code" maxlength="6"')}${secret(prefix + "-backup", tr("恢复码（与验证码二选一）", "Recovery code (instead of a 2FA code)"), 'maxlength="100"')}</div>`;
 
   function mount({ root, api, auth = {}, mode = "login", token = "", isCurrent = () => true, navigate = (url) => { window.location.href = url; }, passkey, language = "zh-CN", onAuth = () => {} } = {}) {
     if (!root?.querySelector || typeof api !== "function") throw new TypeError("Account page needs a root and API");
     mounts.get(root)?.dispose();
-    let disposed = false, version = 0, busy = false, selectedProfileShop = "";
+    let disposed = false, version = 0, busy = false, selectedProfileShop = "", enrollment = null;
     const controller = new AbortController();
     const active = () => !disposed && root.isConnected !== false && isCurrent();
     const $ = (selector) => root.querySelector(selector);
@@ -29,6 +29,7 @@
     const error = (e) => text("#account-error", e?.name === "NotAllowedError" ? tr("验证已取消，可以重试。", "Verification cancelled. You can retry.") : e?.message || tr("操作未完成，请重试。", "The operation did not complete. Retry."));
     const page = (title, body) => {
       if (!active()) return;
+      clearTotpSetup();
       version++;
       root.innerHTML = `<div class="account-page ${["security", "shops", "mail", "profiles"].includes(mode) ? "" : "narrow"}"><div class="section-head"><h${mode === "security" || ["shops", "mail", "profiles"].includes(mode) ? "2" : "1"}>${esc(title)}</h${mode === "security" || ["shops", "mail", "profiles"].includes(mode) ? "2" : "1"}><a href="/admin">${tr("商家后台", "Dashboard")}</a></div>${body}<p id="account-error" class="error" role="alert"></p><div id="account-confirmation"></div></div>`;
     };
@@ -51,21 +52,107 @@
       if (backup) value.backup_code = backup;
       return value;
     };
-    const clearSecrets = () => root.querySelectorAll('input[type="password"]').forEach((input) => { input.value = ""; });
+    const clearSecrets = () => root.querySelectorAll('input[type="password"]').forEach((input) => { if (input !== enrollment?.uriInput) input.value = ""; });
+    function clearTotpSetup() {
+      const previous = enrollment;
+      enrollment = null;
+      if (!previous) return;
+      clearTimeout(previous.timer);
+      for (const input of [previous.secretInput, previous.uriInput, previous.codeInput]) {
+        input.value = "";
+        input.defaultValue = "";
+      }
+      previous.container.innerHTML = "";
+      previous.form.hidden = false;
+    }
+    const leavePage = () => { version++; clearTotpSetup(); clearSecrets(); };
+    window.addEventListener?.("pagehide", leavePage);
     async function checkScope(allowFreshSession = false, verified = null) {
       const current = verified || await request("/auth/status");
       if (!active()) return false;
       if (!(allowFreshSession ? sameAuthority(auth, current) : sameScope(auth, current))) {
         clearSecrets();
+        clearTotpSetup();
         throw new Error("当前登录账户或店铺已改变，请重新打开后台后再操作");
       }
       if (allowFreshSession) { auth = current; onAuth(current); }
       return true;
     }
+    function showTotpSetup(result) {
+      if (!active()) return;
+      const uri = new URL(result.uri);
+      if (typeof result.secret !== "string" || !/^[A-Z2-7]{16,128}$/.test(result.secret) || uri.protocol !== "otpauth:" || uri.hostname !== "totp" || uri.searchParams.get("secret") !== result.secret || !Number.isFinite(result.expires) || result.expires * 1000 <= Date.now()) {
+        throw new Error(tr("验证器设置无效或已过期，请重新设置。", "Authenticator setup is invalid or expired. Start again."));
+      }
+      clearTotpSetup();
+      const container = $("#account-totp-setup"), form = $("#account-totp-form"), revision = version;
+      container.innerHTML = `<section class="totp-setup form-divider"><h4>${tr("添加到验证器", "Add to your authenticator")}</h4><div class="totp-methods" role="group" aria-label="${tr("验证器设置方式", "Authenticator setup method")}"><button id="account-totp-qr" type="button" class="secondary" aria-pressed="true">${tr("二维码", "QR code")}</button><button id="account-totp-manual" type="button" class="secondary" aria-pressed="false">${tr("手动输入", "Manual entry")}</button></div><div id="totp-qr-panel"><p>${tr("用验证器扫描二维码；如果验证器就在这台手机上，可切换到手动输入。", "Scan with your authenticator. If it is on this phone, use manual entry.")}</p><div id="totp-qr-code" class="totp-qr-code" role="img" aria-label="${tr("验证器设置二维码", "Authenticator setup QR code")}"></div></div><div id="totp-manual-panel" hidden><p>${tr("在验证器中选择添加账号、手动输入设置密钥，再填入下方信息。", "Choose add account and enter a setup key manually in your authenticator.")}</p><div class="field"><label for="totp-secret">${tr("密钥（Secret）", "Setup key (Secret)")}</label><div class="totp-key-entry"><input id="totp-secret" type="text" readonly autocomplete="off" autocapitalize="off" spellcheck="false" aria-describedby="totp-key-help"><button id="account-totp-copy-secret" type="button" class="secondary">${tr("复制密钥", "Copy key")}</button></div><p id="totp-key-help" class="caption">${tr("类型选择「基于时间」，6 位验证码，每 30 秒更新。", "Select time based, 6 digits, updating every 30 seconds.")}</p></div><details class="totp-import"><summary>${tr("其他导入方式", "Other import options")}</summary>${field("totp-uri", tr("验证器设置链接", "Authenticator setup URI"), "password", 'readonly autocomplete="off"')}<button id="account-totp-copy" type="button" class="secondary">${tr("复制设置链接", "Copy setup URI")}</button></details></div><p id="totp-copy-status" class="caption" role="status"></p><p class="caption">${tr("设置有效期 10 分钟。二维码在本机生成；输入验证码确认后才会开启 2FA。", "Setup expires in 10 minutes. The QR code is generated locally. 2FA starts only after you confirm a code.")}</p><form id="account-totp-confirm-form" class="form-divider">${field("totp-confirm", tr("验证器当前六位码", "Current 6-digit authenticator code"), "text", 'required inputmode="numeric" autocomplete="one-time-code" pattern="[0-9]{6}" minlength="6" maxlength="6"')}<div class="actions"><button id="account-totp-confirm" type="submit">${tr("确认开启 2FA", "Enable 2FA")}</button><button id="account-totp-cancel" type="button" class="secondary">${tr("取消设置", "Cancel setup")}</button></div></form></section>`;
+      const state = { container, form, revision, expires: result.expires * 1000, secretInput: $("#totp-secret"), uriInput: $("#totp-uri"), codeInput: $("#totp-confirm"), confirming: false, timer: null };
+      enrollment = state;
+      state.secretInput.value = result.secret;
+      state.uriInput.value = result.uri;
+      form.hidden = true;
+      text("#account-totp-notice", "");
+      const current = () => active() && version === revision && enrollment === state;
+      const expire = () => { if (!current()) return; clearTotpSetup(); text("#account-totp-notice", tr("设置已过期，2FA 尚未开启。请重新设置验证器。", "Setup expired. 2FA has not been enabled. Start again.")); };
+      const usable = () => { if (!current()) return false; if (Date.now() >= state.expires) { expire(); return false; } return true; };
+      state.timer = setTimeout(expire, Math.min(600000, Math.max(0, state.expires - Date.now())));
+      const method = (manual) => {
+        if (!usable()) return;
+        $("#totp-qr-panel").hidden = manual;
+        $("#totp-manual-panel").hidden = !manual;
+        $("#account-totp-qr").setAttribute("aria-pressed", String(!manual));
+        $("#account-totp-manual").setAttribute("aria-pressed", String(manual));
+      };
+      try {
+        $("#totp-qr-code").innerHTML = window.ExtoreTotpQr.createSvg(state.uriInput.value);
+        $("#totp-qr-code").querySelector("svg")?.setAttribute("aria-hidden", "true");
+      } catch {
+        method(true);
+        $("#account-totp-qr").disabled = true;
+        text("#totp-copy-status", tr("二维码暂不可用，请使用手动输入。", "QR code unavailable. Use manual entry."));
+      }
+      on("#account-totp-qr", "click", () => method(false));
+      on("#account-totp-manual", "click", () => method(true));
+      const copy = async (input, message) => {
+        if (!usable() || !await checkScope() || !usable()) return;
+        let copied = false;
+        try { copied = await window.ExtoreClipboard?.writeText(input.value); } catch { /* Manual selection remains available. */ }
+        if (!usable()) return;
+        if (copied) text("#totp-copy-status", message);
+        else {
+          input.focus(); input.select(); input.setSelectionRange(0, input.value.length);
+          text("#totp-copy-status", tr("复制失败，请长按已选中的内容手动复制。", "Copy failed. Press and hold the selected text to copy manually."));
+        }
+      };
+      on("#account-totp-copy-secret", "click", () => copy(state.secretInput, tr("密钥已复制。", "Setup key copied.")));
+      on("#account-totp-copy", "click", () => copy(state.uriInput, tr("设置链接已复制。", "Setup URI copied.")));
+      $("#account-totp-cancel").addEventListener("click", () => {
+        if (!current() || state.confirming) return;
+        clearTotpSetup();
+        text("#account-totp-notice", tr("已关闭设置，2FA 尚未开启。重新设置会生成新密钥。", "Setup closed. 2FA has not been enabled. Starting again creates a new key."));
+      });
+      on("#account-totp-confirm-form", "submit", async () => {
+        if (!usable()) return;
+        const code = state.codeInput.value.trim();
+        if (!/^[0-9]{6}$/.test(code)) throw new Error(tr("请输入验证器当前的六位验证码。", "Enter the current 6-digit authenticator code."));
+        state.confirming = true;
+        $("#account-totp-cancel").disabled = true;
+        try {
+          if (!await checkScope() || !usable()) return;
+          const response = await request("/auth/totp/confirm", { code }, "POST");
+          if (current()) recovery(response.backup_codes);
+        } finally {
+          state.codeInput.value = "";
+          state.confirming = false;
+          if (current()) $("#account-totp-cancel").disabled = false;
+        }
+      });
+    }
     function fresh(handler, title = "确认账户身份") {
       if (!active()) return;
       const target = $("#account-confirmation");
-      target.innerHTML = `<section class="panel account-stepup"><h3>${esc(title)}</h3><p class="caption">重新验证后才会提交本次操作。店铺范围：${esc(rootScope(auth) ? "超级管理员" : auth.shop_id || "未登录")}</p>${shopScope(auth) ? `<form id="account-fresh-form">${secret("fresh-password", "当前密码", 'required autocomplete="current-password" maxlength="200"')}${factors("fresh")}<button type="submit">使用密码确认</button></form>` : ""}<div class="actions"><button id="account-fresh-passkey" type="button">使用 Passkey 确认</button><button id="account-fresh-cancel" class="secondary" type="button">取消</button></div></section>`;
+      target.innerHTML = `<section class="panel account-stepup"><h3>${esc(title)}</h3><p class="caption">重新验证后才会提交本次操作。店铺范围：${esc(rootScope(auth) ? "超级管理员" : auth.shop_id || "未登录")}</p>${shopScope(auth) ? `<form id="account-fresh-form">${secret("fresh-password", "当前密码", 'required autocomplete="current-password" maxlength="200"')}${factors("fresh", tr)}<button type="submit">使用密码确认</button></form>` : ""}<div class="actions"><button id="account-fresh-passkey" type="button">使用 Passkey 确认</button><button id="account-fresh-cancel" class="secondary" type="button">取消</button></div></section>`;
       on("#account-fresh-form", "submit", async () => {
         try { await request("/auth/reauth/password", values("fresh"), "POST"); } finally { clearSecrets(); }
         if (!await checkScope()) return;
@@ -84,7 +171,7 @@
     const completed = (message) => { page(tr("操作已完成", "Done"), `<section class="panel"><p>${esc(message)}</p><a href="/account/login">${tr("返回登录", "Return to sign in")}</a></section>`); };
 
     function login() {
-      page(tr("店铺账户登录", "Shop account sign in"), `<section class="panel"><form id="account-login-form">${field("login-email", tr("邮箱", "Email"), "email", 'required autocomplete="username" maxlength="254"')}${secret("login-password", tr("密码", "Password"), 'required autocomplete="current-password" maxlength="200"')}${factors("login")}<button class="full" type="submit">${tr("登录店铺", "Sign in")}</button></form><div class="form-divider"><button id="account-passkey" type="button" class="secondary full">${tr("使用 Passkey 登录", "Sign in with Passkey")}</button>${auth.password_enabled ? `<form id="account-bootstrap-form" class="form-divider">${secret("bootstrap-password", "超级管理员首次登录密码", 'required autocomplete="current-password"')}<button class="secondary full" type="submit">首次登录并添加 Passkey</button></form>` : ""}</div></section><p><a href="/account/reset">${tr("忘记密码", "Forgot password")}</a>${auth.registration_enabled === true ? ` · <a href="/account/register">${tr("注册店铺", "Register a shop")}</a>` : ""}</p>${auth.registration_enabled === true ? "" : `<p class="caption">${tr("注册当前关闭。请使用管理员发送的店铺邀请链接。", "Registration is closed. Use the shop invitation sent by an administrator.")}</p>`}`);
+      page(tr("店铺账户登录", "Shop account sign in"), `<section class="panel"><form id="account-login-form">${field("login-email", tr("邮箱", "Email"), "email", 'required autocomplete="username" maxlength="254"')}${secret("login-password", tr("密码", "Password"), 'required autocomplete="current-password" maxlength="200"')}${factors("login", tr)}<button class="full" type="submit">${tr("登录店铺", "Sign in")}</button></form><div class="form-divider"><button id="account-passkey" type="button" class="secondary full">${tr("使用 Passkey 登录", "Sign in with Passkey")}</button>${auth.password_enabled ? `<form id="account-bootstrap-form" class="form-divider">${secret("bootstrap-password", "超级管理员首次登录密码", 'required autocomplete="current-password"')}<button class="secondary full" type="submit">首次登录并添加 Passkey</button></form>` : ""}</div></section><p><a href="/account/reset">${tr("忘记密码", "Forgot password")}</a>${auth.registration_enabled === true ? ` · <a href="/account/register">${tr("注册店铺", "Register a shop")}</a>` : ""}</p>${auth.registration_enabled === true ? "" : `<p class="caption">${tr("注册当前关闭。请使用管理员发送的店铺邀请链接。", "Registration is closed. Use the shop invitation sent by an administrator.")}</p>`}`);
       on("#account-login-form", "submit", async () => {
         const body = { email: $("#login-email").value.trim(), ...values("login") };
         try { await request("/auth/email/login", body, "POST"); } finally { clearSecrets(); }
@@ -106,7 +193,7 @@
       }
       if (mode === "invite" || (mode === "reset" && token)) {
         if (!/^[A-Za-z0-9_-]{20,100}$/.test(token)) { page("链接无效", '<p class="error">请打开邮件中完整的邀请或密码重置链接。</p>'); return; }
-        page(mode === "invite" ? "领取店铺邀请" : "重置店铺密码", `<section class="panel"><form id="account-token-form">${secret("token-password", "新密码（至少 12 字符）", 'required autocomplete="new-password" minlength="12" maxlength="200"')}${secret("token-confirm", "再次输入新密码", 'required autocomplete="new-password" minlength="12" maxlength="200"')}${mode === "reset" ? factors("token") + '<p class="caption">已开启二次验证的账户仍需验证码或恢复码。</p>' : ""}<button class="full" type="submit">${mode === "invite" ? "设置密码并领取店铺" : "确认重置密码"}</button></form></section>`);
+        page(mode === "invite" ? "领取店铺邀请" : "重置店铺密码", `<section class="panel"><form id="account-token-form">${secret("token-password", "新密码（至少 12 字符）", 'required autocomplete="new-password" minlength="12" maxlength="200"')}${secret("token-confirm", "再次输入新密码", 'required autocomplete="new-password" minlength="12" maxlength="200"')}${mode === "reset" ? factors("token", tr) + '<p class="caption">已开启 2FA 的账户仍需验证码或恢复码。</p>' : ""}<button class="full" type="submit">${mode === "invite" ? "设置密码并领取店铺" : "确认重置密码"}</button></form></section>`);
         on("#account-token-form", "submit", async () => {
           const body = { token, ...values("token") };
           if (body.password !== $("#token-confirm").value) throw new Error("两次密码不一致");
@@ -135,7 +222,7 @@
       const [keys, account] = await Promise.all([request("/auth/passkeys"), shopScope(auth) ? request("/shop/account") : Promise.resolve(null)]);
       if (!active() || load !== version) return;
       if (account && account.id !== auth.shop_id) throw new Error("店铺账户范围不一致，请重新登录");
-      page("账户安全", `<p class="caption">${account ? "当前店铺：" + esc(account.name) + " · " + esc(account.email) : "超级管理员 · 平台范围"}</p>${account ? `<section class="panel"><h3>店铺账户</h3><form id="account-name-form">${field("account-name", "店铺名称", "text", 'required maxlength="100"', account.name)}<button type="submit" class="secondary">保存名称</button></form><form id="account-password-form" class="form-divider"><h3>修改密码</h3>${secret("change-password", "当前密码", 'required autocomplete="current-password" maxlength="200"')}${secret("change-new", "新密码（至少 12 字符）", 'required autocomplete="new-password" minlength="12" maxlength="200"')}${factors("change")}<button type="submit">验证并修改密码</button><p class="caption">修改后退出此前所有设备及授权会话，当前浏览器重新登录。</p></form></section><section class="panel"><h3>密码二次验证</h3><p>${account.totp_enabled ? "已开启。密码登录需验证码或恢复码；Passkey 可独立登录。" : "尚未开启。可添加验证器，为密码登录增加二次验证。"}</p><form id="account-totp-form">${secret("totp-password", "当前密码", 'required autocomplete="current-password" maxlength="200"')}${account.totp_enabled ? factors("totp") : ""}<div class="actions">${account.totp_enabled ? '<button id="account-totp-rotate" type="submit">重新生成恢复码</button><button id="account-totp-disable" type="button" class="danger">关闭二次验证</button>' : '<button type="submit">设置验证器</button>'}</div></form><div id="account-totp-setup"></div></section>` : '<p class="caption">超级管理员使用 Passkey。可添加多个设备；请保留备用设备。</p>'}<section class="panel"><h3>Passkey 设备</h3>${field("account-key-name", "新设备名称", "text", 'maxlength="200"', "备用 Passkey")}<button id="account-key-add" type="button">添加 Passkey</button><div class="product-list">${keys.map((key) => `<div class="product-row"><div class="product-info"><h3>${esc(key.name)}</h3><p>${esc(new Date(key.created * 1000).toLocaleString())}</p></div><button data-account-key="${esc(key.id)}" type="button" class="danger">移除</button></div>`).join("")}</div></section>`);
+      page(tr("账户安全", "Account security"), `<p class="caption">${account ? "当前店铺：" + esc(account.name) + " · " + esc(account.email) : "超级管理员 · 平台范围"}</p>${account ? `<section class="panel"><h3>店铺账户</h3><form id="account-name-form">${field("account-name", "店铺名称", "text", 'required maxlength="100"', account.name)}<button type="submit" class="secondary">保存名称</button></form><details class="account-password-change form-divider"><summary>修改密码</summary><form id="account-password-form">${secret("change-password", "当前密码", 'required autocomplete="current-password" maxlength="200"')}${secret("change-new", "新密码（至少 12 字符）", 'required autocomplete="new-password" minlength="12" maxlength="200"')}${factors("change", tr)}<button type="submit">验证并修改密码</button><p class="caption">修改后退出此前所有设备及授权会话，当前浏览器重新登录。</p></form></details></section><section class="panel"><h3>${tr("2FA 双因素认证", "2FA two-factor authentication")}</h3><p>${account.totp_enabled ? tr("已开启。密码登录需要验证器验证码或恢复码；Passkey 可独立登录。", "Enabled. Password sign-in requires an authenticator or recovery code. Passkeys work independently.") : tr("尚未开启。添加验证器，让密码登录多一层保护。", "Not enabled. Add an authenticator to protect password sign-in.")}</p><form id="account-totp-form">${secret("totp-password", "当前密码", 'required autocomplete="current-password" maxlength="200"')}${account.totp_enabled ? factors("totp", tr) : ""}<div class="actions">${account.totp_enabled ? `<button id="account-totp-rotate" type="submit">${tr("重新生成恢复码", "Regenerate recovery codes")}</button><button id="account-totp-disable" type="button" class="danger">${tr("关闭 2FA", "Disable 2FA")}</button>` : `<button type="submit">${tr("设置验证器", "Set up authenticator")}</button>`}</div></form><div id="account-totp-setup"></div><p id="account-totp-notice" class="caption" role="status"></p></section>` : '<p class="caption">超级管理员使用 Passkey。可添加多个设备；请保留备用设备。</p>'}<section class="panel"><h3>Passkey 设备</h3>${field("account-key-name", "新设备名称", "text", 'maxlength="200"', "备用 Passkey")}<button id="account-key-add" type="button">添加 Passkey</button><div class="product-list">${keys.map((key) => `<div class="product-row"><div class="product-info"><h3>${esc(key.name)}</h3><p>${esc(new Date(key.created * 1000).toLocaleString())}</p></div><button data-account-key="${esc(key.id)}" type="button" class="danger">移除</button></div>`).join("")}</div></section>`);
       on("#account-name-form", "submit", async () => { const name = $("#account-name").value.trim(); if (!await checkScope()) return; await request("/shop/account", { name }, "PATCH"); if (active()) await security(); });
       on("#account-password-form", "submit", async () => {
         const body = { ...values("change"), new_password: $("#change-new").value };
@@ -147,6 +234,7 @@
       on("#account-key-add", "click", () => { const name = $("#account-key-name").value; fresh(async () => { const verified = await passkey(true, name, { signal: controller.signal, isCurrent: active }); if (!await checkScope(true, verified)) return; if (active()) await security(); }, "确认添加 Passkey"); });
       root.querySelectorAll("[data-account-key]").forEach((node) => node.addEventListener("click", () => run(() => fresh(async () => { await request("/auth/passkeys/" + encodeURIComponent(node.dataset.accountKey), null, "DELETE"); if (active()) await security(); }, "确认移除 Passkey"), node)));
       on("#account-totp-form", "submit", async () => {
+        const revision = version;
         const body = values("totp");
         if (!await checkScope()) return;
         if (account.totp_enabled) {
@@ -155,10 +243,10 @@
         }
         let result;
         try { result = await request("/auth/totp/setup", body, "POST"); } finally { clearSecrets(); }
-        if (!active()) return;
-        $("#account-totp-setup").innerHTML = `<div class="form-divider"><p>在验证器里手动添加下方密钥，或复制本地设置链接导入。密钥不发送给第三方二维码服务。</p>${field("totp-secret", "验证器密钥", "password", "readonly autocomplete=\"off\"", result.secret)}${field("totp-uri", "验证器设置链接", "password", "readonly autocomplete=\"off\"", result.uri)}<button id="account-totp-copy" type="button" class="secondary">复制设置链接</button><div class="field">${secret("totp-confirm", "验证器当前六位码", 'inputmode="numeric" maxlength="6"')}</div><button id="account-totp-confirm" type="button">确认开启二次验证</button></div>`;
-        on("#account-totp-copy", "click", async () => { const copied = await window.ExtoreClipboard?.writeText($("#totp-uri").value); if (!copied) throw new Error("复制失败，请在输入框中手动复制"); });
-        on("#account-totp-confirm", "click", async () => { try { const result = await request("/auth/totp/confirm", { code: $("#totp-confirm").value.trim() }, "POST"); if (active()) recovery(result.backup_codes); } finally { clearSecrets(); } });
+        try {
+          if (!active() || revision !== version || !await checkScope() || revision !== version) return;
+          showTotpSetup(result);
+        } finally { result.secret = result.uri = ""; }
       });
       on("#account-totp-disable", "click", async () => { const body = values("totp"); if (!await checkScope()) return; try { await request("/auth/totp/disable", body, "POST"); } finally { clearSecrets(); } if (active()) await security(); });
     }
@@ -214,7 +302,7 @@
       }, node)));
       root.querySelectorAll("[data-profile-delete]").forEach((node) => node.addEventListener("click", () => run(() => fresh(async () => { await request("/admin/processor-profiles/" + encodeURIComponent(node.dataset.profileDelete), null, "DELETE"); if (active()) await profiles(); }, "确认停用处理器账户"), node)));
     }
-    const instance = Object.freeze({ dispose() { disposed = true; version++; controller.abort(); clearSecrets(); if (mounts.get(root) === instance) mounts.delete(root); }, confirmFresh: fresh, get active() { return active(); } });
+    const instance = Object.freeze({ dispose() { disposed = true; version++; controller.abort(); clearTotpSetup(); clearSecrets(); window.removeEventListener?.("pagehide", leavePage); if (mounts.get(root) === instance) mounts.delete(root); }, confirmFresh: fresh, get active() { return active(); } });
     mounts.set(root, instance);
     const ready = mode === "confirm" ? () => page("确认身份", "") : mode === "security" ? security : mode === "shops" ? shops : mode === "mail" ? mail : mode === "profiles" ? profiles : mode === "login" ? login : emailFlow;
     instanceReady(ready);

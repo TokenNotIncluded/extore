@@ -102,8 +102,11 @@ def init():
         from .mail import init_schema as init_mail_schema
 
         init_mail_schema(c)
-        if c.execute("PRAGMA user_version").fetchone()[0] < 11:
-            c.execute("PRAGMA user_version=11")
+        from .device_login import init_schema as init_device_login_schema
+
+        init_device_login_schema(c)
+        if c.execute("PRAGMA user_version").fetchone()[0] < 12:
+            c.execute("PRAGMA user_version=12")
     # WAL is set outside a transaction.
     with sqlite3.connect(DATA / "extore.sqlite3") as c:
         c.execute("PRAGMA journal_mode=WAL")

@@ -1,0 +1,88 @@
+.device-login {
+  overflow-wrap: anywhere;
+  min-width: 0;
+}
+.device-login .section-head {
+  gap: 16px;
+  align-items: start;
+}
+.device-login .section-head h1 {
+  margin-top: 0;
+}
+.device-login .section-head > a {
+  flex-shrink: 0;
+  padding-block: 10px;
+}
+.device-login input,
+.device-login select {
+  font-size: 16px;
+  min-height: 48px;
+  min-width: 0;
+}
+.device-login .code {
+  letter-spacing: 0.055em;
+  text-transform: uppercase;
+}
+.device-login button {
+  min-height: 44px;
+}
+.device-details {
+  display: grid;
+  grid-template-columns: max-content minmax(0, 1fr);
+  gap: 10px 20px;
+  margin-block: 22px;
+}
+.device-details dt {
+  color: var(--muted);
+}
+.device-details dd {
+  margin: 0;
+  min-width: 0;
+}
+.device-fingerprint {
+  overflow-wrap: anywhere;
+  font-size: 14px;
+}
+.device-permissions {
+  padding-left: 22px;
+}
+.device-permissions li + li {
+  margin-top: 8px;
+}
+.device-permissions .caption {
+  display: block;
+}
+.device-login #device-confirmation:empty {
+  display: none;
+}
+.device-login .account-page {
+  width: 100%;
+  max-width: 100%;
+  margin-inline: 0;
+}
+@media (max-width: 480px) {
+  .device-login .section-head {
+    flex-direction: column;
+    gap: 0;
+  }
+  .device-login .section-head > a {
+    margin-bottom: 12px;
+  }
+  .device-login .panel {
+    padding: 24px 18px 30px;
+  }
+  .device-details {
+    grid-template-columns: minmax(0, 1fr);
+    gap: 2px;
+  }
+  .device-details dd {
+    margin-bottom: 12px;
+  }
+  .device-actions {
+    flex-direction: column;
+  }
+  .device-actions button,
+  .device-login .account-stepup .actions button {
+    width: 100%;
+  }
+}

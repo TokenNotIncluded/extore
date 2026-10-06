@@ -33,6 +33,10 @@ AUDIT_ACTIONS = (
     "cli.device.create",
     "cli.device.revoke",
     "cli.ticket.create",
+    "cli.product.request",
+    "cli.product.approve",
+    "cli.product.deny",
+    "cli.product.claim",
     "cli.owner.request",
     "cli.owner.approve",
     "cli.owner.device.create",
@@ -448,6 +452,14 @@ def _list_audit(request, roles, limit):
                             f"SELECT id FROM {table} WHERE shop_id=?", (shop_id,)
                         )
                     }
+            targets |= {
+                row["id"]
+                for row in c.execute(
+                    "SELECT id,approved_staff_id,approved_shop_id FROM cli_device_requests"
+                )
+                if row["approved_staff_id"] in scope
+                or (shop_id is not None and row["approved_shop_id"] == shop_id)
+            }
             if not targets:
                 return []
             sql += " AND target IN (" + ",".join("?" for _ in targets) + ")"
@@ -463,6 +475,9 @@ def _list_audit(request, roles, limit):
         safe_targets |= {r["id"] for r in c.execute("SELECT id FROM owner_cli_devices")}
         safe_targets |= {
             r["id"] for r in c.execute("SELECT id FROM owner_cli_requests")
+        }
+        safe_targets |= {
+            r["id"] for r in c.execute("SELECT id FROM cli_device_requests")
         }
         return [
             {
@@ -489,6 +504,12 @@ def _list_audit(request, roles, limit):
 def _audit_metadata(c, row):
     # Reconstruct safe metadata through opaque targets; never serialize the
     # credential or free-form contents of the common audit table.
+    pending = c.execute(
+        "SELECT client_name,fingerprint FROM cli_device_requests WHERE id=?",
+        (row["target"],),
+    ).fetchone()
+    if pending is not None:
+        return {"channel": "cli", **dict(pending)}
     target = c.execute(
         "SELECT sessions.channel,sessions.client_name,COALESCE(cli_devices.fingerprint,owner_cli_devices.fingerprint) AS fingerprint "
         "FROM sessions LEFT JOIN cli_devices ON cli_devices.id=sessions.device_id AND cli_devices.staff_id=sessions.staff_id "

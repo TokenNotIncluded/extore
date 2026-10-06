@@ -418,22 +418,85 @@ Content-Type: application/json
 
 ## CLI 设备授权
 
-商品管理 CLI 使用 Ed25519 设备密钥，与浏览器 Cookie 会话分开。一个设备授权仍只有一个商品管理链接的权限；多个商品的聚合只在客户端完成。安装和命令用法见 [CLI 文档](cli.md)。全店授权使用后文独立的店主流程。
+商品管理 CLI 使用 Ed25519 设备密钥，与浏览器 Cookie 会话分开。默认通过设备码申请，商家本人在浏览器选择**既有商品管理授权**后批准；管理链接原文不交给 CLI。一个设备授权仍只有一个商品管理链接的权限；多个商品的聚合只在客户端完成。网页「复制给 AI 的提示词」只复制公开接入说明，不创建申请、绑定票据或消耗登录次数。安装和命令用法见 [CLI 文档](cli.md)。全店授权使用后文独立的店主流程。
+
+`public_key` 是 32 字节 Ed25519 公钥的无填充 base64url（43 字符），`signature` 是 64 字节签名的同种编码（86 字符）。设备码申请的 `client_name` 为 1–100 字符，不得有首尾空白或 Unicode 控制类字符。签名文本使用 UTF-8，以单个换行连接字段，不再额外追加换行；`EXTORE_ORIGIN` 必须与服务器配置完全一致。
+
+### 商品设备码登录（默认）
 
 | 接口 | 认证与请求 | 结果 |
 | --- | --- | --- |
-| `POST /api/cli/authorize` | 无 Cookie / Bearer；`{token,public_key,client_name,signature}` | 绑定设备，返回 `device_id,product_id,client_name,fingerprint,permissions,expires,already_authorized,max_cli_uses,cli_uses,remaining_cli_uses` |
+| `POST /api/cli/device/request` | 无浏览器 Cookie / Bearer；`{public_key,client_name,nonce,signature,product_id?}` | `request_id,user_code,client_name,fingerprint,product_id,approval_url,challenge,expires,expires_in,interval` |
+| `POST /api/cli/device/status` | 无浏览器 Cookie / Bearer；`{request_id,public_key,signature}` | `status,expires,interval`；status 为 pending / approved / claimed / denied / expired / slow_down |
+| `POST /api/manage/device/options` | 已登录浏览器；`{user_code,staff_id?}` | `request,candidates,candidates_truncated`；指定授权后另返 `selected,review_digest` |
+| `POST /api/manage/device/approve` | 同一已登录浏览器；`{user_code,staff_id,review_digest}` | `{ok:true,status:"approved"}`；商家账号需最近 10 分钟内认证 |
+| `POST /api/manage/device/deny` | 已登录浏览器；`{user_code}` | `{ok:true,status:"denied"}` |
+| `POST /api/cli/device/claim` | 无浏览器 Cookie / Bearer；`{request_id,public_key,signature}` | 与旧设备绑定相同的 `device_id,product_id,shop_id,client_name,fingerprint,permissions,expires,already_authorized,max_cli_uses,cli_uses,remaining_cli_uses` |
+
+三个 `/api/cli/device/*` 握手接口拒绝 `extore_session` Cookie 或任何 `Authorization` 头，不设置浏览器登录 Cookie。浏览器审批接口要求有效的 browser 会话并校验请求 `Origin`，不接受 CLI Bearer；网页附带 `X-Extore-Shop-Scope`、`X-Extore-Session-ID` 检测店铺或会话切换。公开页面为 `EXTORE_ORIGIN/cli/device`，没有私密片段或管理链接；`approval_url` 和设备码本身不能领取授权，领取必须证明持有申请设备私钥。只批准自己刚发起且名称、指纹相符的请求，AI 不能代替商家完成审批。
+
+`nonce` 为 32 字节的无填充 base64url：前 8 字节是生成时的 Unix 秒数、无符号大端整数，后 24 字节为密码学随机数。新申请允许该时间最多超前服务器 60 秒，并须在该时间之后 10 分钟内提交。到期时间为 `min(服务器当前时间+600, nonce时间+600)`。同一公钥、同一 nonce 的完整请求重传返回同一申请、设备码和原到期时间，不延长期限；更改设备名称或 `product_id` 返回 401。旧申请记录清理后，过期 nonce 也不能重建申请。
+
+申请签名：
+
+```text
+extore-cli-device-request-v1
+EXTORE_ORIGIN
+public_key
+client_name
+nonce
+product_id（省略或 null 时为空字符串）
+```
+
+最后一项为空时，文本以连接到该空字段的换行结束，不再额外追加换行。`product_id` 可省略或为 `null`；指定后限制浏览器只能选择该商品的授权，不能在审批时换商品。
+
+查询状态签名：
+
+```text
+extore-cli-device-status-v1
+EXTORE_ORIGIN
+request_id
+public_key
+```
+
+设备码为 12 个随机字符，使用 `ABCDEFGHJKLMNPQRSTUVWXYZ23456789`，显示为 `XXXX-XXXX-XXXX`；查找时忽略大小写与连字符。公开握手和查询不返回候选店铺、授权链接或秘密凭证。`fingerprint` 为原始公钥字节的 SHA-256 小写十六进制摘要。轮询起始间隔 5 秒；pending / approved 状态轮询过快时返回 `slow_down` 与 `retry_after`，间隔每次增加 5 秒、最高 60 秒，客户端应遵守返回间隔。
+
+浏览器先用 `options` 查找待批准设备码，再明确传所选 `staff_id` 核对。商家账号仅可选择本店授权，平台管理员可选择其有权管理的授权；商品管理会话只能选择当前自己的链接，即使具有下级委派权限也不能批准另一条链接。候选最多返回 200 条，`candidates_truncated` 表示还有未返回的候选；显式选择仍由服务器检查归属和剩余次数。`selected` 返回店铺、商品、链接名称与 ID、有效权限、期限、`remaining_cli_uses` 和 `already_bound`，不返回链接原文。
+
+`review_digest` 为当前浏览器会话与完整审核快照的 SHA-256 摘要；快照包含设备请求、店铺/商品/链接的 ID 与名称、有效权限、有效期限，以及从所选链接到祖先的关系、权限、期限、撤销/归档状态和 CLI 额度上限。批准必须在同一浏览器会话提交该摘要，服务器重新计算并核对；账户、授权或祖先范围变化后不能使用旧审核结果。批准不创建新链接、不改变权限，也不创建 CLI 会话。拒绝与申请到期不扣绑定次数。
+
+领取签名使用申请返回的 `challenge`：
+
+```text
+extore-cli-device-claim-v1
+EXTORE_ORIGIN
+request_id
+challenge
+public_key
+```
+
+首次 claim 仍要求批准它的浏览器会话有效，账号与店铺范围不变，并重新检查审核快照、商品授权及祖先。新增设备在同一事务中消耗一次 `max_cli_uses` 额度并绑定 `(staff_id,public_key)`，不消费浏览器 `max_uses`；审批之后被其他设备占用最后次数时，此次 claim 不能越过额度。相同申请、公钥与已记录设备的重复 claim 在申请有效期内恢复同一设备响应，不重复扣次数。成功绑定之后的普通浏览器退出不会撤销 CLI；重复 claim 此时不再依赖已退出的审批浏览器，但仍检查申请期限、授权快照和设备有效性。
+
+CLI 额度为 0 时，已存在且未撤销的**同链接、同公钥**可经新设备码审核恢复原设备，不产生新绑定或延长授权期限；新公钥仍会被拒绝。已撤销的旧设备 key 不能恢复，失效的链接或祖先也不能恢复。原私钥丢失后，新 key 需要该授权的剩余额度或新的合法商品授权，不能绕过额度。申请、批准与领取记录有审计；过期握手记录按批次清理，不删除有效设备或结束已有 CLI 会话。
+
+CLI 的 `--no-wait` 只返回公开确认网址、设备码、指纹与到期时间。相同 origin、商品、设备名称和本地 profile 再次执行设备码登录，会恢复尚未过期的申请及私钥；去掉 `--no-wait` 等待审核并完成 claim。申请过期而原私钥仍保留时，可申请新设备码恢复同一绑定。私钥、nonce 与待完成申请保存在本地私有配置中，不放进提示词、命令行参数或日志。绑定之后使用下文的通用挑战接口续签，不重复申请设备码。
+
+### 设备会话与旧链接绑定兼容
+
+| 接口 | 认证与请求 | 结果 |
+| --- | --- | --- |
+| `POST /api/cli/authorize` | 无 Cookie / Bearer；`{token,public_key,client_name,signature}` | 旧链接/票据绑定兼容入口，返回上述设备绑定字段 |
 | `POST /api/cli/challenge` | 无 Cookie / Bearer；`{device_id}` | `challenge_id,challenge,expires,expires_in`，最多有效 5 分钟 |
 | `POST /api/cli/session` | 无 Cookie / Bearer；`{device_id,challenge_id,signature}` | `access_token,token_type,expires,expires_in,device_id,session_id,product_id,permissions` |
 | `GET /api/cli/status` | CLI Bearer | 当前商品、链接、设备、会话与独立额度元数据，不返回凭据 |
 | `DELETE /api/cli/session` | CLI Bearer | 退出当前会话，保留设备授权 |
-| `POST /api/manage/cli-ticket` | 商家或商品管理的浏览器会话；`{staff_id?}`，CLI Bearer 不允许 | `token,origin,expires,expires_in,staff_id,product_id`，用于短期 CLI 绑定 |
+| `POST /api/manage/cli-ticket` | 商家或商品管理的浏览器会话；`{staff_id?}`，CLI Bearer 不允许 | 兼容短期绑定入口，返回 `token,origin,expires,expires_in,staff_id,product_id`；默认网页提示词不调用 |
 | `GET /api/admin/cli-devices` | 商家会话 | 全店商品管理 CLI 设备安全元数据 |
 | `GET /api/manage/cli-devices` | 商品管理会话 | 自己及有权管理的下级设备 |
 | `DELETE /api/admin/cli-devices/{id}` | 商家会话 | 撤销设备及其 CLI 会话 |
 | `DELETE /api/manage/cli-devices/{id}` | 商品管理会话，服务端限定链接范围 | 撤销有权管理的设备及其会话 |
 
-`public_key` 是 32 字节 Ed25519 公钥的无填充 base64url（43 字符），`signature` 是 64 字节签名的同种编码（86 字符）。`client_name` 为去除首尾空白后 1–100 字符的设备名称。`token` 由Extore 客户端提交完整 `/staff#…` 管理链接或 `/cli#…` 专用票据链接。绑定签名使用 UTF-8，字段之间为单个换行，末尾没有换行：
+旧入口的 `client_name` 为去除首尾空白后 1–100 字符的设备名称。`token` 由 Extore 客户端提交完整 `/staff#…` 管理链接或 `/cli#…` 专用票据链接，须通过私密标准输入或安全交互传入；这些链接仍是私密凭证。绑定签名：
 
 ```text
 extore-cli-bind-v1
@@ -456,7 +519,7 @@ challenge
 
 挑战只可成功消费一次。Bearer 有效期为 8 小时与链接及祖先剩余有效期的较短者；每次请求重新检查设备、链接、祖先和权限。可用设备通过新挑战续签，不再次消耗管理链接额度。商品管理 CLI Bearer 用于 `/api/cli/status`、退出及获授权的 `/api/manage/*` 操作，不授予全店 `/api/admin/*` 权限，也不混用浏览器 Cookie。
 
-CLI 专用票据最多有效 5 分钟，不能超过授权剩余期限。只有已登录浏览器可生成，CLI Bearer 返回 403。商家生成时指定目标 `staff_id`；商品管理会话只能为自己的链接生成，不能借此给其他链接授权。票据首次绑定消耗 CLI 额度，不消费浏览器额度；只能绑定一个公钥，已绑定公钥的重复请求可在有效期内恢复响应。票据不能用于 `POST /api/staff/login`。网页把该票据与操作范围组成机器人接入提示词，只在明确生成时显示，不提供历史明文查询。
+CLI 专用票据最多有效 5 分钟，不能超过授权剩余期限。只有已登录浏览器可通过兼容接口明确生成，CLI Bearer 返回 403。商家生成时指定目标 `staff_id`；商品管理会话只能为自己的链接生成，不能借此给其他链接授权。票据首次绑定消耗 CLI 额度，不消费浏览器额度；只能绑定一个公钥，已绑定公钥的重复请求可在有效期内恢复响应。票据不能用于 `POST /api/staff/login`，不提供历史明文查询。默认网页复制的 AI 提示词使用设备码流程，不包含或生成该票据及管理链接。
 
 设备列表包含不透明 ID、链接/商品名称及 ID、设备名称、公钥指纹、创建/最近活动、撤销与有效标记；不返回私钥、票据或 Bearer。设备撤销同时结束该设备会话；链接及祖先撤销或过期会阻止设备访问和续签。单纯退出或撤销一条会话不等于撤销设备授权。
 

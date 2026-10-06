@@ -1,6 +1,6 @@
 [project]
 name = "extore"
-version = "0.6.2"
+version = "0.7.0"
 description = "Single-merchant redemption and fulfillment with product queues, Passkeys, and native WebMCP"
 readme = "README.md"
 license = "MIT"

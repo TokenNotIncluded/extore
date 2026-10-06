@@ -1656,5 +1656,34 @@ th {
 .account-recovery { white-space: pre-wrap; overflow-wrap: anywhere; }
 .account-page input[type="password"] { font-family: inherit; }
 .account-page .product-info { min-width: 0; overflow-wrap: anywhere; }
+.account-page { min-width: 0; overflow-wrap: anywhere; }
+.account-page .section-head > h2 { min-width: 0; }
+.account-page .field { min-width: 0; }
+.totp-setup h4 { margin: 0 0 16px; font-size: 18px; }
+.totp-methods { display: flex; gap: 8px; margin-bottom: 20px; }
+.totp-methods button { flex: 1; min-height: 44px; }
+.totp-methods button[aria-pressed="true"] { background: var(--green); color: var(--white); }
+.totp-setup [hidden] { display: none !important; }
+.totp-qr-code { width: min(100%, 256px); margin: 20px auto; line-height: 0; }
+.totp-qr-code svg { display: block; width: 100%; height: auto; }
+.totp-key-entry { display: flex; align-items: center; gap: 8px; }
+.totp-key-entry input { min-width: 0; font-family: ui-monospace, monospace; }
+.totp-key-entry button { flex-shrink: 0; min-height: 44px; padding-inline: 14px; }
+.account-password-change > summary, .totp-import summary { cursor: pointer; min-height: 44px; display: flex; align-items: center; color: var(--green); text-decoration: underline; text-underline-offset: 4px; }
+#totp-copy-status:empty, #account-totp-notice:empty { display: none; }
+@media (max-width: 760px) {
+  header { flex-wrap: wrap; gap: 12px; }
+  .brand { min-height: 44px; flex-shrink: 0; }
+  .header-right { width: 100%; min-width: 0; max-width: 100%; flex-wrap: wrap; justify-content: flex-start; gap: 8px; }
+  .header-right select { min-width: 0; min-height: 44px; padding: 9px 8px; }
+  .source-link, .header-home { min-height: 44px; white-space: nowrap; }
+  .header-home { display: inline-flex; align-items: center; }
+  .account-page .panel { padding: 20px; }
+  .account-page input, .account-page select { font-size: 16px; }
+  .account-page button { min-height: 44px; }
+  .account-page .actions { flex-wrap: wrap; }
+  .account-page .actions > button { flex: 1 1 160px; }
+  .account-page .section-head { gap: 12px; }
+}
 .header-home { color: inherit; text-decoration: none; border-bottom: 1px dashed currentColor; }
 .header-home:hover { opacity: .75; }

@@ -2,11 +2,11 @@
 
 [返回项目首页](../README.md) · [运行指南](getting-started.md) · [顾客 CLI](cli-customer.md) · [店主 CLI](cli-owner.md) · [AI 接入提示词](ai-prompts.md) · [接口协议](protocol.md)
 
-完整 CLI 要求 **0.6.0 及以上**；也可在该版本源码目录用 `uv run extore …` 运行。查看本机版本可用 `extore --version`。
+完整 CLI 要求 **0.6.0 及以上**，本文设备码登录要求 **0.7.0 及以上**；也可在该版本源码目录用 `uv run extore …` 运行。查看本机版本可用 `extore --version`。
 
 | 入口 | 用途 | 授权 |
 | --- | --- | --- |
-| `extore manage` | 商品配置、卡密、队列、附件、管理链接、事件与会话 | 单个商品管理链接绑定的设备，可保存多个独立授权 |
+| `extore manage` | 商品配置、卡密、队列、附件、管理链接、事件与会话 | 设备码经浏览器批准，或私密管理链接绑定；可保存多个独立商品授权 |
 | [`extore customer`](cli-customer.md) | 验码、填参、上传材料、跟踪状态、领取和销毁 | 卡密或已有领取链接，不使用商家权限 |
 | [`extore admin`](cli-owner.md) | 本店商品、队列、卡密、安全；平台账号可维护店铺和 SMTP | 固定到账号的 CLI 设备；店主支持邮箱密码及第二因素或真实 Passkey 批准，平台管理员使用 Passkey |
 | `extore init / serve / worker …` | 本机初始化、运行与服务器恢复 | 服务器用户，见[运行指南](getting-started.md) |
@@ -18,12 +18,18 @@
 需要 Linux、Python 3.12+ 和 [uv](https://docs.astral.sh/uv/)：
 
 ```sh
-uv tool install --upgrade 'extore>=0.6.0'
+uv tool install --upgrade 'extore>=0.7.0'
 extore manage --help
-extore manage login
+extore manage login --device-code --origin https://extore.lmm.best --client-name '我的 AI Bot'
 ```
 
-最后一条命令会隐藏输入，粘贴完整管理链接即可。需要自动接入时，把链接从标准输入交给客户端：
+CLI 显示公开授权地址、短设备码和设备指纹，最多等待 10 分钟。本人在浏览器打开地址、输入设备码，核对名称、指纹、商品和权限后批准；管理链接只留在浏览器，不用交给 AI 或写入 CLI。浏览器与 CLI 的授权次数分别计算，批准不会再次消费浏览器次数。
+
+提示写到 stderr；成功结果写到 stdout 的一行 JSON，包含商品授权摘要，不包含私钥、Bearer、签名或服务器挑战。`--no-wait` 的 stdout 为 `{"ok":true,"pending":true,"authorization":{"approval_url":"…","user_code":"…","fingerprint":"…","expires":…}}`，可以将其中公开字段转告本人，无需让本人访问 AI 的云端终端。
+
+可用 `--product PRODUCT_ID` 限定本次批准的商品。如果 AI 的工具不能一直等待，先加 `--no-wait` 取得公开地址和设备码，交给本人批准后，再运行相同命令并去掉 `--no-wait`，保持相同 profile、origin、product 和 client-name。未过期的申请会继续使用，网络中断或 Ctrl+C 后也可重复该命令。超过 10 分钟重新申请。拒绝或过期不会创建可用的商品授权。
+
+原有私密链接登录继续可用：`extore manage login` 会隐藏输入，粘贴完整管理链接即可。需要自动接入时，把链接从私密文件交给客户端：
 
 ```sh
 extore manage login --link-stdin < /path/to/private-link.txt
@@ -31,19 +37,19 @@ extore manage login --link-stdin < /path/to/private-link.txt
 
 支持完整的 `/staff#…` 商品管理链接或 `/cli#…` 专用票据链接；不接受裸 token，也不通过命令行参数传递链接。生产服务器必须使用 HTTPS，本机回环地址可用 HTTP。`--client-name` 可设置后台审计中显示的设备名称。
 
-登录时客户端生成 Ed25519 设备密钥并证明持有私钥，服务器绑定设备和该商品授权。默认每条管理链接允许 1 次浏览器登录及 1 个 CLI 设备绑定，两种额度独立；已有 CLI 设备续签不再次消耗额度。
+登录时客户端在本机生成并私密保存 Ed25519 设备密钥，用签名证明持有私钥；服务器绑定设备和浏览器明确批准的商品授权。默认每条管理链接允许 1 次浏览器登录及 1 个 CLI 设备绑定，两种额度独立；同一设备重复批准相同授权或后续续签不再次消耗 CLI 额度。不同商品的授权可保存到同一配置，操作时仍逐个检查权限。
 
 CLI Bearer 会话有效 8 小时，到期前或失效后客户端通过设备签名自动续签。能否续签仍取决于设备、管理链接及全部祖先是否有效；设备或授权撤销、授权过期后不能继续使用。
 
 ## 复制机器人接入提示词
 
-管理链接界面可生成机器人接入提示词，包含操作范围、安装与登录方式，以及 **5 分钟有效、仅用于 CLI 首次绑定**的票据。把提示词交给需要处理该商品的机器人即可；票据不能用于浏览器登录。
+机器人接入时优先让它执行设备码登录，把公开授权地址和设备码交给你核对批准，不需把管理链接传给机器人。管理链接界面也兼容旧的接入提示词与 **5 分钟有效、仅用于 CLI 首次绑定**的票据；票据不能用于浏览器登录。
 
 提示词和票据只能由已登录的浏览器会话生成，CLI Bearer 不能生成新的绑定票据。票据完成设备绑定后不需要反复生成，后续使用该设备的签名续签。复制提示词不会自动启动常驻机器人；接入方决定何时读取队列、如何处理并提交结果。
 
 ## 查看多个商品
 
-重复登录不同商品的授权，客户端会保存在同一个配置中：
+对不同商品分别运行设备码登录并在浏览器批准，客户端会保存在同一个配置中：
 
 ```sh
 extore manage products
@@ -185,4 +191,4 @@ extore manage logout --product PRODUCT_ID
 extore manage logout --all
 ```
 
-`logout` 结束所选当前 CLI 会话并删除本地设备密钥记录，服务器仍保留设备审计记录。需要彻底阻止设备以后续签时，在后台撤销设备；撤销管理链接同时停止其设备、会话及下级授权。会话界面区分 browser / cli 渠道，并显示绑定设备信息。
+`logout` 结束所选当前 CLI 会话，清理相应待审批申请与不再被该商品授权使用的本地恢复密钥；其他商品的授权继续保留。`logout --all` 同时清理所有本地设备密钥和待审批申请，服务器仍保留设备审计记录。需要彻底阻止设备以后续签时，在后台撤销设备；撤销管理链接同时停止其设备、会话及下级授权。设备被撤销后，先 `logout --product PRODUCT_ID`，再带相同 `--product` 重新设备码登录以生成新密钥；商家须提供仍有效且有额度的新授权，不能用重新登录绕过撤销或绑定次数。会话界面区分 browser / cli 渠道，并显示绑定设备信息。

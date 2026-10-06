@@ -220,20 +220,32 @@ def get_settings(c=None):
     return _metadata(_load(c))
 
 
-def enqueue(c, to, subject, body, *, expires=None, shop_id=None):
+def _validate_bodies(body, html=None):
+    if (
+        not isinstance(body, str)
+        or "\x00" in body
+        or not body.strip()
+        or (
+            html is not None
+            and (not isinstance(html, str) or "\x00" in html or not html.strip())
+        )
+    ):
+        raise ValueError("Invalid mail body")
+    total = len(body.encode("utf-8")) + (
+        len(html.encode("utf-8")) if html is not None else 0
+    )
+    if total > MAX_BODY_BYTES:
+        raise ValueError("Invalid mail body")
+
+
+def enqueue(c, to, subject, body, *, html=None, expires=None, shop_id=None):
     """Store an encrypted message atomically with its account/invitation change."""
     config = _load(c)
     if not config["enabled"]:
         raise ValueError("SMTP mail is not enabled")
     recipient = email_address(to)
     subject = _text(subject, "mail subject", 200, trim=True, empty=False)
-    if (
-        not isinstance(body, str)
-        or "\x00" in body
-        or len(body.encode("utf-8")) > MAX_BODY_BYTES
-        or not body.strip()
-    ):
-        raise ValueError("Invalid mail body")
+    _validate_bodies(body, html)
     if shop_id is not None:
         shop_id = _text(shop_id, "shop id", 128, empty=False)
     now = time.time()
@@ -251,8 +263,11 @@ def enqueue(c, to, subject, body, *, expires=None, shop_id=None):
     if pending >= MAX_QUEUED:
         raise ValueError("Mail queue is full")
     message_id = str(uuid.uuid4())
+    values = {"to": recipient, "subject": subject, "body": body}
+    if html is not None:
+        values["html"] = html
     payload = _seal(
-        {"to": recipient, "subject": subject, "body": body},
+        values,
         "mail",
         message_id,
         shop_id,
@@ -275,6 +290,8 @@ def _ehlo(server):
 
 
 def _send(config, payload, message_id):
+    from .mail_templates import plain_message
+
     # Certificate/hostname verification cannot be disabled by SMTP configuration.
     context = ssl.create_default_context()
     context.minimum_version = ssl.TLSVersion.TLSv1_2
@@ -286,6 +303,18 @@ def _send(config, payload, message_id):
     message["Subject"] = payload["subject"]
     message["Message-ID"] = f"<{message_id}@{config['sender'].rsplit('@', 1)[1]}>"
     message.set_content(payload["body"])
+    html = payload.get("html")
+    if html is None:
+        candidate = plain_message(payload["subject"], payload["body"])
+        # Existing outbox messages can already fill the entire body limit. Keep
+        # them deliverable as plain text instead of expanding mail without bound.
+        if (
+            len(payload["body"].encode("utf-8")) + len(candidate.encode("utf-8"))
+            <= MAX_BODY_BYTES
+        ):
+            html = candidate
+    if html is not None:
+        message.add_alternative(html, subtype="html")
     if config["mode"] == "ssl":
         server = smtplib.SMTP_SSL(
             config["host"], config["port"], timeout=SMTP_TIMEOUT, context=context
@@ -404,19 +433,19 @@ async def process_outbox_once():
     permanent_failure = False
     try:
         payload = _open(row["payload"], "mail", row["id"], row["tenant_id"])
-        if not isinstance(payload, dict) or set(payload) != {"to", "subject", "body"}:
+        if not isinstance(payload, dict) or set(payload) not in (
+            {"to", "subject", "body"},
+            {"to", "subject", "body", "html"},
+        ):
             raise ValueError("Invalid encrypted mail payload")
         # Recheck fields before setting headers even if an encryption key is compromised.
         payload["to"] = email_address(payload["to"])
         payload["subject"] = _text(
             payload["subject"], "mail subject", 200, trim=True, empty=False
         )
-        if (
-            not isinstance(payload["body"], str)
-            or "\x00" in payload["body"]
-            or len(payload["body"].encode("utf-8")) > MAX_BODY_BYTES
-        ):
+        if "html" in payload and payload["html"] is None:
             raise ValueError("Invalid encrypted mail body")
+        _validate_bodies(payload["body"], payload.get("html"))
         await asyncio.to_thread(_send, config, payload, row["id"])
     except Exception as exc:
         error = _error(exc)
