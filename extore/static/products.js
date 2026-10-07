@@ -183,10 +183,20 @@
     const canPurge = owner || ctx.canPurge === true;
     const canEdit = owner || ctx.canEdit !== false;
     const canCreate = owner && productView !== "deleted";
-    const trashProducts = products.filter(isDeleted);
+    let trashProducts = products.filter(isDeleted);
     const shopIdOf = (product) => product.shop_id || ctx.shopId || "";
     const trashShops = [...new Set(trashProducts.map(shopIdOf))];
     const chooseTrashShop = trashShops.length > 1;
+    if (chooseTrashShop && ctx.superadmin === true && ctx.getShopNames) {
+      try {
+        const shops = await ctx.getShopNames();
+        if (!active()) return;
+        const names = new Map((Array.isArray(shops) ? shops : []).map((shop) => [shop.id, shop.name]));
+        trashProducts = trashProducts.map((product) => ({ ...product, shop_name: names.get(shopIdOf(product)) || product.shop_name }));
+      } catch {
+        if (!active()) return;
+      }
+    }
     let selectedTrashShop = chooseTrashShop ? "" : trashShops[0] || "";
     const selectedTrash = () => trashProducts.filter((product) => !chooseTrashShop || shopIdOf(product) === selectedTrashShop);
     const clearDisabled = () => (chooseTrashShop && !selectedTrashShop) || !selectedTrash().length || selectedTrash().length > 500;

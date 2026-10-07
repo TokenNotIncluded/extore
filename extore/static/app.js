@@ -1422,6 +1422,7 @@ function productUIContext(visibleProducts = products) {
     productId: role === "staff" ? managedProductId : null,
     shopId: authStatus.shop_id,
     superadmin: window.ExtoreAccount?.rootScope(authStatus) === true,
+    getShopNames: () => api("/platform/shops", undefined, "GET", requestOptions),
     canManageCards: permitted("cards.manage"),
     lang,
     isCurrent: () =>
