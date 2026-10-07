@@ -3701,8 +3701,8 @@ function progressBoardFixture({ shop = "shop-a", productId = "p1", view = "activ
   const counts = Object.fromEntries(progressBoardStates.map((key) => [key, Number(key === state)]));
   return {
     schema: "extore.progress-board.v1", generated_at: 1700000002,
-    shop: { id: shop, name: "Shop" }, totals: counts,
-    products: [{ id: productId, name: "Product", mode: "manual", counts: { ...counts }, jobs: offset ? [] : [{
+    shop: { id: shop, name: "Shop", factory_slogan: "检查来源再交付。" }, totals: counts,
+    products: [{ id: productId, name: "Product", mode: "manual", workshop_slogan: "保留可编辑文件。", counts: { ...counts }, jobs: offset ? [] : [{
       id: "j1", state, progress: 30, attempt: 1, created: 1700000000, updated: 1700000001,
       queue_position: null, worker_id: "a".repeat(64), step_count: 2, completed_step_count: 1,
       steps: [{ position: 1, state: "done" }, { position: 2, state: "current" }], flow_phase: null,

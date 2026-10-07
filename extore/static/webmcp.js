@@ -91,9 +91,9 @@
   }, ["id", "state", "progress", "attempt", "created", "updated", "queue_position", "worker_id", "step_count", "completed_step_count", "steps", "flow_phase"]);
   const boardSchema = object({
     schema: { type: "string", const: "extore.progress-board.v1" }, generated_at: boardTime,
-    shop: object({ id, name: string(120) }, ["id", "name"]), totals: boardCounts,
+    shop: object({ id, name: string(120), factory_slogan: string(4000) }, ["id", "name"]), totals: boardCounts,
     products: { type: "array", maxItems: 500, items: object({
-      id, name: string(120), mode: choice(["manual", "script", "webhook", "stock", "unknown"]), counts: boardCounts,
+      id, name: string(120), mode: choice(["manual", "script", "webhook", "stock", "unknown"]), workshop_slogan: string(4000), counts: boardCounts,
       jobs: { type: "array", maxItems: 200, items: boardJob },
     }, ["id", "name", "mode", "counts", "jobs"]) },
     workers: { type: "array", maxItems: 500, items: object({
