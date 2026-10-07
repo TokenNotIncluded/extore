@@ -11,7 +11,7 @@
     if (!worker || typeof worker.name !== "string" || worker.name.length > 256 || !Object.hasOwn(kindNames, worker.kind) || !validType(worker.agent_type)) return "";
     const en = options.language === "en", tr = (cn, english) => en ? english : cn;
     const declared = typeof worker.agent_type === "string" ? worker.agent_type.trim() : "";
-    const key = declared.toLowerCase();
+    const key = declared.toLowerCase().replace(/[\s_]+/g, "-");
     const avatar = worker.kind === "automatic" ? "processor" : ["human", "merchant"].includes(worker.kind) ? "human" : Object.hasOwn(types, key) ? types[key] : "other";
     const note = declared && worker.kind !== "automatic"
       ? tr(`自报类型：${declared} · 未验证`, `Declared type: ${declared} · unverified`)

@@ -59,6 +59,8 @@ test("worker cartoons use only fixed local assets and self-reported type is unve
   assert.match(html, /alt=""/); assert.match(html, /自报类型：dots · 未验证/);
   assert.doesNotMatch(html, /<img src="https:/);
   const identity = page.context.window.ExtoreWorkerIdentity;
+  for (const type of ["grok_bot", "grok bot", "Grok-Bot"])
+    assert.match(identity.markup({ name: "Grok worker", kind: "cli", agent_type: type }), /\/grok-bot\.webp/);
   for (const type of ["constructor", "__proto__", "some-custom-bot", "https://evil.test/custom.png"])
     assert.match(identity.markup({ name: "Bot", kind: "cli", agent_type: type }), /\/other\.webp/);
   assert.match(identity.markup({ name: "Handler", kind: "automatic", agent_type: "processor" }), /\/processor\.webp/);
