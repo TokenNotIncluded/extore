@@ -37,6 +37,7 @@ jobs:
       - run: |
           for file in extore/static/{task-flow,task-flow-editor,text-cards,batch-redemption,proxy-routing,proxy-config}.js; do node --check "$file"; done
       - run: node --check extore/static/app.js
+      - run: node --check extore/static/progress-board.js
       - run: node --check extore/static/preferences.js
       - run: node --check extore/static/products.js
       - run: node --check extore/static/cards.js
@@ -53,4 +54,6 @@ jobs:
       - run: uv run extore --version
       - run: uv run extore manage --help
       - run: uv run extore admin --help
+      - run: uv run extore admin board --help
+      - run: uv run extore manage board --help
       - run: uv run extore customer --help
