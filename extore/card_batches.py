@@ -81,6 +81,12 @@ def _batch(c, pid, bid):
     if row is None:
         # Do not disclose whether the ID belongs to another tenant or product.
         fail("批次不存在", 404)
+    if c.execute(
+        "SELECT 1 FROM card_meta m JOIN cards c ON c.id=m.card_id "
+        "WHERE m.batch_id=? AND c.product_id!=? LIMIT 1",
+        (bid, pid),
+    ).fetchone():
+        fail("批次关联的商品范围异常，请检查数据", 409)
     return dict(row)
 
 
@@ -270,13 +276,14 @@ def delete_batch(c, s, pid, bid, body):
         "UPDATE card_meta SET batch_deleted_at=?,batch_previous_state=CASE "
         "WHEN card_id IN (SELECT c.id FROM cards c LEFT JOIN jobs j ON j.card_id=c.id "
         "WHERE c.state='ready' AND (j.id IS NULL OR j.state IN ('failed','needs_input'))) "
-        "THEN 'ready' ELSE NULL END WHERE batch_id=?",
-        (now, bid),
+        "THEN 'ready' ELSE NULL END WHERE batch_id=? "
+        "AND card_id IN (SELECT id FROM cards WHERE product_id=?)",
+        (now, bid, pid),
     )
     c.execute(
         "UPDATE cards SET state='revoked' WHERE id IN (" + ids + ") AND id IN "
-        "(SELECT card_id FROM card_meta WHERE batch_previous_state='ready')",
-        (bid,),
+        "(SELECT card_id FROM card_meta WHERE batch_previous_state='ready') AND product_id=?",
+        (bid, pid),
     )
     c.execute(
         "UPDATE card_batches SET deleted_at=? WHERE id=? AND product_id=?",
@@ -299,13 +306,14 @@ def restore_batch(c, s, pid, bid):
     # Restore only states changed by this archive; completed work and unrelated
     # manual revocation never become redeemable because a folder was restored.
     c.execute(
-        "UPDATE cards SET state='ready' WHERE state='revoked' AND id IN "
+        "UPDATE cards SET state='ready' WHERE state='revoked' AND product_id=? AND id IN "
         "(SELECT card_id FROM card_meta WHERE batch_id=? AND batch_previous_state='ready')",
-        (bid,),
+        (pid, bid),
     )
     c.execute(
-        "UPDATE card_meta SET batch_deleted_at=NULL,batch_previous_state=NULL WHERE batch_id=?",
-        (bid,),
+        "UPDATE card_meta SET batch_deleted_at=NULL,batch_previous_state=NULL WHERE batch_id=? "
+        "AND card_id IN (SELECT id FROM cards WHERE product_id=?)",
+        (bid, pid),
     )
     c.execute(
         "UPDATE card_batches SET deleted_at=NULL WHERE id=? AND product_id=?",

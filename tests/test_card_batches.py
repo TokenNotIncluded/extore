@@ -362,3 +362,21 @@ def test_restore_does_not_restore_preexisting_manual_revocation(owner, setup_pro
         owner.post("/api/exchange", json={"code": result["codes"][1]}).status_code
         == 200
     )
+
+
+def test_inconsistent_foreign_card_link_blocks_batch_mutation(owner, setup_product):
+    pid, _ = setup_product()
+    _, foreign = setup_product()
+    bid = folders(owner, pid)["items"][0]["id"]
+    foreign_id = card_id(foreign)
+    with db() as c:
+        c.execute("UPDATE card_meta SET batch_id=? WHERE card_id=?", (bid, foreign_id))
+    response = owner.post(
+        f"/api/admin/card-batches/{bid}/delete-preview", params={"product_id": pid}
+    )
+    assert response.status_code == 409
+    with db() as c:
+        assert (
+            c.execute("SELECT state FROM cards WHERE id=?", (foreign_id,)).fetchone()[0]
+            == "ready"
+        )
