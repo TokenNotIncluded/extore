@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Literal
 
 from fastapi import FastAPI, HTTPException, Request, Response
+from fastapi.exceptions import RequestValidationError
 from fastapi.responses import FileResponse, JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 
@@ -124,6 +125,21 @@ app.include_router(proxy_routes_router)
 app.include_router(maintenance_router)
 app.include_router(text_cards_router)
 app.include_router(work_instructions_router)
+
+
+@app.exception_handler(RequestValidationError)
+async def invalid_request(request: Request, exc: RequestValidationError):
+    # Do not echo submitted credentials or arbitrary validator contexts. ASCII
+    # JSON also keeps malformed Unicode input from turning validation into 500.
+    detail = [
+        {key: error[key] for key in ("type", "loc", "msg") if key in error}
+        for error in exc.errors()
+    ]
+    return Response(
+        json.dumps({"detail": detail}, ensure_ascii=True, allow_nan=False),
+        status_code=422,
+        media_type="application/json",
+    )
 
 
 @app.middleware("http")
