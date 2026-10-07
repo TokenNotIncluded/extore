@@ -1209,7 +1209,15 @@ th {
   .variant-fields {
     grid-template-columns: 1fr;
   }
+  #workspace .product-row {
+    flex-wrap: wrap;
+  }
+  #workspace .product-row .product-info {
+    min-width: 0;
+    overflow-wrap: anywhere;
+  }
   .product-row .product-actions {
+    flex-basis: 100%;
     width: 100%;
     max-width: none;
   }
