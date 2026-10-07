@@ -42,9 +42,9 @@
 | 接口 | 内容 |
 | --- | --- |
 | `GET /api/proxy/routes` | 无需登录的六字段公开路由列表；请求不包含卡密或卡密摘要 |
-| `GET /api/admin/proxy/identities?shop_id=…` | 本店身份列表，只含 ID、名称、公钥、创建时间与店铺 ID |
-| `POST /api/admin/proxy/identities` | `{name, shop_id?}` 创建加密发行身份 |
-| `GET /api/admin/proxy/routes?shop_id=…` | 本店绑定列表，含启用、默认发行状态 |
+| `GET /api/admin/proxy/identities?shop_id=…` | 当前本店标识，只含 ID、名称、公钥、创建时间、current 与店铺 ID；history=true 含历史 |
+| `POST /api/admin/proxy/identities` | `{name, shop_id?}` 替换当前加密发行身份；新标识统一为 main，旧公钥保留历史 |
+| `GET /api/admin/proxy/routes?shop_id=…` | 当前已启用绑定，含默认发行、archived 状态；history=true 含历史与停用绑定 |
 | `POST /api/admin/proxy/routes` | 本地发行填写 `identity_id`；外部路由填写固定六字段；可选 `shop_id`、`default_issuer` |
 | `PUT /api/admin/proxy/routes/{route_id}?shop_id=…` | 只更新 `name`、`enabled`、`default_issuer` |
 
@@ -74,3 +74,18 @@ Python 本地校验可使用 `extore.proxy_routes.verify_routed_code(code, route
 客户端先验证全部签名，再继续任何一组。转交固定 `origin + path + '#extore-code=' + encodeURIComponent(codes)`，不将卡密放进 URL 查询串或路径。B 在其他脚本执行前立即用 `history.replaceState` 清除 fragment，再用内存中的完整签名卡密调用本机兑换接口。B 再次验签，检查本机发行身份和卡密所属店铺，然后创建领取会话；验证本身不消耗卡密。
 
 浏览器分组页面只显示站点、名称和数量，必须由顾客点击；不会自动打开多个窗口。完整签名卡密不写入 localStorage/sessionStorage、公开页面摘要或 WebMCP 的返回结果。给 AI 使用时，优先从私密文件通过客户 CLI 输入卡密，避免把卡密放进聊天记录或工具参数日志。
+
+## 标识生命周期与清理 API
+
+每店自动创建 `main` 当前标识，HTTPS 环境自动设置本站首页为默认发行路由。不能停用或清空当前默认。替换生成新密钥和新路由，原有签名的 pin 保持不变。存续卡密引用的旧公钥仍用于验签，包括已归档但启用的路由。旧同源 `/proxy` 路径按原始签名验证，作为首页兑换的兼容别名，避免重定向循环。
+
+| API | 行为 |
+| --- | --- |
+| `GET /api/admin/proxy/identities/{id}/cleanup-preview` | 当前状态、可清理状态、路由数量与存续卡密引用数 |
+| `DELETE /api/admin/proxy/identities/{id}` | 删除不再保护存续卡密的历史标识及本店路由 |
+| `GET /api/admin/proxy/routes/{id}/cleanup-preview` | 启用、默认、可清理状态与存续卡密引用数 |
+| `DELETE /api/admin/proxy/routes/{id}` | 删除停用、非默认且未被存续卡密引用的本店绑定 |
+| `GET /api/admin/proxy/cleanup` | 列出 eligible_identity_ids、eligible_route_ids 和数量 |
+| `POST /api/admin/proxy/cleanup` | `{shop_id?}` 清理当前事务内仍符合条件的历史配置 |
+
+单项 API 接受 `shop_id` 查询参数。身份和路由属于选定店铺；跨店铺与失效会话会被拒绝。每项删除产生审计记录，删除不会移除订单、任务或领取凭证。详见[配置与清理](proxy-config.md)。
