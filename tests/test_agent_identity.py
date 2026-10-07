@@ -5,13 +5,21 @@ import time
 import uuid
 
 import pytest
+from fastapi.testclient import TestClient
 from test_cli_auth import b64, identity, link, product
 from test_device_login import request_body as device_request_body
 from test_progress_board import BOARD, PRIVATE, seed
 from test_scope_auth import approve, claim, request_body, review
 
 from extore.agent_identity import normalize_identity, processing_worker, record_claim
+from extore.app import app
 from extore.db import db, init
+
+
+@pytest.fixture
+def cli_client():
+    with TestClient(app, base_url="http://localhost:8000") as client:
+        yield client
 
 
 @pytest.mark.parametrize(
@@ -40,7 +48,8 @@ def signed_scope(key, pid, kind="dots", **kwargs):
     return payload
 
 
-def test_scope_signed_type_tamper_and_reviewed_identity_upgrade(owner, client):
+def test_scope_signed_type_tamper_and_reviewed_identity_upgrade(owner, cli_client):
+    client = cli_client
     pid, key = product(owner), identity()
     body = signed_scope(key, pid, name="Dots AI")
     tampered = dict(body, agent_type="grok_bot")
@@ -171,7 +180,8 @@ def test_schema17_additive_null_identity_and_empty_claims(owner):
             assert columns["agent_type"]["dflt_value"] is None
 
 
-def test_pipeline_one_bot_groups_multiple_actual_device_bindings(owner, client):
+def test_pipeline_one_bot_groups_multiple_actual_device_bindings(owner, cli_client):
+    client = cli_client
     pids, key = [product(owner), product(owner)], identity()
     with db() as c:
         sid = c.execute(
@@ -218,7 +228,10 @@ def test_pipeline_one_bot_groups_multiple_actual_device_bindings(owner, client):
         assert len({r["worker_ref"] for r in rows}) == 1
 
 
-def test_typed_private_bind_signed_labels_cannot_relabel_existing_device(owner, client):
+def test_typed_private_bind_signed_labels_cannot_relabel_existing_device(
+    owner, cli_client
+):
+    client = cli_client
     pid, key = product(owner), identity()
     _, private_token = link(owner, pid)
     base = f"extore-cli-bind-v1\nhttp://localhost:8000\n{private_token}\n{key[1]}"
