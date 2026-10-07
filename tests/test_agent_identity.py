@@ -169,3 +169,86 @@ def test_schema17_additive_null_identity_and_empty_claims(owner):
             columns = {r["name"]: r for r in c.execute(f"PRAGMA table_info({table})")}
             assert columns["agent_type"]["notnull"] == 0
             assert columns["agent_type"]["dflt_value"] is None
+
+
+def test_pipeline_one_bot_groups_multiple_actual_device_bindings(owner, client):
+    pids, key = [product(owner), product(owner)], identity()
+    with db() as c:
+        sid = c.execute(
+            "SELECT shop_id FROM products WHERE id=?", (pids[0],)
+        ).fetchone()[0]
+    payload = request_body(
+        key, kind="shop.pipeline", sid=sid, pids=pids, name="Pipeline Dots"
+    )
+    payload.pop("signature")
+    payload["agent_type"] = "dots"
+    canonical = json.dumps(
+        payload, sort_keys=True, separators=(",", ":"), ensure_ascii=True
+    )
+    payload["signature"] = b64(
+        key[0].sign(
+            (
+                "extore-cli-scope-request-v1\nhttp://localhost:8000\n" + canonical
+            ).encode()
+        )
+    )
+    pending = client.post("/api/cli/scopes/request", json=payload)
+    assert pending.status_code == 200, pending.text
+    approve(owner, pending.json())
+    granted = claim(client, pending.json(), key)
+    for binding in granted["bindings"]:
+        jid = seed(binding["product_id"], "processing", binding["staff_id"])
+        with db() as c:
+            row = c.execute("SELECT * FROM jobs WHERE id=?", (jid,)).fetchone()
+            record_claim(c, row, binding["staff_id"], device_id=binding["device_id"])
+    result = owner.get(BOARD, params={"shop_id": sid})
+    assert result.status_code == 200, result.text
+    workers = result.json()["workers"]
+    assert len(workers) == 1
+    assert workers[0]["name"] == "Pipeline Dots"
+    assert workers[0]["agent_type"] == "dots"
+    assert workers[0]["active_jobs"] == 2
+    jobs = [job for item in result.json()["products"] for job in item["jobs"]]
+    assert {job["worker_id"] for job in jobs} == {workers[0]["id"]}
+    with db() as c:
+        rows = c.execute(
+            "SELECT device_ref,worker_ref FROM job_worker_identities"
+        ).fetchall()
+        assert len({r["device_ref"] for r in rows}) == 2
+        assert len({r["worker_ref"] for r in rows}) == 1
+
+
+def test_typed_private_bind_signed_labels_cannot_relabel_existing_device(owner, client):
+    pid, key = product(owner), identity()
+    _, private_token = link(owner, pid)
+    base = f"extore-cli-bind-v1\nhttp://localhost:8000\n{private_token}\n{key[1]}"
+    payload = {
+        "token": private_token,
+        "public_key": key[1],
+        "client_name": "Dots Private",
+        "agent_type": "dots",
+        "signature": b64(key[0].sign((base + "\nDots Private\ndots").encode())),
+    }
+    assert (
+        client.post(
+            "/api/cli/authorize", json=dict(payload, agent_type="other")
+        ).status_code
+        == 401
+    )
+    response = client.post("/api/cli/authorize", json=payload)
+    assert response.status_code == 200, response.text
+    assert response.json()["agent_type"] == "dots"
+    changed = dict(
+        payload,
+        agent_type="other",
+        signature=b64(key[0].sign((base + "\nDots Private\nother").encode())),
+    )
+    assert client.post("/api/cli/authorize", json=changed).status_code == 409
+    with db() as c:
+        assert (
+            c.execute(
+                "SELECT agent_type FROM cli_devices WHERE id=?",
+                (response.json()["device_id"],),
+            ).fetchone()[0]
+            == "dots"
+        )
