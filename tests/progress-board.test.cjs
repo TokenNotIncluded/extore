@@ -54,6 +54,8 @@ test("monitor-only board uses its dedicated GET, safe projection and actual prog
   page.requests[0].respond(data); await page.controller.ready;
   const html = page.node("#board-data").innerHTML;
   assert.match(html, /value="37"/); assert.match(html, /37%/);
+  assert.match(html, /当前环节上报进度/);
+  assert.match(html, /不代表整单完成比例/);
   assert.match(html, /已完成 1 \/ 3 步/); assert.match(html, /步骤 2：当前步骤/);
   assert.match(html, /&lt;script&gt;bad&lt;\/script&gt;/); assert.match(html, /&lt;img/);
   assert.doesNotMatch(html, /PRIVATE_|<script|<img|href=|data-job|onclick=/);
