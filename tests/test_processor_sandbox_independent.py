@@ -444,6 +444,14 @@ sys.stdin.readline()
         process.stdin.close()
         assert process.wait(timeout=5) == 0
         assert not process.stderr.read()
+        # The namespace init can remain a zombie briefly after the bwrap
+        # monitor exits; require its reaping within the same bounded deadline
+        # as forced termination, without accepting any surviving process.
+        deadline = time.monotonic() + 3
+        while time.monotonic() < deadline and any(
+            Path(f"/proc/{pid}").exists() for pid in descendants
+        ):
+            time.sleep(0.02)
         assert not any(Path(f"/proc/{pid}").exists() for pid in descendants)
     finally:
         if process.poll() is None:
