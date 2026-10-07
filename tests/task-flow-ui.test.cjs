@@ -467,3 +467,19 @@ test("fit and full-size controls affect only the bounded diagram and preserve un
   assert.match(page.app.innerHTML, /transform:scale\(1\)/);
   assert.equal(editor.getValue().nodes[0].label["zh-CN"], "Keep this draft");
 });
+
+
+test("raw v1 process deadlines use the server default when omitted", () => {
+  const page = fixture(), module = page.context.window.ExtoreTaskFlowEditor;
+  const definition = module.presets.confirmation();
+  delete definition.nodes[1].timeout_seconds;
+  assert.doesNotThrow(() => module.validate(definition));
+  const editor = module.mount(page.app, { value: definition });
+  page.node("tf-node-process").emit("click");
+  assert.equal(page.node("tf-timeout").value, "3600");
+  assert.equal(editor.getValue().nodes[1].timeout_seconds, 3600);
+  for (const invalid of [null, 0, false, -1, 86401]) {
+    definition.nodes[1].timeout_seconds = invalid;
+    assert.throws(() => module.validate(definition));
+  }
+});
