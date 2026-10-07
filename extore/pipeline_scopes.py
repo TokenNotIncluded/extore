@@ -61,7 +61,11 @@ def init_schema(c):
 
 
 def _permissions(value, kind):
-    allowed = PIPELINE_PERMISSIONS if kind == "shop.pipeline" else LINK_PERMISSIONS
+    allowed = (
+        (*PIPELINE_PERMISSIONS, "queue.monitor")
+        if kind == "shop.pipeline"
+        else LINK_PERMISSIONS
+    )
     if (
         not isinstance(value, list)
         or not value

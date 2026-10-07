@@ -54,6 +54,7 @@ from .private_worker import router as private_worker_router
 from .processor_profiles import router as processor_profiles_router
 from .processors import processor_catalog
 from .product_lifecycle import DeleteProduct, EmptyTrash
+from .progress_board import router as progress_board_router
 from .proxy_routes import router as proxy_routes_router
 from .scope_auth import router as scope_auth_router
 from .security import (
@@ -115,6 +116,7 @@ app.include_router(scope_auth_router)
 app.include_router(automation_router)
 app.include_router(owner_cli_router)
 app.include_router(processor_profiles_router)
+app.include_router(progress_board_router)
 app.include_router(private_worker_router)
 app.include_router(proxy_routes_router)
 app.include_router(maintenance_router)

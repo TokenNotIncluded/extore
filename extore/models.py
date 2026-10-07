@@ -24,6 +24,7 @@ LINK_PERMISSIONS = (
     "links.delegate",
     "product.delete",
     "product.purge",
+    "queue.monitor",
 )
 DEFAULT_LINK_PERMISSIONS = ("queue.view", "queue.process")
 

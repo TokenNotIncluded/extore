@@ -304,7 +304,7 @@ def test_old_permissions_do_not_gain_purge_and_purge_only_grant_is_sufficient(
     )
     assert owner.post("/api/manage/product/restore").status_code == 403
     assert LINK_PERMISSIONS[:3] == ("queue.view", "queue.process", "queue.retry")
-    assert LINK_PERMISSIONS[8:] == ("product.delete", "product.purge")
+    assert LINK_PERMISSIONS[8:10] == ("product.delete", "product.purge")
 
 
 def test_schema16_only_adds_empty_purge_table_and_preserves_old55(owner, setup_product):
