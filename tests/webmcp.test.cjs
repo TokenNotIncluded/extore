@@ -12,6 +12,7 @@ const nextTurn = () => new Promise((resolve) => setTimeout(resolve, 0));
 const permissionCodes = [
   "queue.view", "queue.process", "queue.retry", "product.edit", "product.delete", "fulfillment.configure", "cards.manage", "events.manage", "links.delegate",
   "product.purge",
+  "queue.monitor",
 ];
 const staffContext = (overrides = {}) => ({
   page: "staff", role: "staff", tab: "jobs", productId: "p1", queueProductId: "p1",
@@ -3692,4 +3693,111 @@ test("partial batch flow preparation keeps empty params and selecting a card doe
   assert.equal(selected, "c1");
   assert.equal(h.calls.filter((call) => call.name === "flow").length, 0);
   rejected(await h.call("receipt_select_card", { card_id: "foreign" }), "forbidden");
+});
+
+const progressBoardStates = ["queued", "processing", "waiting", "failed", "needs_input", "succeeded", "rejected", "destroyed"];
+function progressBoardFixture({ shop = "shop-a", productId = "p1", view = "active", limit = 100, offset = 0 } = {}) {
+  const state = view === "processed" ? "succeeded" : "processing";
+  const counts = Object.fromEntries(progressBoardStates.map((key) => [key, Number(key === state)]));
+  return {
+    schema: "extore.progress-board.v1", generated_at: 1700000002,
+    shop: { id: shop, name: "Shop" }, totals: counts,
+    products: [{ id: productId, name: "Product", mode: "manual", counts: { ...counts }, jobs: offset ? [] : [{
+      id: "j1", state, progress: 30, attempt: 1, created: 1700000000, updated: 1700000001,
+      queue_position: null, worker_id: "a".repeat(64), step_count: 2, completed_step_count: 1,
+      steps: [{ position: 1, state: "done" }, { position: 2, state: "current" }], flow_phase: null,
+    }] }],
+    workers: [{ id: "a".repeat(64), name: "Worker", kind: "unknown", active_jobs: view === "active" ? 1 : 0, completed_jobs: view === "processed" ? 1 : 0, last_update: 1700000001 }],
+    pagination: { limit, offset, total: 1, has_more: false }, scope: { product_ids: [productId] },
+  };
+}
+function boardApi(auth, getBoard = () => progressBoardFixture()) {
+  return async (url) => {
+    if (url === "/auth/status") return auth;
+    assert.ok(url.startsWith("/manage/progress-board?"), "A progress monitor must never read products, jobs, files or other resources");
+    return getBoard(new URL("https://extore.test" + url).searchParams);
+  };
+}
+
+test("progress board monitor exposes progress only with independent fresh permission", async (t) => {
+  const auth = { role: "staff", product_id: "p1", shop_id: "shop-a", permissions: ["queue.monitor"] };
+  const h = await harness(t, { context: staffContext({ tab: "board", shopId: "shop-a", permissions: ["queue.monitor"] }), api: boardApi(auth) });
+  assert.ok(h.names().includes("extore_progress_board"));
+  for (const name of ["jobs_list", "jobs_files", "jobs_file_read", "jobs_claim", "jobs_progress", "jobs_complete", "queue_products"]) assert.ok(!h.names().includes("extore_" + name));
+  const tool = h.tool("progress_board");
+  assert.equal(tool.annotations.readOnlyHint, true);
+  assert.equal(tool.annotations.consequentialHint, false);
+  const result = await h.call("progress_board", {});
+  assert.equal(result.ok, true);
+  assert.deepEqual(plain(result.data), progressBoardFixture());
+  assert.equal(h.calls.filter((call) => call.url === "/auth/status").length, 1);
+  assert.equal(h.calls.filter((call) => call.url?.startsWith("/manage/progress-board?")).length, 1);
+  rejected(await h.call("progress_board", { product_id: "p2" }), "forbidden");
+  rejected(await h.call("progress_board", { shop_id: "other-shop" }), "forbidden");
+  assert.equal(h.calls.filter((call) => call.url?.startsWith("/manage/progress-board?")).length, 1);
+});
+
+test("progress board fresh permission is an alternative to queue.view and revocation stops reads", async (t) => {
+  for (const permission of ["queue.monitor", "queue.view"]) {
+    let permissions = [permission];
+    const h = await harness(t, { context: staffContext({ tab: "board", permissions: [permission] }), api: async (url) => boardApi({ role: "staff", product_id: "p1", permissions })(url) });
+    assert.equal((await h.call("progress_board", {})).ok, true);
+    permissions = ["product.edit"];
+    rejected(await h.call("progress_board", {}), "forbidden");
+    assert.equal(h.calls.filter((call) => call.url?.startsWith("/manage/progress-board?")).length, 1);
+  }
+});
+
+test("platform board requires an explicit shop and merchant scope is pinned", async (t) => {
+  const platform = await harness(t, { context: { page: "admin", role: "admin", tab: "board", shopId: null, superadmin: true }, api: boardApi({ role: "admin", shop_id: null, superadmin: true }) });
+  rejected(await platform.call("progress_board", {}));
+  assert.equal(platform.calls.length, 0);
+  assert.equal((await platform.call("progress_board", { shop_id: "shop-a" })).ok, true);
+  const merchant = await harness(t, { context: { page: "admin", role: "admin", tab: "board", shopId: "shop-a", superadmin: false }, api: boardApi({ role: "admin", shop_id: "shop-a", superadmin: false }) });
+  assert.equal((await merchant.call("progress_board", {})).ok, true);
+  rejected(await merchant.call("progress_board", { shop_id: "other-shop" }), "forbidden");
+  assert.equal(merchant.calls.filter((call) => call.url?.startsWith("/manage/progress-board?")).length, 1);
+});
+
+test("board rejects rich data at each level and mismatched product/shop/pagination", async (t) => {
+  const changes = [
+    (data) => { data.message = "CUSTOMER-SECRET"; },
+    (data) => { data.workers[0].email = "CUSTOMER-SECRET"; },
+    (data) => { data.products[0].jobs[0].params = { private: "CUSTOMER-SECRET" }; },
+    (data) => { data.products[0].jobs[0].steps[0].label = "CUSTOMER-SECRET"; },
+    (data) => { data.products[0].jobs[0].flow_phase = "CUSTOMER-SECRET"; },
+    (data) => { data.scope.product_ids = ["p2"]; },
+    (data) => { data.shop.id = "other-shop"; },
+    (data) => { data.pagination.total = true; },
+    (data) => { data.workers[0].id = "raw-device-id"; },
+  ];
+  for (const change of changes) {
+    const data = progressBoardFixture(); change(data);
+    const h = await harness(t, { context: staffContext({ tab: "board", shopId: "shop-a", permissions: ["queue.monitor"] }), api: boardApi({ role: "staff", product_id: "p1", shop_id: "shop-a", permissions: ["queue.monitor"] }, () => data) });
+    const result = await h.call("progress_board", {});
+    rejected(result, "invalid_response");
+    assert.doesNotMatch(JSON.stringify(result), /CUSTOMER-SECRET|raw-device-id/);
+  }
+});
+
+test("board view and pagination are bounded without additional resource reads", async (t) => {
+  const h = await harness(t, { context: staffContext({ tab: "board", permissions: ["queue.monitor"] }), api: boardApi({ role: "staff", product_id: "p1", permissions: ["queue.monitor"] }, (params) => progressBoardFixture({ view: params.get("view"), limit: Number(params.get("limit")), offset: Number(params.get("offset")) })) });
+  assert.equal((await h.call("progress_board", { view: "processed", limit: 1, offset: 1 })).ok, true);
+  for (const input of [{ view: "all" }, { limit: 201 }, { offset: 1000001 }, { message: "secret" }]) rejected(await h.call("progress_board", input));
+  assert.equal(h.calls.filter((call) => call.url?.startsWith("/manage/progress-board?")).length, 1);
+});
+
+test("board responses are withdrawn when visible filters change while the read is pending", async (t) => {
+  let resolve, started;
+  const waiting = new Promise((done) => { resolve = done; });
+  const entered = new Promise((done) => { started = done; });
+  const h = await harness(t, { context: staffContext({ tab: "board", permissions: ["queue.monitor"], progressBoardView: "active" }), api: async (url) => {
+    if (url === "/auth/status") return { role: "staff", product_id: "p1", permissions: ["queue.monitor"] };
+    assert.ok(url.startsWith("/manage/progress-board?")); started(); return waiting;
+  } });
+  const pending = h.call("progress_board", {});
+  await entered;
+  h.state.progressBoardView = "processed";
+  resolve(progressBoardFixture());
+  rejected(await pending, "stale_context");
 });

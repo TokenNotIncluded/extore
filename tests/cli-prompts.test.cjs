@@ -365,3 +365,21 @@ test("processing prompts use compact atomic next while view-only prompts never s
     assert.doesNotMatch(readonly, /extore manage (next|claim|progress|complete|upload|request-retry|reject) /);
   }
 });
+
+test("board prompts request only monitor permission and never expose private scope data", () => {
+  for (const language of ["zh-CN", "en"]) {
+    for (const productId of [null, "product-a"]) {
+      const prompt = helper().buildBoard({ origin: "https://example.test", language, shopId: "shop-a", productId, view: "processed",
+        link, cookie: "PRIVATE-COOKIE", params: { request: "PRIVATE-REQUEST" }, product: { name: "PRIVATE-NAME" }, configuration: { token: "PRIVATE-CONFIG" }, permissions: ["queue.view", "queue.process"] });
+      assert.match(prompt, /--permissions 'queue\.monitor'/);
+      assert.match(prompt, /extore manage board --origin 'https:\/\/example\.test'.*--view processed/);
+      assert.doesNotMatch(prompt, /extore manage (queues|jobs|job|files|download|upload|next|claim|progress|complete|request-retry|reject|authorize)\b|extore admin|authorization_link|PRIVATE-/);
+      assert.equal(prompt.includes(link), false);
+      const reference = JSON.parse(prompt.match(/```json\n([\s\S]+?)\n```/)[1]);
+      assert.deepEqual(reference.permissions, ["queue.monitor"]);
+      if (productId) assert.deepEqual(reference.product, { id: "product-a", name: "" });
+      else assert.deepEqual(reference.shop, { id: "shop-a" });
+    }
+  }
+  for (const options of [{}, { shopId: "bad\nID" }, { shopId: "shop-a", view: "all" }]) assert.throws(() => helper().buildBoard({ origin: "https://example.test", ...options }));
+});

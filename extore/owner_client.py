@@ -702,6 +702,15 @@ def add_parser(commands):
     _scope(queues)
     queues.add_argument("--product")
     remote._queue_arguments(queues)
+    board = sub.add_parser(
+        "board", help="read shop progress and workers without task contents"
+    )
+    _scope(board)
+    board.add_argument(
+        "--shop", help="explicit shop ID; platform owners must select one shop"
+    )
+    board.add_argument("--product", help="limit progress to one product in this shop")
+    business.board_arguments(board)
     for name in (
         "jobs",
         "job",
@@ -937,7 +946,7 @@ _API_ROUTES = (
     ("DELETE", r"/api/admin/(?:sessions|cli-devices)/[A-Za-z0-9_-]+"),
     (
         "GET",
-        r"/api/manage/(?:products|product|processors|jobs|files|cards|card-stats|card-inventory|events|links)",
+        r"/api/manage/(?:products|product|processors|jobs|files|cards|card-stats|card-inventory|events|links|progress-board)",
     ),
     ("POST", r"/api/manage/(?:batch|cards|links)"),
     ("PUT", r"/api/manage/product"),
@@ -1230,6 +1239,38 @@ def dispatch(client, args):
             removed.append(owner["id"])
         return {"ok": True, "removed": removed}
     owner = client._select(origin, getattr(args, "grant", None))
+    board_request = (
+        command == "board"
+        or command == "api"
+        and args.method == "GET"
+        and args.path == "/api/manage/progress-board"
+    )
+    if board_request:
+        if command == "api" and business.read_json(args) is not None:
+            raise ManageError(
+                "Progress board does not accept a body", code="invalid_input"
+            )
+        board_params = (
+            business.board_parameters(
+                product=args.product,
+                shop=args.shop,
+                view=args.view,
+                limit=args.limit,
+                offset=args.offset,
+            )
+            if command == "board"
+            else business.board_api_parameters(args)
+        )
+        selected_shop = board_params.get("shop_id") or owner.get("shop_id")
+        if not selected_shop:
+            raise ManageError(
+                "Platform progress board requires an explicit shop", code="no_scope"
+            )
+        if owner.get("shop_id") is not None and owner["shop_id"] != selected_shop:
+            raise ManageError(
+                "Progress board belongs to a different shop", code="no_scope"
+            )
+        board_params["shop_id"] = selected_shop
     if command == "trash":
         selected_shop = args.shop or owner.get("shop_id")
         if not isinstance(selected_shop, str) or not re.fullmatch(
@@ -1242,8 +1283,25 @@ def dispatch(client, args):
             raise ManageError(
                 "Recycle bin belongs to a different shop", code="no_scope"
             )
-    client.session(owner)
+    client.session(owner, refresh_scope=bool(board_request))
     client.active_owner = owner
+    if board_request:
+        board = business.progress_board(
+            _owner_request(
+                client, owner, "GET", "/api/manage/progress-board", params=board_params
+            ),
+            shop=selected_shop,
+            product=board_params.get("product_id"),
+            view=board_params["view"],
+            limit=board_params["limit"],
+            offset=board_params["offset"],
+        )
+        result = (
+            {"ok": True, "board": board}
+            if command == "board"
+            else {"ok": True, "result": board}
+        )
+        return business._finish(args, result) if command == "api" else result
     if command in shop_commands.COMMANDS:
         client.session(owner, refresh_scope=True)
         return shop_commands.dispatch(client, owner, args)

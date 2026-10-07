@@ -50,7 +50,19 @@ PERMISSIONS = (
     "links.delegate",
     "product.delete",
     "product.purge",
+    "queue.monitor",
 )
+BOARD_STATES = (
+    "queued",
+    "processing",
+    "waiting",
+    "failed",
+    "needs_input",
+    "succeeded",
+    "rejected",
+    "destroyed",
+)
+BOARD_PHASES = ("await_start", "input", "display", "queued", "processing", "ended")
 JSON_LIMIT = 256000
 TEXT_IMPORT_LIMIT = 2 * 1024 * 1024
 
@@ -118,6 +130,277 @@ def _offset(value):
     if number < 0:
         raise argparse.ArgumentTypeError("offset must be a non-negative integer")
     return number
+
+
+def board_limit(value):
+    number = _offset(value)
+    if not 1 <= number <= 200:
+        raise argparse.ArgumentTypeError("limit must be 1 to 200")
+    return number
+
+
+def board_offset(value):
+    number = _offset(value)
+    if number > 1000000:
+        raise argparse.ArgumentTypeError("offset must be 0 to 1000000")
+    return number
+
+
+def board_arguments(parser):
+    parser.add_argument("--view", choices=("active", "processed"), default="active")
+    parser.add_argument("--limit", type=board_limit, default=100)
+    parser.add_argument("--offset", type=board_offset, default=0)
+
+
+def board_parameters(*, product=None, shop=None, view="active", limit=100, offset=0):
+    values = {"view": view, "limit": limit, "offset": offset}
+    if (
+        view not in ("active", "processed")
+        or type(limit) is not int
+        or not 1 <= limit <= 200
+        or type(offset) is not int
+        or not 0 <= offset <= 1000000
+    ):
+        raise ManageError("Invalid progress board filters", code="invalid_input")
+    for key, value in (("product_id", product), ("shop_id", shop)):
+        if value is not None:
+            if not isinstance(value, str) or not re.fullmatch(
+                r"[A-Za-z0-9_-]{1,100}", value
+            ):
+                raise ManageError(
+                    "Select valid progress board IDs", code="invalid_input"
+                )
+            values[key] = value
+    return values
+
+
+def board_api_parameters(args):
+    values = {}
+    for entry in args.query:
+        key, separator, value = entry.partition("=")
+        if (
+            not separator
+            or key not in {"shop_id", "product_id", "view", "limit", "offset"}
+            or key in values
+        ):
+            raise ManageError("Invalid progress board query", code="invalid_input")
+        if key in ("limit", "offset"):
+            if not re.fullmatch(r"[0-9]{1,7}", value):
+                raise ManageError(
+                    "Invalid progress board pagination", code="invalid_input"
+                )
+            value = int(value)
+        values[key] = value
+    product = getattr(args, "product", None)
+    if product and values.get("product_id", product) != product:
+        raise ManageError("Query belongs to a different product", code="no_scope")
+    return board_parameters(
+        product=product or values.get("product_id"),
+        shop=values.get("shop_id"),
+        view=values.get("view", "active"),
+        limit=values.get("limit", 100),
+        offset=values.get("offset", 0),
+    )
+
+
+def progress_board(
+    value, *, product=None, shop=None, view="active", limit=100, offset=0
+):
+    """Fail closed before exposing any remotely supplied task fields."""
+
+    def invalid():
+        raise ManageError(
+            "Invalid or out-of-scope progress board", code="invalid_response"
+        )
+
+    def fields(item, keys):
+        if not isinstance(item, dict) or set(item) != set(keys):
+            invalid()
+
+    def identifier(item):
+        if not isinstance(item, str) or not re.fullmatch(r"[A-Za-z0-9_-]{1,100}", item):
+            invalid()
+
+    def name(item):
+        if not isinstance(item, str) or len(item) > 120:
+            invalid()
+
+    def integer(item, minimum=0, maximum=9007199254740991):
+        if type(item) is not int or not minimum <= item <= maximum:
+            invalid()
+
+    def timestamp(item):
+        if (
+            type(item) not in (int, float)
+            or not 0 <= item <= 253402300799
+            or not math.isfinite(item)
+        ):
+            invalid()
+
+    def counts(item):
+        fields(item, BOARD_STATES)
+        for count in item.values():
+            integer(count)
+
+    fields(
+        value,
+        (
+            "schema",
+            "generated_at",
+            "shop",
+            "totals",
+            "products",
+            "workers",
+            "pagination",
+            "scope",
+        ),
+    )
+    if value["schema"] != "extore.progress-board.v1":
+        invalid()
+    timestamp(value["generated_at"])
+    fields(value["shop"], ("id", "name"))
+    identifier(value["shop"]["id"])
+    name(value["shop"]["name"])
+    if shop is not None and value["shop"]["id"] != shop:
+        invalid()
+    fields(value["scope"], ("product_ids",))
+    ids = value["scope"]["product_ids"]
+    if not isinstance(ids, list) or len(ids) > 500:
+        invalid()
+    for pid in ids:
+        identifier(pid)
+    if len(set(ids)) != len(ids) or product is not None and ids != [product]:
+        invalid()
+    counts(value["totals"])
+    if (
+        not isinstance(value["products"], list)
+        or len(value["products"]) > 500
+        or not isinstance(value["workers"], list)
+        or len(value["workers"]) > 500
+    ):
+        invalid()
+    pids, jobs, worker_ids = set(), set(), set()
+    sums = dict.fromkeys(BOARD_STATES, 0)
+    for worker in value["workers"]:
+        fields(
+            worker,
+            ("id", "name", "kind", "active_jobs", "completed_jobs", "last_update"),
+        )
+        identifier(worker["id"])
+        if not re.fullmatch(r"[0-9a-f]{64}", worker["id"]):
+            invalid()
+        name(worker["name"])
+        if worker["id"] in worker_ids or worker["kind"] not in (
+            "human",
+            "cli",
+            "automatic",
+            "merchant",
+            "unknown",
+        ):
+            invalid()
+        worker_ids.add(worker["id"])
+        integer(worker["active_jobs"])
+        integer(worker["completed_jobs"])
+        if worker["last_update"] is not None:
+            timestamp(worker["last_update"])
+    for row in value["products"]:
+        fields(row, ("id", "name", "mode", "counts", "jobs"))
+        identifier(row["id"])
+        name(row["name"])
+        if (
+            row["id"] not in ids
+            or row["id"] in pids
+            or row["mode"] not in ("manual", "script", "webhook", "stock", "unknown")
+        ):
+            invalid()
+        pids.add(row["id"])
+        counts(row["counts"])
+        for state in BOARD_STATES:
+            sums[state] += row["counts"][state]
+        if not isinstance(row["jobs"], list) or len(row["jobs"]) > limit:
+            invalid()
+        for job in row["jobs"]:
+            fields(
+                job,
+                (
+                    "id",
+                    "state",
+                    "progress",
+                    "attempt",
+                    "created",
+                    "updated",
+                    "queue_position",
+                    "worker_id",
+                    "step_count",
+                    "completed_step_count",
+                    "steps",
+                    "flow_phase",
+                ),
+            )
+            identifier(job["id"])
+            if job["id"] in jobs or job["state"] not in BOARD_STATES:
+                invalid()
+            processed = job["state"] in ("succeeded", "rejected", "destroyed")
+            if processed != (view == "processed"):
+                invalid()
+            jobs.add(job["id"])
+            integer(job["progress"], 0, 100)
+            integer(job["attempt"], 1)
+            timestamp(job["created"])
+            timestamp(job["updated"])
+            if job["state"] == "queued":
+                integer(job["queue_position"], 1)
+            elif job["queue_position"] is not None:
+                invalid()
+            if job["worker_id"] is not None:
+                identifier(job["worker_id"])
+                if job["worker_id"] not in worker_ids:
+                    invalid()
+            if job["flow_phase"] is not None and job["flow_phase"] not in BOARD_PHASES:
+                invalid()
+            integer(job["step_count"], 0, 256)
+            integer(job["completed_step_count"], 0, job["step_count"])
+            if (
+                not isinstance(job["steps"], list)
+                or len(job["steps"]) != job["step_count"]
+            ):
+                invalid()
+            for position, step in enumerate(job["steps"], 1):
+                fields(step, ("position", "state"))
+                if (
+                    type(step["position"]) is not int
+                    or step["position"] != position
+                    or step["state"] not in ("pending", "current", "done")
+                ):
+                    invalid()
+            if (
+                sum(step["state"] == "done" for step in job["steps"])
+                != job["completed_step_count"]
+                or sum(step["state"] == "current" for step in job["steps"]) > 1
+            ):
+                invalid()
+    if pids != set(ids) or sums != value["totals"]:
+        invalid()
+    fields(value["pagination"], ("limit", "offset", "total", "has_more"))
+    page = value["pagination"]
+    integer(page["limit"], 1, 200)
+    integer(page["offset"], 0, 1000000)
+    integer(page["total"])
+    expected_total = sum(
+        value["totals"][state]
+        for state in BOARD_STATES
+        if (state in ("succeeded", "rejected", "destroyed")) == (view == "processed")
+    )
+    if (
+        page["limit"] != limit
+        or page["offset"] != offset
+        or page["total"] != expected_total
+        or type(page["has_more"]) is not bool
+        or page["has_more"] != (offset + limit < page["total"])
+        or len(jobs) != min(limit, max(0, page["total"] - offset))
+    ):
+        invalid()
+    return value
 
 
 def cleanup_limit(value):
@@ -1352,6 +1635,31 @@ def api_request(client, args, origin):
             code="invalid_path",
         )
     relative = args.path.removeprefix("/api/manage/")
+    if args.method == "GET" and relative == "progress-board":
+        params = board_api_parameters(args)
+        if read_json(args) is not None:
+            raise ManageError(
+                "Progress board does not accept a body", code="invalid_input"
+            )
+        result = client.boards(
+            product=args.product,
+            shop=params.get("shop_id"),
+            origin=origin,
+            grant_id=args.grant,
+            view=params["view"],
+            limit=params["limit"],
+            offset=params["offset"],
+        )
+        if result["errors"] or len(result["boards"]) != 1:
+            raise ManageError(
+                "Select one available progress board grant", code="no_scope"
+            )
+        board = result["boards"][0]["board"]
+        if params.get("shop_id") and params["shop_id"] != board["shop"]["id"]:
+            raise ManageError(
+                "Progress board belongs to a different shop", code="no_scope"
+            )
+        return _finish(args, {"ok": True, "result": board})
     matched = next(
         (
             permission

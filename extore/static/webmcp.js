@@ -12,7 +12,7 @@
   let executing = 0;
   let refreshDeferred = false;
   let invalidateOnly = false;
-  const tabs = ["products", "jobs", "cards", "staff", "events", "security", "sessions"];
+  const tabs = ["products", "jobs", "board", "cards", "staff", "events", "security", "sessions"];
   const states = ["waiting", "queued", "processing", "needs_input", "succeeded", "failed", "rejected", "destroyed"];
   const permissionNames = [
     "queue.view",
@@ -25,6 +25,7 @@
     "events.manage",
     "links.delegate",
     "product.purge",
+    "queue.monitor",
   ];
   const fulfillmentFields = [
     "mode",
@@ -74,6 +75,57 @@
     base64: { ...string(Math.ceil(maxFileBytes / 3) * 4), pattern: "^[A-Za-z0-9+/]*={0,2}$" },
   };
   const choice = (values) => ({ type: "string", enum: values });
+  const boardStates = ["queued", "processing", "waiting", "failed", "needs_input", "succeeded", "rejected", "destroyed"];
+  const boardCount = integer(0, Number.MAX_SAFE_INTEGER);
+  const boardTime = { type: "number", minimum: 0, maximum: 253402300799 };
+  const boardWorkerId = { ...string(64, 64), pattern: "^[0-9a-f]{64}$" };
+  const boardCounts = object(Object.fromEntries(boardStates.map((state) => [state, boardCount])), boardStates);
+  const boardJob = object({
+    id, state: choice(boardStates), progress: integer(0, 100), attempt: integer(1, Number.MAX_SAFE_INTEGER),
+    created: boardTime, updated: boardTime,
+    queue_position: { ...integer(1, Number.MAX_SAFE_INTEGER), type: ["integer", "null"] },
+    worker_id: { ...boardWorkerId, type: ["string", "null"] },
+    step_count: integer(0, 256), completed_step_count: integer(0, 256),
+    steps: { type: "array", maxItems: 256, items: object({ position: integer(1, 256), state: choice(["pending", "current", "done"]) }, ["position", "state"]) },
+    flow_phase: { type: ["string", "null"], enum: [null, "await_start", "input", "display", "queued", "processing", "ended"] },
+  }, ["id", "state", "progress", "attempt", "created", "updated", "queue_position", "worker_id", "step_count", "completed_step_count", "steps", "flow_phase"]);
+  const boardSchema = object({
+    schema: { type: "string", const: "extore.progress-board.v1" }, generated_at: boardTime,
+    shop: object({ id, name: string(120) }, ["id", "name"]), totals: boardCounts,
+    products: { type: "array", maxItems: 500, items: object({
+      id, name: string(120), mode: choice(["manual", "script", "webhook", "stock", "unknown"]), counts: boardCounts,
+      jobs: { type: "array", maxItems: 200, items: boardJob },
+    }, ["id", "name", "mode", "counts", "jobs"]) },
+    workers: { type: "array", maxItems: 500, items: object({
+      id: boardWorkerId, name: string(120), kind: choice(["human", "cli", "automatic", "merchant", "unknown"]),
+      active_jobs: boardCount, completed_jobs: boardCount, last_update: { ...boardTime, type: ["number", "null"] },
+    }, ["id", "name", "kind", "active_jobs", "completed_jobs", "last_update"]) },
+    pagination: object({ limit: integer(1, 200), offset: integer(0, 1000000), total: boardCount, has_more: boolean }, ["limit", "offset", "total", "has_more"]),
+    scope: object({ product_ids: { type: "array", maxItems: 500, uniqueItems: true, items: id } }, ["product_ids"]),
+  }, ["schema", "generated_at", "shop", "totals", "products", "workers", "pagination", "scope"]);
+  function safeProgressBoard(data, filters) {
+    const invalid = () => { throw new ToolError("invalid_response", "Invalid or out-of-scope progress board."); };
+    try { validate(boardSchema, data, "board"); } catch { invalid(); }
+    const productIds = new Set(data.scope.product_ids), workerIds = new Set(data.workers.map((worker) => worker.id));
+    if (filters.shop_id && data.shop.id !== filters.shop_id || filters.product_id && (productIds.size !== 1 || !productIds.has(filters.product_id)) || workerIds.size !== data.workers.length) invalid();
+    const sums = Object.fromEntries(boardStates.map((state) => [state, 0])), seen = new Set(), jobs = new Set();
+    for (const product of data.products) {
+      if (!productIds.has(product.id) || seen.has(product.id)) invalid();
+      seen.add(product.id);
+      for (const state of boardStates) sums[state] += product.counts[state];
+      for (const job of product.jobs) {
+        const processed = ["succeeded", "rejected", "destroyed"].includes(job.state);
+        if (jobs.has(job.id) || processed !== (filters.view === "processed") || job.state === "queued" && job.queue_position === null || job.state !== "queued" && job.queue_position !== null || job.worker_id !== null && !workerIds.has(job.worker_id)) invalid();
+        jobs.add(job.id);
+        if (job.step_count !== job.steps.length || job.completed_step_count !== job.steps.filter((step) => step.state === "done").length || job.steps.filter((step) => step.state === "current").length > 1 || job.steps.some((step, index) => step.position !== index + 1)) invalid();
+      }
+    }
+    if (seen.size !== productIds.size || boardStates.some((state) => sums[state] !== data.totals[state])) invalid();
+    const total = boardStates.filter((state) => ["succeeded", "rejected", "destroyed"].includes(state) === (filters.view === "processed")).reduce((sum, state) => sum + data.totals[state], 0);
+    const page = data.pagination;
+    if (page.limit !== filters.limit || page.offset !== filters.offset || page.total !== total || page.has_more !== (page.offset + page.limit < page.total) || jobs.size !== Math.min(page.limit, Math.max(0, page.total - page.offset))) invalid();
+    return data;
+  }
   const confirmed = {
     type: "boolean",
     const: true,
@@ -237,6 +289,9 @@
       c.productDeleted === true,
       c.productPurged === true,
       c.queueProductId || "",
+      c.progressBoardShopId || "",
+      c.progressBoardProductId || "",
+      c.progressBoardView || "active",
       c.queueProduct?.mode || "",
       c.queueProduct?.delivery || "",
       c.queueProduct?.outputs || [],
@@ -1283,6 +1338,7 @@
           const permission = {
             products: "product.edit",
             jobs: "queue.view",
+            board: "queue.monitor",
             cards: "cards.manage",
             staff: "links.delegate",
             events: "events.manage",
@@ -1295,6 +1351,8 @@
               ? ["queue.view", "queue.process", "queue.retry"].some((p) =>
                   granted.includes(p),
                 )
+              : input.tab === "board"
+              ? ["queue.monitor", "queue.view"].some((p) => granted.includes(p))
               : granted.includes(permission);
           if (context().role !== "staff" || (input.tab !== "sessions" && (!permission || !permitted)))
             throw new ToolError(
@@ -1664,6 +1722,22 @@
           "This management link is limited to its own product.",
         );
     };
+    if (manager && (can("queue.monitor") || can("queue.view"))) add(
+      "progress_board", "流水线进度看板",
+      "Read bounded progress, anonymous worker identities and counts only. Customer requirements, messages, documents, credentials, delivery contents and step labels are never returned. Default active view excludes processed history. Pagination spans this authorized scope's jobs. Platform administrators must explicitly select one shop; staff is limited to its own product. Worker counts are activity totals, not online status or ETA.",
+      object({ shop_id: id, product_id: id, view: { ...choice(["active", "processed"]), default: "active" }, limit: { ...integer(1, 200), default: 100 }, offset: { ...integer(0, 1000000), default: 0 } }, admin && !c.shopId ? ["shop_id"] : []),
+      async (input, signal) => {
+        assertProduct(input);
+        const shop = input.shop_id || signal.auth?.shop_id;
+        if (signal.auth?.shop_id && shop !== signal.auth.shop_id) throw new ToolError("forbidden", "Select the currently authorized shop.");
+        if (admin && !shop) throw new ToolError("forbidden", "Select one explicit shop.");
+        const filters = { view: "active", limit: 100, offset: 0, ...input, ...(shop ? { shop_id: shop } : {}), ...(scoped ? { product_id: c.productId } : {}) };
+        const data = await request(query("/manage/progress-board", filters, ["shop_id", "product_id", "view", "limit", "offset"]), undefined, "GET", signal);
+        checkInvocation(signal);
+        return safeProgressBoard(data, filters);
+      },
+      { ...readonly, ...authority(), anyPermissions: ["queue.monitor", "queue.view"] },
+    );
     const managementProducts = async (signal, view) => admin
       ? request(query("/admin/products", { view }, ["view"]), undefined, "GET", signal)
       : can("product.edit")
@@ -2785,11 +2859,12 @@
                 ...(definition.permissions || []),
                 ...(definition.permissionsForInput?.(args) || []),
               ];
+              const anyPermissions = definition.anyPermissions || [];
               if (
                 context().role === "staff" &&
-                requiredPermissions.some(
+                (requiredPermissions.some(
                   (p) => !(context().permissions || []).includes(p),
-                )
+                ) || anyPermissions.length && !anyPermissions.some((p) => (context().permissions || []).includes(p)))
               )
                 throw new ToolError(
                   "forbidden",
@@ -2810,9 +2885,9 @@
                 (definition.productId &&
                   auth.product_id !== definition.productId) ||
                 (auth.role === "staff" &&
-                  requiredPermissions.some(
+                  (requiredPermissions.some(
                     (p) => !(auth.permissions || []).includes(p),
-                  ))
+                  ) || anyPermissions.length && !anyPermissions.some((p) => (auth.permissions || []).includes(p))))
               ) {
                 // Withdraw immediately: an expired session must not keep advertising privileged tools.
                 refreshDeferred = true;

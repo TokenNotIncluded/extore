@@ -987,7 +987,7 @@ class ManageClient:
         reason="",
         no_wait=False,
     ):
-        from .models import LINK_PERMISSIONS
+        from .manage_commands import PERMISSIONS as LINK_PERMISSIONS
 
         products = list(products)
         permissions = list(
@@ -1010,7 +1010,8 @@ class ManageClient:
             or len(permissions) != len(set(permissions))
             or set(permissions) - set(LINK_PERMISSIONS)
             or (
-                kind == "shop.pipeline" and set(permissions) - set(LINK_PERMISSIONS[:3])
+                kind == "shop.pipeline"
+                and set(permissions) - {*LINK_PERMISSIONS[:3], "queue.monitor"}
             )
             or (
                 set(permissions) & {"queue.process", "queue.retry"}
@@ -1151,7 +1152,7 @@ class ManageClient:
         )
 
     def _validate_scope_claim(self, response, request, fingerprint):
-        from .models import LINK_PERMISSIONS
+        from .manage_commands import PERMISSIONS as LINK_PERMISSIONS
 
         authorization = _object(response.get("authorization"))
         bindings = _objects(response.get("bindings"))
@@ -1814,6 +1815,106 @@ class ManageClient:
             )
         return {"ok": not errors, "view": view, "queues": queues, "errors": errors}
 
+    def boards(
+        self,
+        *,
+        product=None,
+        shop=None,
+        origin=None,
+        grant_id=None,
+        view="active",
+        limit=100,
+        offset=0,
+    ):
+        from .manage_commands import board_parameters, progress_board
+
+        def safe_id(value):
+            return (
+                value
+                if isinstance(value, str)
+                and re.fullmatch(r"[A-Za-z0-9_-]{1,100}", value)
+                else None
+            )
+
+        board_parameters(
+            product=product, shop=shop, view=view, limit=limit, offset=offset
+        )
+        grants, failures = self.grants(
+            product=product, origin=origin, grant_id=grant_id
+        )
+        grants = [
+            grant
+            for grant in grants
+            if {"queue.monitor", "queue.view"} & set(grant.get("permissions", []))
+        ]
+        if not grants and not failures:
+            raise ManageError(
+                "No independent progress board authorization", code="no_scope"
+            )
+        errors = [
+            {
+                "grant_id": safe_id(item.get("grant_id")),
+                "code": "authorization_unavailable",
+                "error": "Progress board authorization unavailable",
+            }
+            for item in failures
+        ]
+        boards, seen = [], set()
+        for grant in grants:
+            if not safe_id(grant.get("id")):
+                raise ManageError(
+                    "Invalid progress board device scope", code="invalid_profile"
+                )
+            safe_origin = origin_from_url(grant["origin"])
+            key = (grant["origin"], grant["product_id"])
+            if key in seen:
+                continue
+            if shop and grant.get("shop_id") and shop != grant["shop_id"]:
+                raise ManageError(
+                    "Progress board belongs to a different shop", code="no_scope"
+                )
+            selected_shop = shop or grant.get("shop_id")
+            params = board_parameters(
+                product=grant["product_id"],
+                shop=selected_shop,
+                view=view,
+                limit=limit,
+                offset=offset,
+            )
+            try:
+                board = progress_board(
+                    self.request(
+                        grant, "GET", "/api/manage/progress-board", params=params
+                    ),
+                    product=grant["product_id"],
+                    shop=selected_shop,
+                    view=view,
+                    limit=limit,
+                    offset=offset,
+                )
+            except ManageError as exc:
+                errors.append(
+                    {
+                        "grant_id": grant["id"],
+                        "product_id": grant["product_id"],
+                        "code": "invalid_response"
+                        if exc.code == "invalid_response"
+                        else "board_unavailable",
+                        "error": "Progress board unavailable",
+                    }
+                )
+                continue
+            seen.add(key)
+            boards.append(
+                {
+                    "origin": safe_origin,
+                    "product_id": grant["product_id"],
+                    "grant_id": grant["id"],
+                    "board": board,
+                }
+            )
+        return {"ok": not errors, "boards": boards, "errors": errors}
+
     def jobs(
         self, grant, *, view="active", state="", limit=100, job_id="", compact=False
     ):
@@ -2256,7 +2357,7 @@ def _delivery_file(value):
 
 
 def _permissions_csv(value):
-    from .models import LINK_PERMISSIONS
+    from .manage_commands import PERMISSIONS as LINK_PERMISSIONS
 
     requested = [item.strip() for item in value.split(",")]
     if not requested or any(item not in LINK_PERMISSIONS for item in requested):
@@ -2387,6 +2488,17 @@ def add_parser(commands):
         help="aggregate all authorized product queues (the default)",
     )
     queues.add_argument("--product", help="limit results to a product")
+    board = subcommands.add_parser(
+        "board", help="progress and workers only, without task contents"
+    )
+    board.add_argument("--product", help="limit results to one authorized product")
+    from .manage_commands import board_arguments
+
+    board_arguments(board)
+    board.add_argument("--origin", help="select a saved server origin")
+    board.add_argument(
+        "--grant", help="select one independently authorized device grant"
+    )
     for command in (products, queues):
         command.add_argument("--origin", help="select a saved server origin")
         command.add_argument("--grant", help="select an individual saved device grant")
@@ -2678,6 +2790,15 @@ def dispatch(client, args, command, origin):
             view=args.view,
             state=args.state,
             limit=args.limit,
+        )
+    if command == "board":
+        return client.boards(
+            product=args.product,
+            origin=origin,
+            grant_id=grant_id,
+            view=args.view,
+            limit=args.limit,
+            offset=args.offset,
         )
     if command == "next":
         if args.watch and args.wait == 0:

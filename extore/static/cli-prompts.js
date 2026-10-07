@@ -4,6 +4,7 @@
   const permissionNames = new Set([
     "queue.view", "queue.process", "queue.retry", "product.edit",
     "fulfillment.configure", "cards.manage", "events.manage", "links.delegate",
+    "queue.monitor",
   ]);
   function origin(value) {
     const url = new URL(value);
@@ -23,8 +24,8 @@
       throw new Error("申请店铺流水线需要明确店铺 ID。");
     const requestedPermissions = [...new Set((options.permissions || []).filter((value) => permissionNames.has(value)))];
     if (activeDevice && !requestedPermissions.length) requestedPermissions.push("queue.view", "queue.process", "queue.retry");
-    if (pipelineScope && requestedPermissions.some((permission) => !["queue.view", "queue.process", "queue.retry"].includes(permission)))
-      throw new Error("店铺流水线只能申请队列查看、处理和重试权限。");
+    if (pipelineScope && requestedPermissions.some((permission) => !["queue.view", "queue.process", "queue.retry", "queue.monitor"].includes(permission)))
+      throw new Error("店铺流水线只能申请进度看板、队列查看、处理和重试权限。");
     const reference = {
       origin: base,
       ...(pipelineScope ? { shop: { id: String(options.shopId) }, scope: "pipelines_all" } : { product: { id: String(options.product?.id || ""), name: String(options.product?.name || "") } }),
@@ -71,9 +72,12 @@
         ? "Use --product PRODUCT_ID to request access to that product directly. No management link must be created first. The merchant reviews the named product and requested permissions before approving. Default permissions are queue.view, queue.process and queue.retry; product or permission additions always need another human approval."
         : "使用 --product PRODUCT_ID，主动申请该商品的处理权限，无需先创建管理链接。商家核对商品及请求权限后批准。默认权限为 queue.view、queue.process、queue.retry；增加商品或权限都须本人再次批准。");
     const canProcess = requestedPermissions.includes("queue.process");
+    const monitorOnly = requestedPermissions.includes("queue.monitor") && !canProcess;
     const workflow = canProcess ? (en
       ? "After authorization, use next --watch to wait and atomically claim the first batch. It operates only on approved product scopes; future products still require approval. Idle waiting stays inside the CLI and prints nothing to the model. Do not list whole queues or claim again after next. Use the returned product_id, grant_id and job.attempt for every write; flow tasks also require execution.flow_epoch and execution.action_id. Use only this current step's parameter/output definitions and attachments. Read history with --view processed only when needed. Report actual progress, request-retry with a reason (revise to correct inputs, reuse for unchanged inputs), or reject a claimed processing task with a reason. Complete only after checking actual deliverables. Do not repeat external delivery, reveal goods or destroy delivery without authorization."
-      : "授权后使用 next --watch 等待并原子领取首批任务，只处理已批准商品；以后新增商品仍须再次批准。空队列由 CLI 内部等待，不向模型输出。不读取整个队列，next 已领取任务，不再 claim。每次写操作使用返回的 product_id、grant_id 和 job.attempt；流程任务还必须带 execution.flow_epoch、execution.action_id。只使用当前步骤的输入、输出定义和本任务附件，需要历史时再用 --view processed。汇报真实进度；需要重试时写清原因，revise 要求修改输入，reuse 允许原输入重试；永久拒绝仅处理自己领取的任务并说明原因。检查实际成品后再 complete，不假报成功，不擅自再次调用外部交付、领取商品或销毁内容。") : (en
+      : "授权后使用 next --watch 等待并原子领取首批任务，只处理已批准商品；以后新增商品仍须再次批准。空队列由 CLI 内部等待，不向模型输出。不读取整个队列，next 已领取任务，不再 claim。每次写操作使用返回的 product_id、grant_id 和 job.attempt；流程任务还必须带 execution.flow_epoch、execution.action_id。只使用当前步骤的输入、输出定义和本任务附件，需要历史时再用 --view processed。汇报真实进度；需要重试时写清原因，revise 要求修改输入，reuse 允许原输入重试；永久拒绝仅处理自己领取的任务并说明原因。检查实际成品后再 complete，不假报成功，不擅自再次调用外部交付、领取商品或销毁内容。") : monitorOnly ? (en
+      ? "Read progress only with board. Do not read task requirements, messages, file names, attachments, output schemas or delivered contents. Do not claim or modify tasks. Each saved grant is independently checked; no permissions are combined. active omits processed history; use processed only when requested. Worker counts describe task activity, not online status or arrival estimates. Only inspect the referenced scope and independently approved grants; use --grant to narrow an existing device when necessary."
+      : "只用 board 查看进度，不读取顾客需求、消息、文件名、附件、输出定义或交付内容，不领取或修改任务。每份设备授权独立校验，不拼接权限。active 默认隐藏已处理任务，需要时再用 processed。处理人员计数表示任务活动，不表示在线或预计时间。只查看参考范围和已独立批准的授权；需要限制已有设备时加 --grant。") : (en
       ? "This scope does not include queue.process. View only approved queue summaries and one job when needed; do not claim, upload, update or complete tasks. Request the required permission through a new human-reviewed authorization before processing."
       : "此范围没有 queue.process，只查看已批准商品的队列摘要，按需读取单个任务；不领取、上传、修改或完成任务。处理前须另行申请所需权限，由商家核对批准。");
     const plans = !canProcess ? "" : en
@@ -100,7 +104,7 @@
       ? "Authorization changes are optional and require the merchant's personal browser approval. Use the public authorization ID or device ID from the completed login result, never export the private profile. DESIRED_PERMISSIONS_CSV is the complete comma-separated desired permission set, including all existing permissions, not only additions; omit --permissions to keep the current set. Give the merchant the new public approval URL, device code, fingerprint, requested scope and reason, then resume the exact same command on the same device and profile without --no-wait. Do not approve on their behalf. A denied or expired request leaves the original authorization unchanged; use only currently approved permissions. Do not execute the example unless the task needs a scope change."
       : "授权变更是可选操作，必须由商家本人在浏览器核对批准。AUTHORIZATION_ID 或 DEVICE_ID 使用完成登录结果中的公开 ID，不导出私有配置。DESIRED_PERMISSIONS_CSV 是逗号分隔的完整期望权限集合，须包含全部已有权限，不是只填新增权限；省略 --permissions 则保留当前权限。把新的公开确认网址、设备码、指纹、申请范围与原因交给商家，然后在同一设备和配置重复原命令，去掉 --no-wait 恢复申请；不要代替商家批准。申请被拒绝或过期，原授权保持不变，仅使用当前已批准的权限。任务不需要扩权时，不执行下面的变更示例。"}`;
     const upgradeBase = !options.deviceCode ? "" : `extore manage authorize --origin ${quotedOrigin} ${options.existingLink ? "--grant DEVICE_ID" : "--authorization AUTHORIZATION_ID"}${pipelineScope ? " --pipelines-all" : " --permissions DESIRED_PERMISSIONS_CSV"} --reason "${en ? "Why these additions are needed" : "实际需要增加权限或商品的原因"}"`;
-    const upgradeCommands = !options.deviceCode ? "" : `\n\n${upgrade}\n\n\`\`\`text\n${upgradeBase} --no-wait\n# ${en ? "After the merchant personally approves, resume on the same device and profile:" : "商家本人批准后，在同一设备和配置恢复："}\n${upgradeBase}\n\`\`\``;
+    const upgradeCommands = !options.deviceCode || options.boardOnly ? "" : `\n\n${upgrade}\n\n\`\`\`text\n${upgradeBase} --no-wait\n# ${en ? "After the merchant personally approves, resume on the same device and profile:" : "商家本人批准后，在同一设备和配置恢复："}\n${upgradeBase}\n\`\`\``;
     return `${goal}\n\n${login}${scope ? "\n\n" + scope : ""}\n\n${workflow}\n\n${plans}\n\n${en ? "CLI commands (replace IDs and filenames with the actual values):" : "CLI 命令（把 ID、文件名替换为实际值）："}\n\n\`\`\`text
 uv tool install --upgrade 'extore>=0.8.2'
 ${loginCommands}${canProcess ? `extore manage next ${pipelineScope ? "--all" : "--product PRODUCT_ID"} --origin ${quotedOrigin} --watch --limit 1
@@ -110,9 +114,22 @@ extore manage files JOB_ID --product PRODUCT_ID --grant GRANT_ID
 extore manage download JOB_ID --product PRODUCT_ID --grant GRANT_ID --file-id FILE_ID --output ./input-file
 extore manage complete JOB_ID --product PRODUCT_ID --grant GRANT_ID --attempt ATTEMPT --flow-epoch EPOCH --action-id ACTION_ID --output-file result.json --file OUTPUT_FIELD=./artifact
 extore manage request-retry JOB_ID --product PRODUCT_ID --grant GRANT_ID --attempt ATTEMPT --flow-epoch EPOCH --action-id ACTION_ID --reason "外部服务恢复后可重试" --reason-type external --retry-mode reuse
-extore manage reject JOB_ID --product PRODUCT_ID --grant GRANT_ID --attempt ATTEMPT --flow-epoch EPOCH --action-id ACTION_ID --reason "永久拒绝的原因"` : `extore manage queues --all --origin ${quotedOrigin}
+extore manage reject JOB_ID --product PRODUCT_ID --grant GRANT_ID --attempt ATTEMPT --flow-epoch EPOCH --action-id ACTION_ID --reason "永久拒绝的原因"` : monitorOnly ? `extore manage board --origin ${quotedOrigin}${pipelineScope ? "" : " --product PRODUCT_ID"} --view ${options.boardView || "active"}` : `extore manage queues --all --origin ${quotedOrigin}
 extore manage job JOB_ID --product PRODUCT_ID`}
 \`\`\`${upgradeCommands}\n\n${en ? "Reference data:" : "参考资料："}\n\n\`\`\`json\n${JSON.stringify(reference, null, 2).replaceAll("`", "\\u0060")}\n\`\`\``;
+  }
+  function buildBoard(options = {}) {
+    const productId = options.productId ?? options.product?.id ?? null;
+    const shopId = options.shopId ?? null;
+    for (const value of [productId, shopId]) if (value !== null && (typeof value !== "string" || !/^[A-Za-z0-9_-]{1,100}$/.test(value))) throw new Error("看板需要有效的店铺或商品 ID。");
+    if (!productId && !shopId) throw new Error("看板需要明确店铺或商品范围。");
+    const view = options.view ?? "active";
+    if (!["active", "processed"].includes(view)) throw new Error("看板视图仅支持 active 或 processed。");
+    return build({ origin: options.origin, language: options.language,
+      deviceCode: true, allPipelines: !productId, shopId,
+      product: productId ? { id: productId } : undefined,
+      permissions: ["queue.monitor"], boardOnly: true, boardView: view,
+    });
   }
   function buildOwner(options = {}) {
     const en = options.language === "en";
@@ -233,5 +250,5 @@ extore admin processor-profiles bind PROFILE_ID --product PRODUCT_ID
 ${JSON.stringify(reference, null, 2).replaceAll("`", "\\u0060")}
 \`\`\``;
   }
-  window.ExtoreCliPrompts = Object.freeze({ build, buildOwner, buildProcessorWorkflow });
+  window.ExtoreCliPrompts = Object.freeze({ build, buildBoard, buildOwner, buildProcessorWorkflow });
 })();
