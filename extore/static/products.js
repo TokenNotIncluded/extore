@@ -468,6 +468,7 @@
         disabled,
       )}</div>
       ${textarea("p-description", "商品描述（Markdown）", product.description)}
+      <section class="form-divider workshop-slogan-field">${textarea("p-workshop-slogan", ctx.lang === "en" ? "Workshop slogan · instructions for AI" : "车间标语 · 给 AI 的工作提示", product.workshop_slogan || "", 'rows="5" spellcheck="false" aria-describedby="workshop-slogan-help"')}<p id="workshop-slogan-help" class="caption">${ctx.lang === "en" ? "Applies to this product's pipeline. AI reads the factory and workshop slogans before working. Up to 4,000 characters; keep passwords and keys out." : "用于本商品的流水线。AI 干活前会先读取工厂与车间标语。支持多行，最多 4000 字；不要填写密码或密钥。"}</p></section>
       ${field("p-support-email", "商家催办邮箱（可留空）", product.support_email || "", "email", 'maxlength="254" autocomplete="email"')}
       <div class="form-divider" id="product-progress-section"><div class="section-head"><h3>处理步骤</h3><button type="button" id="add-progress-step" class="secondary">添加步骤</button></div><p class="caption">按处理顺序配置步骤，顾客可跟踪每一步的状态。修改只用于之后的任务，正在处理的任务会保留原来的步骤。</p><div id="product-progress-steps"></div></div>
       <div class="form-divider" id="product-task-flow"></div>
@@ -903,6 +904,7 @@
         const body = {
           name: $("#p-name").value,
           description: $("#p-description").value,
+          workshop_slogan: $("#p-workshop-slogan").value,
           logo: $("#p-logo").value,
           image: $("#p-image").value,
           public: $("#p-public").checked,

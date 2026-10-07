@@ -10,8 +10,8 @@ const identitySource = fs.readFileSync(path.join(__dirname, "../extore/static/wo
 const ids = { shop: "11111111-1111-4111-8111-111111111111", otherShop: "22222222-2222-4222-8222-222222222222", product: "33333333-3333-4333-8333-333333333333", otherProduct: "44444444-4444-4444-8444-444444444444", job: "55555555-5555-4555-8555-555555555555", worker: "a".repeat(64) };
 const stateCounts = () => ({ waiting: 0, queued: 0, processing: 1, succeeded: 2, failed: 0, needs_input: 0, rejected: 1, destroyed: 1 });
 function board(overrides = {}) {
-  return { schema: "extore.progress-board.v1", generated_at: 1800000600, shop: { id: ids.shop, name: "Test shop" }, totals: stateCounts(),
-    products: [{ id: ids.product, name: "Document pipeline", mode: "manual", counts: stateCounts(), jobs: [{ id: ids.job, state: "processing", progress: 37, attempt: 1, created: 1800000000, updated: 1800000500, queue_position: null, worker_id: ids.worker, step_count: 3, completed_step_count: 1, steps: [{ position: 1, state: "done" }, { position: 2, state: "current" }, { position: 3, state: "pending" }], flow_phase: "processing" }] }],
+  return { schema: "extore.progress-board.v1", generated_at: 1800000600, shop: { id: ids.shop, name: "Test shop", factory_slogan: "" }, totals: stateCounts(),
+    products: [{ id: ids.product, name: "Document pipeline", workshop_slogan: "", mode: "manual", counts: stateCounts(), jobs: [{ id: ids.job, state: "processing", progress: 37, attempt: 1, created: 1800000000, updated: 1800000500, queue_position: null, worker_id: ids.worker, step_count: 3, completed_step_count: 1, steps: [{ position: 1, state: "done" }, { position: 2, state: "current" }, { position: 3, state: "pending" }], flow_phase: "processing" }] }],
     workers: [{ id: ids.worker, name: "Document Bot", kind: "unknown", active_jobs: 1, completed_jobs: 4, last_update: 1800000500 }],
     pagination: { limit: 100, offset: 0, total: 1, has_more: false }, scope: { product_ids: [ids.product] }, ...overrides };
 }
@@ -231,4 +231,99 @@ test("mobile and accessibility floor is explicit in board CSS", () => {
   assert.match(css, /max-width:\s*390px/); assert.match(css, /minmax\(0, 1fr\)/);
   assert.match(css, /overflow-wrap:\s*anywhere/); assert.match(css, /prefers-reduced-motion:\s*reduce/);
   assert.doesNotMatch(css, /min-width:\s*(?:[4-9]\d\d|\d{4})px|animation:.*infinite|100vw/);
+});
+
+test("factory and workshop slogans render as plain text, including quiet workshops", async () => {
+  const page = fixture(), data = board();
+  data.shop.factory_slogan = '先核验来源\n<script>factory_command()</script>';
+  data.products[0].workshop_slogan = '认真制作\n[链接](https://example.invalid)';
+  data.products[0].jobs = []; data.pagination.total = 0;
+  page.requests[0].respond(data); await page.controller.ready;
+  assert.equal(page.node("#board-title").textContent, "Test shop");
+  assert.match(page.node("#board-factory-slogan").innerHTML, /先核验来源/);
+  assert.match(page.node("#board-factory-slogan").innerHTML, /&lt;script&gt;/);
+  assert.match(page.node("#board-data").innerHTML, /Document pipeline|电子车间/);
+  assert.match(page.node("#board-data").innerHTML, /认真制作/);
+  assert.match(page.node("#board-data").innerHTML, /本页暂无待处理任务/);
+  assert.doesNotMatch(page.root.innerHTML + page.node("#board-data").innerHTML + page.node("#board-factory-slogan").innerHTML, /<script|href="https/);
+  assert.equal(page.node("#board-factory-settings"), undefined);
+  assert.equal(page.requests.length, 1);
+});
+test("long slogans use bounded disclosure and Unicode limits count characters", async () => {
+  const page = fixture(), data = board();
+  data.shop.factory_slogan = "工".repeat(300);
+  data.products[0].workshop_slogan = "🪔".repeat(4000);
+  page.requests[0].respond(data); await page.controller.ready;
+  assert.match(page.node("#board-factory-slogan").innerHTML, /board-slogan-reading/);
+  assert.match(page.node("#board-data").innerHTML, /board-slogan-reading/);
+  assert.doesNotMatch(page.node("#board-status").textContent, /不可用/);
+  for (const value of ["字".repeat(4001), "bad\u0000control", "bad\ud800surrogate"]) {
+    const invalid = fixture(), dto = board(); dto.products[0].workshop_slogan = value;
+    invalid.requests[0].respond(dto); await invalid.controller.ready;
+    assert.equal(invalid.node("#board-data").innerHTML, "");
+    invalid.controller.dispose();
+  }
+});
+test("factory editing pauses polling, saves only the selected shop and restores refresh", async () => {
+  const page = fixture({ auth: { role: "admin", shop_id: ids.shop } }), data = board();
+  data.shop.factory_slogan = "原标语";
+  page.requests[0].respond(data); await page.controller.ready;
+  const editor = page.node("#board-factory-settings"); editor.open = true; await editor.emit("toggle");
+  assert.equal(page.node("#board-factory-input").value, "原标语");
+  assert.equal(page.timers.size, 0);
+  page.node("#board-factory-input").value = "新标语\n先读再做";
+  await page.hidden(true); await page.hidden(false);
+  assert.equal(page.requests.length, 1); assert.equal(page.node("#board-factory-input").value, "新标语\n先读再做");
+  const saving = page.node("#board-factory-save").emit("click"); await flush();
+  assert.equal(page.requests[1].path, "/admin/factory?shop_id=" + ids.shop);
+  assert.equal(page.requests[1].method, "PUT");
+  assert.deepEqual(JSON.parse(JSON.stringify(page.requests[1].body)), { factory_slogan: "新标语\n先读再做" });
+  page.requests[1].respond({ shop_id: ids.shop, shop_name: "Test shop", factory_slogan: "新标语\n先读再做" }); await saving;
+  assert.equal(editor.open, false); assert.equal(page.requests.length, 3);
+  const updated = board(); updated.shop.factory_slogan = "新标语\n先读再做";
+  page.requests[2].respond(updated); await flush();
+  assert.match(page.node("#board-factory-slogan").innerHTML, /新标语/);
+  assert.equal(page.timers.size, 1);
+});
+test("failed factory save retains the draft and hides server content", async () => {
+  const page = fixture({ auth: { role: "admin", shop_id: ids.shop } });
+  page.requests[0].respond(board()); await page.controller.ready;
+  const editor = page.node("#board-factory-settings"); editor.open = true; await editor.emit("toggle");
+  page.node("#board-factory-input").value = "保留草稿";
+  const saving = page.node("#board-factory-save").emit("click"); await flush();
+  page.requests[1].reject(new Error("PRIVATE_SERVER_CONTENT")); await saving;
+  assert.equal(page.node("#board-factory-input").value, "保留草稿");
+  assert.match(page.node("#board-factory-feedback").textContent, /未保存/);
+  assert.doesNotMatch(page.node("#board-factory-feedback").textContent, /PRIVATE/);
+  assert.equal(page.timers.size, 0);
+  await page.node("#board-factory-cancel").emit("click");
+  assert.equal(page.node("#board-factory-input").value, ""); assert.equal(page.requests.length, 3);
+});
+test("leaving while saving aborts the factory request and ignores its late response", async () => {
+  const page = fixture({ auth: { role: "admin", shop_id: ids.shop } });
+  page.requests[0].respond(board()); await page.controller.ready;
+  const editor = page.node("#board-factory-settings"); editor.open = true; await editor.emit("toggle");
+  page.node("#board-factory-input").value = "秘密草稿";
+  const saving = page.node("#board-factory-save").emit("click"); await flush();
+  page.controller.dispose();
+  assert.equal(page.requests[1].settings.signal.aborted, true);
+  assert.equal(page.node("#board-factory-input").value, "");
+  const before = page.node("#board-factory-slogan").innerHTML;
+  page.requests[1].respond({ shop_id: ids.shop, shop_name: "Test shop", factory_slogan: "LATE_VALUE" }); await saving;
+  assert.equal(page.node("#board-factory-slogan").innerHTML, before);
+  assert.equal(page.requests.length, 2); assert.equal(page.timers.size, 0);
+});
+
+test("revoked factory edit clears drafts and progress without publishing server content", async () => {
+  const page = fixture({ auth: { role: "admin", shop_id: ids.shop } });
+  page.requests[0].respond(board()); await page.controller.ready;
+  const editor = page.node("#board-factory-settings"); editor.open = true; await editor.emit("toggle");
+  page.node("#board-factory-input").value = "草稿";
+  const saving = page.node("#board-factory-save").emit("click"); await flush();
+  page.requests[1].reject(Object.assign(new Error("PRIVATE_PERMISSION_FAILURE"), { status: 403 })); await saving;
+  assert.equal(page.node("#board-factory-input").value, ""); assert.equal(editor.open, false);
+  assert.equal(page.node("#board-data").innerHTML, ""); assert.equal(page.node("#board-factory-slogan").innerHTML, "");
+  assert.equal(page.node("#board-refresh").disabled, true); assert.equal(page.timers.size, 0);
+  assert.match(page.node("#board-status").textContent, /权限已失效/);
+  assert.doesNotMatch(page.node("#board-status").textContent, /PRIVATE/);
 });

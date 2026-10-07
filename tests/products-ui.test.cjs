@@ -1154,3 +1154,19 @@ test("invalid rich definitions block saving and keep typed schema drafts", async
     assert.equal(p.node("#o-max-items-0").value, limit);
   }
 });
+
+test("workshop slogans are readable and editable without delivery configuration permission", async () => {
+  const value = product({ workshop_slogan: '认真制作\n<script>content only</script>' });
+  const p = page({ role: "staff", canEdit: true, canConfigure: false, products: [value] });
+  await editProduct(p, value);
+  assert.equal(p.node("#p-workshop-slogan").value, value.workshop_slogan);
+  assert.equal(p.node("#p-workshop-slogan").disabled, false);
+  assert.match(p.workspace.innerHTML, /车间标语 · 给 AI 的工作提示/);
+  assert.doesNotMatch(p.workspace.innerHTML, /<script>content only<\/script>/);
+  p.node("#p-workshop-slogan").value = "核验来源，然后交付";
+  p.node("#product-form").emit("submit");
+  assert.equal(p.requests[1].body.workshop_slogan, "核验来源，然后交付");
+  assert.equal(p.requests[1].url, "/manage/product");
+  p.leave(); p.requests[1].resolve(value); await flush();
+  assert.equal(p.saved.length, 0);
+});
