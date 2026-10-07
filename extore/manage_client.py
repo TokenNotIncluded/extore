@@ -13,7 +13,6 @@ import math
 import os
 import re
 import secrets
-import socket
 import stat
 import sys
 import time
@@ -229,6 +228,27 @@ def _objects(value):
     return value
 
 
+def _identity_value(value, *, label, limit):
+    if value is None:
+        return None
+    if (
+        not isinstance(value, str)
+        or any(not char.isprintable() for char in value)
+        or any(unicodedata.category(char).startswith("C") for char in value)
+    ):
+        raise ManageError(
+            f"{label} must contain 1 to {limit} printable characters",
+            code="invalid_input",
+        )
+    value = value.strip()
+    if not 1 <= len(value) <= limit:
+        raise ManageError(
+            f"{label} must contain 1 to {limit} printable characters",
+            code="invalid_input",
+        )
+    return value
+
+
 def _safe_grant(grant):
     return {
         key: grant[key]
@@ -239,6 +259,7 @@ def _safe_grant(grant):
             "link_id",
             "link_name",
             "client_name",
+            "agent_type",
             "permissions",
             "link_expires",
             "expires",
@@ -433,6 +454,7 @@ class ManageClient:
                         "link_id",
                         "link_name",
                         "client_name",
+                        "agent_type",
                         "permissions",
                         "link_expires",
                         "expires",
@@ -442,15 +464,11 @@ class ManageClient:
             )
         return grant
 
-    def login(self, invitation, client_name):
+    def login(self, invitation, client_name, *, agent_type=None):
         invitation = invitation.strip()
         origin = origin_from_url(invitation, invitation=True)
-        name = client_name.strip()
-        if not name or len(name) > 100 or any(ord(char) < 32 for char in name):
-            raise ManageError(
-                "Client name must contain 1 to 100 printable characters",
-                code="invalid_input",
-            )
+        name = _identity_value(client_name, label="Client name", limit=100)
+        agent_type = _identity_value(agent_type, label="Agent type", limit=64)
         binding = hashlib.sha256(
             (origin + "\n" + unquote(urlsplit(invitation).fragment)).encode()
         ).hexdigest()
@@ -462,6 +480,21 @@ class ManageClient:
             ),
             None,
         )
+        if existing:
+            if (name is not None and name != existing.get("client_name")) or (
+                agent_type is not None and agent_type != existing.get("agent_type")
+            ):
+                raise ManageError(
+                    "The supplied identity differs from the saved binding; request browser approval with device-code login or authorize",
+                    code="identity_mismatch",
+                )
+            name = existing["client_name"]
+            agent_type = existing.get("agent_type")
+        elif name is None or agent_type is None:
+            raise ManageError(
+                "New CLI login requires --client-name and --agent-type (or EXTORE_AGENT_NAME and EXTORE_AGENT_TYPE)",
+                code="invalid_input",
+            )
         if existing and existing.get("device_id"):
             self.session(existing, refresh_scope=True)
             return {
@@ -484,6 +517,7 @@ class ManageClient:
                     )
                 ),
                 "client_name": name,
+                "agent_type": agent_type,
             }
             self.data["grants"].append(grant)
         # Persist before consuming a one-use ticket, including if the process is
@@ -491,6 +525,8 @@ class ManageClient:
         self.persist()
         public = _b64(private.public_key().public_bytes(Encoding.Raw, PublicFormat.Raw))
         proof = "\n".join(("extore-cli-bind-v1", origin, invitation, public))
+        if agent_type is not None:
+            proof += "\n" + name + "\n" + agent_type
         response = self._json(
             origin,
             "POST",
@@ -499,6 +535,7 @@ class ManageClient:
                 "token": invitation,
                 "public_key": public,
                 "client_name": name,
+                **({"agent_type": agent_type} if agent_type is not None else {}),
                 "signature": _b64(private.sign(proof.encode())),
             },
         )
@@ -506,6 +543,13 @@ class ManageClient:
             not isinstance(response, dict)
             or not isinstance(response.get("device_id"), str)
             or not isinstance(response.get("product_id"), str)
+            or (
+                agent_type is not None
+                and (
+                    response.get("client_name") != name
+                    or response.get("agent_type") != agent_type
+                )
+            )
         ):
             raise ManageError(
                 "The server returned an invalid CLI binding", code="invalid_response"
@@ -534,22 +578,15 @@ class ManageClient:
         no_wait=False,
         scope=None,
         scope_key=None,
+        agent_type=None,
+        identity_defaults=None,
     ):
         """Ask a browser to approve this locally generated key, without a link."""
         origin = origin_from_url(origin)
-        name = client_name.strip()
-        if (
-            not name
-            or len(name) > 100
-            or any(unicodedata.category(char).startswith("C") for char in name)
-            or (
-                product is not None
-                and (
-                    not product
-                    or len(product) > 100
-                    or any(ord(char) < 33 for char in product)
-                )
-            )
+        name = _identity_value(client_name, label="Client name", limit=100)
+        agent_type = _identity_value(agent_type, label="Agent type", limit=64)
+        if product is not None and (
+            not product or len(product) > 100 or any(ord(char) < 33 for char in product)
         ):
             raise ManageError("Invalid device name or product ID", code="invalid_input")
         pending = self.data.setdefault("device_requests", [])
@@ -568,18 +605,14 @@ class ManageClient:
         if len(active) != len(pending):
             pending[:] = active
             self.persist()
-        request = next(
-            (
-                item
-                for item in pending
-                if item.get("origin") == origin
-                and item.get("client_name") == name
-                and item.get("requested_product") == product
-                and item.get("scope_intent") == scope
-            ),
-            None,
-        )
-        if request is None and scope is not None:
+        candidates = [
+            item
+            for item in pending
+            if item.get("origin") == origin
+            and item.get("requested_product") == product
+            and item.get("scope_intent") == scope
+        ]
+        if not candidates and scope is not None:
             # A claim can already have committed the new scope revision before
             # session renewal loses its response. Resume that saved claim even
             # though the local authorization now has the newer revision.
@@ -589,7 +622,7 @@ class ManageClient:
                     item.get("scope_claim")
                     and isinstance(previous, dict)
                     and item.get("origin") == origin
-                    and item.get("client_name") == name
+                    and item.get("requested_product") == product
                     and all(
                         previous.get(key) == scope.get(key)
                         for key in ("kind", "shop_id", "authorization_id", "reason")
@@ -599,10 +632,45 @@ class ManageClient:
                     and set(previous.get("permissions", []))
                     == set(scope["permissions"])
                 ):
-                    request = item
-                    scope = previous
-                    break
+                    candidates.append(item)
+        compatible = [
+            item
+            for item in candidates
+            if (name is None or item.get("client_name") == name)
+            and (agent_type is None or item.get("agent_type") == agent_type)
+        ]
+        if candidates and not compatible:
+            raise ManageError(
+                "The supplied name or agent type differs from the pending request; resume with its original identity",
+                code="identity_mismatch",
+            )
+        if len(compatible) > 1:
+            raise ManageError(
+                "Several pending requests match; provide their original --client-name and --agent-type",
+                code="ambiguous_identity",
+            )
+        request = compatible[0] if compatible else None
+        if request is not None:
+            # The signed identity remains immutable across network interruptions
+            # and across upgrades whose claim has already reached the server.
+            name = request["client_name"]
+            agent_type = request.get("agent_type")
+            scope = request.get("scope_intent")
         if request is None:
+            if identity_defaults is not None:
+                if name is None:
+                    name = identity_defaults.get("client_name")
+                if agent_type is None:
+                    agent_type = identity_defaults.get("agent_type")
+                if not isinstance(name, str) or (
+                    agent_type is not None and not isinstance(agent_type, str)
+                ):
+                    raise ManageError("Invalid saved identity", code="invalid_profile")
+            if name is None or (agent_type is None and identity_defaults is None):
+                raise ManageError(
+                    "New device-code login requires --client-name and --agent-type (or EXTORE_AGENT_NAME and EXTORE_AGENT_TYPE)",
+                    code="invalid_input",
+                )
             device_keys = self.data.setdefault("device_keys", {})
             if not isinstance(device_keys, dict):
                 raise ManageError("Invalid CLI profile", code="invalid_profile")
@@ -627,6 +695,26 @@ class ManageClient:
                     + "\n"
                     + hashlib.sha256(
                         json.dumps(
+                            {
+                                **scope,
+                                "client_name": name,
+                                **(
+                                    {"agent_type": agent_type}
+                                    if agent_type is not None
+                                    else {}
+                                ),
+                            },
+                            sort_keys=True,
+                            separators=(",", ":"),
+                            ensure_ascii=True,
+                        ).encode()
+                    ).hexdigest()
+                )
+                legacy_selector = (
+                    origin
+                    + "\n"
+                    + hashlib.sha256(
+                        json.dumps(
                             scope,
                             sort_keys=True,
                             separators=(",", ":"),
@@ -634,7 +722,7 @@ class ManageClient:
                         ).encode()
                     ).hexdigest()
                 )
-                saved = device_keys.get(key_scope)
+                saved = device_keys.get(key_scope) or device_keys.get(legacy_selector)
                 saved_key = scope_key or (
                     saved.get("private_key") if isinstance(saved, dict) else saved
                 )
@@ -670,6 +758,8 @@ class ManageClient:
                 "nonce": _b64(issued_at.to_bytes(8, "big") + secrets.token_bytes(24)),
                 "expires": issued_at + DEVICE_LOGIN_TTL,
             }
+            if agent_type is not None:
+                request["agent_type"] = agent_type
             if scope is not None:
                 request["scope_intent"] = scope
                 request["scope_key_selector"] = key_scope
@@ -693,6 +783,8 @@ class ManageClient:
                     "nonce": request["nonce"],
                     "product_id": product,
                 }
+                if agent_type is not None:
+                    payload["agent_type"] = agent_type
                 proof = "\n".join(
                     (
                         "extore-cli-device-request-v1",
@@ -703,6 +795,8 @@ class ManageClient:
                         product or "",
                     )
                 )
+                if agent_type is not None:
+                    proof += "\n" + agent_type
                 request_path = "/api/cli/device/request"
             else:
                 payload = {
@@ -711,6 +805,8 @@ class ManageClient:
                     "client_name": name,
                     "nonce": request["nonce"],
                 }
+                if agent_type is not None:
+                    payload["agent_type"] = agent_type
                 proof = (
                     "extore-cli-scope-request-v1\n"
                     + origin
@@ -758,6 +854,10 @@ class ManageClient:
             + visible["approval_url"]
             + "\n设备码："
             + visible["user_code"]
+            + "\nAI 名称："
+            + request["client_name"]
+            + "\nAI 类型："
+            + (request.get("agent_type") or "旧请求未声明")
             + "\n核对设备指纹："
             + visible["fingerprint"]
             + (
@@ -890,6 +990,8 @@ class ManageClient:
                 or not response["product_id"]
                 or (product and response["product_id"] != product)
                 or response.get("fingerprint") != fingerprint
+                or response.get("client_name") != request["client_name"]
+                or response.get("agent_type") != request.get("agent_type")
             ):
                 raise ManageError(
                     "Invalid device authorization scope", code="invalid_response"
@@ -950,9 +1052,17 @@ class ManageClient:
                 "product_id": request["product_id"],
                 "private_key": request["private_key"],
                 "client_name": request["client_name"],
+                **(
+                    {"agent_type": request["agent_type"]}
+                    if request.get("agent_type") is not None
+                    else {}
+                ),
             }
             self.data["grants"].append(grant)
             self.persist()
+        grant["client_name"] = request["client_name"]
+        if "agent_type" in request:
+            grant["agent_type"] = request["agent_type"]
         self.session(grant, refresh_scope=True)
         pending.remove(request)
         device_keys = self.data.setdefault("device_keys", {})
@@ -986,6 +1096,8 @@ class ManageClient:
         authorization=None,
         reason="",
         no_wait=False,
+        agent_type=None,
+        identity_defaults=None,
     ):
         from .manage_commands import PERMISSIONS as LINK_PERMISSIONS
 
@@ -1054,6 +1166,8 @@ class ManageClient:
             no_wait=no_wait,
             scope=scope,
             scope_key=authorization["private_key"] if authorization else None,
+            agent_type=agent_type,
+            identity_defaults=authorization if authorization else identity_defaults,
         )
 
     def pipeline_authorize(
@@ -1067,6 +1181,7 @@ class ManageClient:
         permissions=None,
         reason="",
         client_name=None,
+        agent_type=None,
         no_wait=False,
     ):
         authorizations = self.data.get("authorizations", [])
@@ -1097,7 +1212,7 @@ class ManageClient:
                 # Never mutate a legacy staff link or its browser permissions.
                 return self.pipeline_login(
                     origin,
-                    client_name or grant["client_name"],
+                    client_name,
                     kind="product",
                     products=[grant["product_id"]],
                     permissions=permissions
@@ -1105,6 +1220,8 @@ class ManageClient:
                     else grant["permissions"],
                     reason=reason,
                     no_wait=no_wait,
+                    agent_type=agent_type,
+                    identity_defaults=grant,
                 )
         matches = [
             item
@@ -1139,7 +1256,7 @@ class ManageClient:
             )
         return self.pipeline_login(
             authorization["origin"],
-            client_name or authorization["client_name"],
+            client_name,
             kind=authorization["kind"],
             shop=authorization["shop_id"]
             if authorization["kind"] == "shop.pipeline"
@@ -1149,6 +1266,7 @@ class ManageClient:
             authorization=authorization,
             reason=reason,
             no_wait=no_wait,
+            agent_type=agent_type,
         )
 
     def _validate_scope_claim(self, response, request, fingerprint):
@@ -1172,7 +1290,8 @@ class ManageClient:
             or type(authorization.get("expires")) not in (int, float)
             or not 0 < authorization["expires"] < 10**15
             or not math.isfinite(authorization["expires"])
-            or not isinstance(authorization.get("client_name"), str)
+            or authorization.get("client_name") != request["client_name"]
+            or authorization.get("agent_type") != request.get("agent_type")
             or not isinstance(products, list)
             or not products
             or len(products) > 500
@@ -1215,6 +1334,8 @@ class ManageClient:
                         set(products) != set(existing["product_ids"])
                         or set(permissions) != set(existing["permissions"])
                         or authorization["expires"] != existing["expires"]
+                        or authorization["client_name"] != existing["client_name"]
+                        or authorization.get("agent_type") != existing.get("agent_type")
                     )
                 )
             ):
@@ -1235,6 +1356,8 @@ class ManageClient:
                 or not isinstance(binding.get("staff_id"), str)
                 or not binding["staff_id"]
                 or binding.get("permissions") != permissions
+                or binding.get("client_name") != authorization["client_name"]
+                or binding.get("agent_type") != authorization.get("agent_type")
             ):
                 raise ManageError(
                     "The server returned an invalid product binding",
@@ -1308,6 +1431,11 @@ class ManageClient:
                     "authorization_revision": authorization["revision"],
                     "private_key": request["private_key"],
                     "client_name": authorization["client_name"],
+                    **(
+                        {"agent_type": authorization["agent_type"]}
+                        if "agent_type" in authorization
+                        else {}
+                    ),
                     "link_id": binding["staff_id"],
                     "permissions": binding["permissions"],
                 }
@@ -1343,6 +1471,7 @@ class ManageClient:
                     "expires",
                     "revision",
                     "client_name",
+                    "agent_type",
                     "fingerprint",
                 )
                 if key in authorization
@@ -2425,8 +2554,13 @@ def add_parser(commands):
     )
     login.add_argument(
         "--client-name",
-        default="Extore CLI · " + socket.gethostname(),
-        help="device name retained in the session audit",
+        default=os.environ.get("EXTORE_AGENT_NAME"),
+        help="explicit AI name for new CLI login (or EXTORE_AGENT_NAME)",
+    )
+    login.add_argument(
+        "--agent-type",
+        default=os.environ.get("EXTORE_AGENT_TYPE"),
+        help="explicit AI type for new CLI login (or EXTORE_AGENT_TYPE)",
     )
     authorize = subcommands.add_parser(
         "authorize",
@@ -2458,7 +2592,14 @@ def add_parser(commands):
         "--reason", default="", help="why added products or permissions are needed"
     )
     authorize.add_argument(
-        "--client-name", help="audited device name; defaults to the saved name"
+        "--client-name",
+        default=os.environ.get("EXTORE_AGENT_NAME"),
+        help="AI name to request approval for; defaults to pending or saved identity",
+    )
+    authorize.add_argument(
+        "--agent-type",
+        default=os.environ.get("EXTORE_AGENT_TYPE"),
+        help="AI type to request approval for; defaults to pending or saved identity",
     )
     authorize.add_argument(
         "--no-wait",
@@ -2715,6 +2856,7 @@ def dispatch(client, args, command, origin):
             permissions=args.permissions,
             reason=args.reason,
             client_name=args.client_name,
+            agent_type=args.agent_type,
             no_wait=args.no_wait,
         )
     if command == "login":
@@ -2755,6 +2897,7 @@ def dispatch(client, args, command, origin):
                     permissions=args.permissions,
                     reason=args.reason,
                     no_wait=args.no_wait,
+                    agent_type=args.agent_type,
                 )
             elif args.permissions is not None or args.reason:
                 raise ManageError(
@@ -2762,7 +2905,11 @@ def dispatch(client, args, command, origin):
                     code="invalid_input",
                 )
             return client.device_login(
-                origin, args.client_name, product=args.product, no_wait=args.no_wait
+                origin,
+                args.client_name,
+                product=args.product,
+                no_wait=args.no_wait,
+                agent_type=args.agent_type,
             )
         if (
             args.product
@@ -2786,7 +2933,7 @@ def dispatch(client, args, command, origin):
             raise ManageError(
                 "Provide one complete management link", code="invalid_link"
             )
-        return client.login(invitation, args.client_name)
+        return client.login(invitation, args.client_name, agent_type=args.agent_type)
     if command == "products":
         return client.products(
             origin=origin, grant_id=grant_id, detail=args.detail, view=args.view

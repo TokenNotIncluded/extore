@@ -24,6 +24,13 @@ def arguments(*argv, profile=None):
     args = ["manage"]
     if profile:
         args += ["--profile", str(profile)]
+    # Link-flow tests explicitly declare the test agent just like real clients.
+    if argv and argv[0] == "login" and "--device-code" not in argv:
+        argv = list(argv)
+        if "--client-name" not in argv:
+            argv += ["--client-name", "Test Bot"]
+        if "--agent-type" not in argv:
+            argv += ["--agent-type", "Codex"]
     return parser.parse_args([*args, *argv])
 
 
@@ -77,6 +84,8 @@ class MockMerchant:
                     data["public_key"],
                 )
             )
+            if data.get("agent_type") is not None:
+                proof += "\n" + data["client_name"] + "\n" + data["agent_type"]
             Ed25519PublicKey.from_public_bytes(
                 remote._unb64(data["public_key"])
             ).verify(remote._unb64(data["signature"]), proof.encode())
@@ -99,6 +108,11 @@ class MockMerchant:
                 "product_id": product,
                 "permissions": permissions,
                 "client_name": data["client_name"],
+                **(
+                    {"agent_type": data["agent_type"]}
+                    if data.get("agent_type") is not None
+                    else {}
+                ),
             }
             if self.fail_after_binding:
                 self.fail_after_binding = False
@@ -109,6 +123,12 @@ class MockMerchant:
                     "device_id": device_id,
                     "product_id": product,
                     "already_authorized": bool(existing),
+                    "client_name": self.devices[device_id]["client_name"],
+                    **(
+                        {"agent_type": self.devices[device_id]["agent_type"]}
+                        if self.devices[device_id].get("agent_type") is not None
+                        else {}
+                    ),
                 },
             )
         if path == "/api/cli/challenge":
@@ -1260,6 +1280,8 @@ class DeviceMerchant(MockMerchant):
                     payload["product_id"] or "",
                 )
             )
+            if payload.get("agent_type") is not None:
+                proof += "\n" + payload["agent_type"]
             public.verify(remote._unb64(payload["signature"]), proof.encode())
             key = (payload["public_key"], payload["nonce"])
             if key not in self.requests:
@@ -1339,6 +1361,11 @@ class DeviceMerchant(MockMerchant):
                 "product_id": product,
                 "permissions": ["queue.view", "queue.process"],
                 "client_name": code["client_name"],
+                **(
+                    {"agent_type": code["agent_type"]}
+                    if code.get("agent_type") is not None
+                    else {}
+                ),
             }
             self.devices[existing["device_id"]] = existing
             self.binding_count += 1
@@ -1393,6 +1420,8 @@ def device_login(merchant, profile, *, product=None, no_wait=False):
         ORIGIN,
         "--client-name",
         "Document Bot",
+        "--agent-type",
+        "Codex",
     ]
     if product:
         options += ["--product", product]
@@ -1628,7 +1657,16 @@ def test_device_nonce_is_fresh_and_request_expiration_exists_before_network(
 
     result = remote.execute(
         arguments(
-            "login", "--device-code", "--origin", ORIGIN, "--no-wait", profile=profile
+            "login",
+            "--device-code",
+            "--origin",
+            ORIGIN,
+            "--no-wait",
+            "--client-name",
+            "Nonce Bot",
+            "--agent-type",
+            "Codex",
+            profile=profile,
         ),
         transport=httpx.MockTransport(transport),
     )
@@ -1790,6 +1828,8 @@ def test_real_device_code_cli_approvals_aggregate_two_product_queues(
                 product,
                 "--client-name",
                 "Real pipeline Bot",
+                "--agent-type",
+                "Codex",
                 "--no-wait",
             )
 
@@ -1804,6 +1844,8 @@ def test_real_device_code_cli_approvals_aggregate_two_product_queues(
                 product,
                 "--client-name",
                 "Real pipeline Bot",
+                "--agent-type",
+                "Codex",
             )
 
         def approve(browser, code):

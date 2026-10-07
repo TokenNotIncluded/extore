@@ -138,11 +138,16 @@ class ScopeMerchant(MockMerchant):
             changed = (
                 set(authorization["product_ids"]) != set(products)
                 or authorization["permissions"] != permissions
+                or authorization["client_name"] != code["client_name"]
+                or authorization.get("agent_type") != code.get("agent_type")
             )
             if changed:
                 authorization["revision"] += 1
             authorization["product_ids"] = products[:]
             authorization["permissions"] = permissions[:]
+            authorization["client_name"] = code["client_name"]
+            if code.get("agent_type") is not None:
+                authorization["agent_type"] = code["agent_type"]
         else:
             authorization = next(
                 (
@@ -163,6 +168,11 @@ class ScopeMerchant(MockMerchant):
                     "product_ids": products[:],
                     "permissions": permissions[:],
                     "client_name": code["client_name"],
+                    **(
+                        {"agent_type": code["agent_type"]}
+                        if code.get("agent_type") is not None
+                        else {}
+                    ),
                     "fingerprint": code["fingerprint"],
                     "expires": remote.time.time() + 86400,
                     "revision": 1,
@@ -182,6 +192,11 @@ class ScopeMerchant(MockMerchant):
                     "public_key": code["public_key"],
                     "permissions": permissions[:],
                     "client_name": authorization["client_name"],
+                    **(
+                        {"agent_type": authorization["agent_type"]}
+                        if authorization.get("agent_type") is not None
+                        else {}
+                    ),
                 }
                 binding = {
                     **self.devices[device_id],
@@ -194,6 +209,15 @@ class ScopeMerchant(MockMerchant):
                 binding_list.append(binding)
             binding["permissions"] = permissions[:]
             self.devices[binding["device_id"]]["permissions"] = permissions[:]
+            binding["client_name"] = authorization["client_name"]
+            self.devices[binding["device_id"]]["client_name"] = authorization[
+                "client_name"
+            ]
+            if authorization.get("agent_type") is not None:
+                binding["agent_type"] = authorization["agent_type"]
+                self.devices[binding["device_id"]]["agent_type"] = authorization[
+                    "agent_type"
+                ]
         code["claimed"] = authorization["id"]
 
 
@@ -227,6 +251,8 @@ def product_login(merchant, profile, *, permissions=None, no_wait=False):
         "product-a",
         "--client-name",
         "文档 Bot",
+        "--agent-type",
+        "Codex",
     ]
     if permissions:
         argv += ["--permissions", ",".join(permissions)]
@@ -246,6 +272,8 @@ def shop_login(merchant, profile, *, no_wait=False):
         "--pipelines-all",
         "--client-name",
         "店铺 Bot",
+        "--agent-type",
+        "Codex",
     ]
     if no_wait:
         argv += ["--no-wait"]
@@ -547,7 +575,18 @@ def test_scope_logout_keeps_an_unrelated_expired_claim_recovery_key(
 ):
     merchant = ScopeMerchant()
     single = product_login(merchant, scope_profile)
-    argv = ["login", "--device-code", "--origin", ORIGIN, "--product", "product-c"]
+    argv = [
+        "login",
+        "--device-code",
+        "--origin",
+        ORIGIN,
+        "--product",
+        "product-c",
+        "--client-name",
+        "Recovery Bot",
+        "--agent-type",
+        "Codex",
+    ]
     merchant.lost_response = "claim"
     with pytest.raises(remote.ManageError):
         command(merchant, scope_profile, *argv)
@@ -678,6 +717,8 @@ def real_scope_api(owner, scope_profile, scope_clock, monkeypatch):
                 origin,
                 "--client-name",
                 "Actual pipeline Bot",
+                "--agent-type",
+                "Codex",
             ]
             argv += (
                 ["--product", product]
