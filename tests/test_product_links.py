@@ -1221,6 +1221,10 @@ def test_official_processor_catalog_requires_product_edit_permission(
     assert {spec["id"] for spec in response.json()} == {
         "resource_link",
         "personalized_text",
+        "csv_summary",
+        "json_formatter",
+        "text_cleanup",
+        "document_template",
     }
     assert owner.get("/api/admin/processors").status_code == 401
     owner.cookies.clear()
