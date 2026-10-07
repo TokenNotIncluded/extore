@@ -1423,14 +1423,16 @@ async function copyCLIPrompt(options, host, isCurrent = () => true) {
   const buildPrompt = options.boardOnly ? window.ExtoreCliPrompts.buildBoard : options.processorWorkflow ? window.ExtoreCliPrompts.buildProcessorWorkflow : options.owner ? window.ExtoreCliPrompts.buildOwner : window.ExtoreCliPrompts.build;
   const prompt = buildPrompt({ language: lang, ...options, deviceCode: !options.owner });
   if (!isCurrent()) return;
-  host.innerHTML = `<div class="field"><label for="cli-ai-prompt">${tr("给 AI 的 CLI 提示词", "CLI prompt for AI")}</label><textarea id="cli-ai-prompt" readonly spellcheck="false" rows="12">${esc(prompt)}</textarea></div><p class="caption">${options.owner ? tr("不含授权凭证。首次登录须由商家核对设备，再用 Passkey 明确批准全店管理权限。", "No credentials are included. The merchant must review the device and explicitly approve full shop access with a Passkey at first login.") : tr("不含授权凭证。AI 会显示设备码，请你在浏览器核对商品和权限后授权。", "No credentials are included. The AI displays a device code for you to review the product and permissions in your browser.")}</p>`;
+  host.innerHTML = `<p id="cli-ai-feedback" class="caption" role="status">${tr("正在复制提示词…", "Copying prompt…")}</p><details id="cli-ai-preview" class="cli-prompt-preview"><summary>${tr("查看或手动复制提示词", "Preview or copy the prompt manually")}</summary><div class="field"><label for="cli-ai-prompt">${tr("给 AI 的 CLI 提示词", "CLI prompt for AI")}</label><textarea id="cli-ai-prompt" readonly spellcheck="false" rows="10">${esc(prompt)}</textarea></div><p class="caption">${options.owner ? tr("不含授权凭证。首次登录须由商家核对设备，再用 Passkey 明确批准全店管理权限。", "No credentials are included. The merchant must review the device and explicitly approve full shop access with a Passkey at first login.") : tr("不含授权凭证。AI 会显示设备码，请你在浏览器核对商品和权限后授权。", "No credentials are included. The AI displays a device code for you to review the product and permissions in your browser.")}</p></details>`;
   const input = $("#cli-ai-prompt");
   const copied = await writeClipboard(prompt);
   if (!isCurrent()) return;
   if (!copied) {
+    $("#cli-ai-preview").open = true;
     input.focus();
     input.select();
   }
+  $("#cli-ai-feedback").textContent = copied ? tr("提示词已复制，粘贴给你的 AI 即可。", "Prompt copied. Paste it to your AI.") : tr("无法访问剪贴板。提示词已展开并选中，请手动复制。", "Clipboard access is unavailable. The prompt is expanded and selected for manual copying.");
   toast(copied ? tr("AI 提示词已复制", "AI prompt copied") : tr("复制失败，已选中提示词，请手动复制。", "Could not copy. The prompt is selected; copy it manually."));
 }
 function productUIContext(visibleProducts = products) {
@@ -1543,6 +1545,7 @@ async function renderJobs(filter = "", requestedProductId = queueProductId, requ
   document.querySelectorAll("[name=job]").forEach((node) => (node.checked = false));
   if ($("#all")) $("#all").checked = false;
   if ($("#batch-form")) $("#batch-form").innerHTML = "";
+  if ($("#queue-bulk")) $("#queue-bulk").hidden = true;
   const active = () =>
     loadId === queueLoadId && managementAuthority() === authority && authStatus.session_id === requestOptions.expectedSessionId && location.pathname === pathname && tab === "jobs";
   const available = await api("/manage/products?view=history", undefined, "GET", requestOptions);
@@ -1573,22 +1576,14 @@ async function renderJobs(filter = "", requestedProductId = queueProductId, requ
   let batchDialogGeneration = 0;
   const dialogCurrent = (generation) => active() && generation === batchDialogGeneration;
   const closeBatchDialog = () => { batchDialogGeneration++; $("#batch-form").innerHTML = ""; };
-  $("#workspace").innerHTML = `
-    <div class="field queue-picker"><label for="queue-product">选择商品队列</label><select id="queue-product" ${role === "staff" ? "disabled" : ""}>${available.map((p) => `<option value="${esc(p.id)}" ${p.id === productId ? "selected" : ""}>${esc(p.name)}${p.deleted === true || p.deleted_at ? tr("（已删除）", " (deleted)") : ""}</option>`).join("")}</select></div>
-    <div class="queue-heading"><h2>${esc(selectedProduct.name)} · 处理队列</h2><button id="copy-queue-ai" class="secondary">复制给 AI 的提示词</button><p class="caption">${manual ? "本队列只处理这个商品。先领取任务，再更新进度或提交结果。" : "本商品由程序自动处理，这里查看进度与处理记录。"}</p>${role === "staff" ? `<p class="caption">CLI 剩余绑定次数：${managementRemainingCLIUses}。${managementRemainingCLIUses ? "复制提示词后，由你在网页确认设备码来绑定 CLI。" : "请使用已绑定的 CLI 设备和原来的配置文件。"}</p>` : ""}</div><div id="queue-ai-prompt"></div>
-    <div class="toolbar"><select id="job-view" aria-label="队列视图"><option value="active" ${view === "active" ? "selected" : ""}>待处理</option><option value="processed" ${view === "processed" ? "selected" : ""}>已处理</option><option value="all" ${view === "all" ? "selected" : ""}>全部</option></select><select id="job-state" aria-label="任务状态"><option value="">全部状态</option>${Object.entries(
-      states,
-    )
-      .map(
-        ([k, v]) =>
-          `<option value="${k}" ${filter === k ? "selected" : ""}>${v}</option>`,
-      )
-      .join(
-        "",
-      )}</select><button id="refresh" class="secondary">刷新</button>${canProcess ? '<button id="claim">领取选中任务</button><button id="progress-update" class="secondary">更新进度</button><button id="complete" class="secondary">批量完成</button><button id="fail" class="secondary">标记失败</button><button id="request-changes" class="secondary">需要重试</button><button id="reject" class="danger">永久拒绝</button>' : ""}${role === "admin" ? '<button id="release" class="secondary">核实后允许重试</button>' : ""}</div>
-    ${manual ? '<p class="caption">批量操作只作用于当前商品，全部成功才提交。批量完成会给所选任务相同的交付内容。</p>' : ""}
-    ${rows.length ? `<div class="table-wrap"><table><thead><tr><th><input id="all" type="checkbox" aria-label="选择当前商品的全部任务"></th><th>任务</th><th>用户参数</th><th>状态 / 进度</th><th>尝试</th></tr></thead><tbody>${rows.map((j) => `<tr><td><input type="checkbox" name="job" value="${esc(j.id)}" aria-label="选择 ${esc(j.id)}"></td><td class="mono">${esc(j.id)}${j.variant?.name ? `<p class="caption">${esc(j.variant.name)}</p>` : ""}${j.queue_position ? `<p class="caption">队列第 ${j.queue_position} 位</p>` : ""}</td><td><pre>${esc(JSON.stringify(queueVisibleParams(j), null, 2))}</pre>${queueInputFiles(j).map((file) => `<p><button type="button" class="secondary" data-management-download="${esc(file.id)}">↓ ${esc(file.filename)}</button> <span class="caption">${Math.ceil(file.size / 1024)} KiB</span></p>`).join("")}</td><td>${status(j)}${queueStepMarkup(j)}</td><td>${j.attempt}</td></tr>`).join("")}</tbody></table></div>` : '<div class="empty">这个商品暂无符合条件的任务。</div>'}
-    <div id="batch-form"></div><div id="error" class="error" role="alert"></div>`;
+  const taskInputs = (j) => `<details class="queue-input"><summary>${tr("查看需求与附件", "View requirements and attachments")}${queueInputFiles(j).length ? ` · ${queueInputFiles(j).length}` : ""}</summary><pre>${esc(JSON.stringify(queueVisibleParams(j), null, 2))}</pre>${queueInputFiles(j).map((file) => `<p class="queue-input-file"><button type="button" class="secondary" data-management-download="${esc(file.id)}">${esc(file.filename)}</button><span class="caption">${Math.ceil(file.size / 1024)} KiB</span></p>`).join("")}</details>`;
+  const taskWorker = (j) => j.processing_worker && window.ExtoreWorkerIdentity ? window.ExtoreWorkerIdentity.markup(j.processing_worker, { language: lang, compact: true }) : "";
+  $("#workspace").innerHTML = `<section class="queue-workspace">
+    <header class="queue-page-heading"><div><h2>${tr("处理队列", "Processing queue")}</h2><p class="caption">${manual ? tr("先领取任务，再更新进度或交付。", "Claim a task before updating progress or delivering results.") : tr("商品处理器自动执行；这里查看处理记录。", "The product processor runs automatically. View its activity here.")}</p></div><button id="copy-queue-ai" class="secondary">${tr("复制 AI 提示词", "Copy AI prompt")}</button></header>
+    <div class="queue-filter-bar"><div class="field queue-picker"><label for="queue-product">${tr("商品", "Product")}</label><select id="queue-product" ${role === "staff" ? "disabled" : ""}>${available.map((p) => `<option value="${esc(p.id)}" ${p.id === productId ? "selected" : ""}>${esc(p.name)}${p.deleted === true || p.deleted_at ? tr("（已删除）", " (deleted)") : ""}</option>`).join("")}</select></div><div class="field"><label for="job-view">${tr("任务范围", "Tasks")}</label><select id="job-view"><option value="active" ${view === "active" ? "selected" : ""}>${tr("待处理", "Pending")}</option><option value="processed" ${view === "processed" ? "selected" : ""}>${tr("已处理", "Processed")}</option><option value="all" ${view === "all" ? "selected" : ""}>${tr("全部", "All")}</option></select></div><div class="field"><label for="job-state">${tr("状态", "State")}</label><select id="job-state"><option value="">${tr("全部状态", "All states")}</option>${Object.keys(states).map((key) => `<option value="${key}" ${filter === key ? "selected" : ""}>${esc(lang === "en" ? stateEn[key] : states[key])}</option>`).join("")}</select></div><button id="refresh" class="secondary">${tr("刷新", "Refresh")}</button></div>
+    ${role === "staff" ? `<p class="caption queue-binding-note">${tr(`CLI 剩余绑定次数：${managementRemainingCLIUses}。`, `CLI bindings remaining: ${managementRemainingCLIUses}. `)}${managementRemainingCLIUses ? tr("复制提示词后，在网页核对设备码并授权。", "After copying the prompt, review the device code and approve it in the browser.") : tr("请使用已绑定的 CLI 设备和原来的配置文件。", "Use the already-bound CLI device and its existing profile.")}</p>` : ""}<div id="queue-ai-prompt"></div>
+    ${rows.length ? `<div class="queue-list-heading"><label class="queue-select-all"><input id="all" type="checkbox" aria-label="${tr("选择当前商品的全部任务", "Select all tasks in this product")}">${tr("选择本页", "Select page")}</label><p class="caption">${tr(`本页 ${rows.length} 个任务`, `${rows.length} tasks on this page`)}</p></div>${canProcess || role === "admin" ? `<div id="queue-bulk" class="queue-bulk" hidden><p id="queue-selected-count" role="status"></p><div class="queue-bulk-actions">${canProcess ? `<button id="claim" disabled>${tr("领取任务", "Claim tasks")}</button><button id="progress-update" class="secondary" disabled>${tr("更新进度", "Update progress")}</button><button id="complete" class="secondary" disabled>${tr("提交交付", "Deliver results")}</button>` : ""}<details class="queue-more"><summary>${tr("更多操作", "More actions")}</summary><div class="queue-more-actions">${canProcess ? `<button id="request-changes" class="secondary" disabled>${tr("需要重试", "Request retry")}</button><button id="fail" class="secondary" disabled>${tr("标记失败", "Mark failed")}</button><button id="reject" class="danger" disabled>${tr("永久拒绝", "Permanently reject")}</button>` : ""}${role === "admin" ? `<button id="release" class="secondary" disabled>${tr("核实后允许重试", "Allow retry after verification")}</button>` : ""}</div></details></div><p class="caption">${tr("只操作当前商品。批量交付使用相同内容；有附件的任务请逐个交付。", "Current product only. Bulk delivery uses identical content; deliver tasks with attachments individually.")}</p></div>` : ""}<ol class="queue-task-list">${rows.map((j) => `<li class="queue-task"><div class="queue-task-heading"><label class="queue-task-select"><input type="checkbox" name="job" value="${esc(j.id)}" aria-label="${esc(tr("选择任务 ", "Select task ") + j.id)}"><span class="mono">${esc(j.id)}</span></label>${status(j)}</div><div class="queue-task-meta">${j.variant?.name ? `<span>${esc(j.variant.name)}</span>` : ""}${j.queue_position ? `<span>${tr(`商品内排第 ${j.queue_position} 位`, `Position ${j.queue_position} in this product`)}</span>` : ""}<span>${tr(`第 ${j.attempt} 次尝试`, `Attempt ${j.attempt}`)}</span></div>${taskWorker(j)}<div class="queue-task-body"><div class="queue-task-progress">${queueStepMarkup(j)}</div>${taskInputs(j)}</div></li>`).join("")}</ol>` : `<div class="queue-empty"><h3>${view === "processed" ? tr("暂无已处理任务", "No processed tasks") : filter ? tr("没有符合条件的任务", "No matching tasks") : tr("队列暂时空着", "The queue is empty")}</h3><p>${filter ? tr("可以切换状态，或刷新查看新任务。", "Change the state filter or refresh for new tasks.") : manual ? tr("有新任务时会出现在这里。也可以把上方提示词交给 AI，用 CLI 等待任务。", "New tasks will appear here. Give the prompt above to your AI to wait for work in the CLI.") : tr("自动处理记录会出现在这里。", "Automatic processing activity will appear here.")}</p></div>`}
+    <div id="batch-form"></div><div id="error" class="error" role="alert"></div></section>`;
   window.ExtoreWebMCP?.refresh();
   bindManagementDownloads(rows.flatMap(queueInputFiles), active, requestOptions);
   on("#copy-queue-ai", async () => {
@@ -1607,11 +1602,25 @@ async function renderJobs(filter = "", requestedProductId = queueProductId, requ
     perform(() => renderJobs($("#job-state").value, productId, view)),
   );
   on("#refresh", () => renderJobs(filter, productId, view));
-  $("#all")?.addEventListener("change", () =>
-    document
-      .querySelectorAll("[name=job]")
-      .forEach((c) => (c.checked = $("#all").checked)),
-  );
+  const updateSelection = () => {
+    if (!active()) return;
+    const checks = [...document.querySelectorAll("[name=job]")];
+    const selected = checks.filter((node) => node.checked).map((node) => rows.find((row) => row.id === node.value));
+    const valid = selected.length > 0 && selected.every(Boolean);
+    if ($("#queue-bulk")) $("#queue-bulk").hidden = !valid;
+    if ($("#queue-selected-count")) $("#queue-selected-count").textContent = tr(`已选择 ${selected.length} 个任务`, `${selected.length} tasks selected`);
+    if ($("#all")) { $("#all").checked = !!checks.length && selected.length === checks.length; $("#all").indeterminate = selected.length > 0 && selected.length < checks.length; }
+    const ownProcessing = valid && selected.every((row) => row.state === "processing" && row.claimed_by === currentManagementActor());
+    for (const selector of ["#progress-update", "#complete", "#fail", "#request-changes", "#reject"]) if ($(selector)) $(selector).disabled = !ownProcessing;
+    if ($("#claim")) $("#claim").disabled = !valid || selected.some((row) => row.state !== "queued");
+    if ($("#release")) $("#release").disabled = !valid || selected.some((row) => row.state !== "failed");
+  };
+  $("#all")?.addEventListener("change", () => {
+    document.querySelectorAll("[name=job]").forEach((node) => (node.checked = $("#all").checked));
+    updateSelection();
+  });
+  document.querySelectorAll("[name=job]").forEach((node) => node.addEventListener("change", updateSelection));
+  updateSelection();
   const ids = () => {
     const values = [...document.querySelectorAll("[name=job]:checked")].map(
       (c) => c.value,

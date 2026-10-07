@@ -414,6 +414,21 @@ test("monitor-only pipeline approval does not require or add task-content access
   assert.equal(p.node("#device-permission-queue-view"), undefined);
   assert.equal(p.requests.some((request) => request.url.endsWith("/approve")), false);
 });
+test("declared agent type is shown as unverified and changes require another explicit review", async () => {
+  for (const flow of ["link", "scope"]) {
+    const p = fixture({ auth: shopAuth }), initial = flow === "link" ? options(true) : activeOptions();
+    initial.request.agent_type = "dots";
+    const value = flow === "link" ? await review(p, initial) : await activeReview(p, initial);
+    assert.match(p.root.innerHTML, /代理类型（自报）|dots/);
+    assert.match(p.root.innerHTML, /未经验证/);
+    const next = JSON.parse(JSON.stringify(value)); next.request.agent_type = "grok-bot";
+    const pending = p.node("#device-approve").emit("click");
+    await resolve(p, 4, p.auth); await resolve(p, 5, next); await pending;
+    assert.equal(p.requests.some((request) => request.url.endsWith("/approve")), false);
+    assert.equal(p.accounts.length, 0);
+    assert.match(p.node("#device-error").textContent, /已改变/);
+  }
+});
 test("explicit single-product delete and purge permissions can be reviewed without extra rights", async () => {
   const p = fixture({ auth: shopAuth }), value = activeOptions({ kind: "product" });
   value.request.requested_permissions = ["product.delete", "product.purge"];

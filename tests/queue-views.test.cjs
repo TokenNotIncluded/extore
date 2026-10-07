@@ -37,7 +37,8 @@ test("queues default to active and expose a processed/all view without dropping 
 test("changing queue views clears old selections and batch forms before responses arrive", async () => {
   const page = queue();
   await load(page);
-  const selected = { checked: true };
+  const selected = page.node("#selected-job");
+  selected.checked = true;
   page.collections.set("[name=job]", [selected]);
   page.node("#all").checked = true;
   page.node("#batch-form").innerHTML = "Old batch confirmation";

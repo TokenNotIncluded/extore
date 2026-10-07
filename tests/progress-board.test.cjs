@@ -6,6 +6,7 @@ const vm = require("node:vm");
 const { appFixture, flush } = require("./app-fixture.cjs");
 const source = fs.readFileSync(path.join(__dirname, "../extore/static/progress-board.js"), "utf8");
 const css = fs.readFileSync(path.join(__dirname, "../extore/static/progress-board.css"), "utf8");
+const identitySource = fs.readFileSync(path.join(__dirname, "../extore/static/worker-identity.js"), "utf8");
 const ids = { shop: "11111111-1111-4111-8111-111111111111", otherShop: "22222222-2222-4222-8222-222222222222", product: "33333333-3333-4333-8333-333333333333", otherProduct: "44444444-4444-4444-8444-444444444444", job: "55555555-5555-4555-8555-555555555555", worker: "a".repeat(64) };
 const stateCounts = () => ({ waiting: 0, queued: 0, processing: 1, succeeded: 2, failed: 0, needs_input: 0, rejected: 1, destroyed: 1 });
 function board(overrides = {}) {
@@ -33,6 +34,7 @@ function fixture(options = {}) {
   const document = { hidden: false, addEventListener: (name, callback) => docListeners.set(name, callback), removeEventListener: (name, callback) => { if (docListeners.get(name) === callback) docListeners.delete(name); } };
   const window = { addEventListener: (name, callback) => winListeners.set(name, callback), removeEventListener: (name, callback) => { if (winListeners.get(name) === callback) winListeners.delete(name); } };
   const context = vm.createContext({ window, document, URLSearchParams, AbortController, setTimeout(callback, delay) { const id = ++timerId; timers.set(id, { callback, delay }); return id; }, clearTimeout: (id) => timers.delete(id) });
+  if (options.workerImages) vm.runInContext(identitySource, context);
   vm.runInContext(source, context);
   const ctx = { root, auth: { role: "staff", shop_id: ids.shop, product_id: ids.product, permissions: ["queue.monitor"] }, language: "zh-CN", isCurrent: () => current,
     api: (path, body, method, settings) => new Promise((resolve, reject) => requests.push({ path, body, method, settings, respond: resolve, reject })),
@@ -70,6 +72,15 @@ test("real TestClient progress-board contract renders without DTO aliases", asyn
   assert.match(page.node("#board-data").innerHTML, /商品内排第 1 位/);
   assert.match(page.node("#board-data").innerHTML, /已完成 1 \/ 2 步/);
   assert.equal(page.timers.size, 1); assert.doesNotMatch(page.node("#board-status").textContent, /不可用/);
+});
+test("CLI worker cartoons follow actual snapshot metadata and custom types cannot inject an avatar URL", async () => {
+  const page = fixture({ workerImages: true }), data = board();
+  data.workers[0].kind = "cli"; data.workers[0].agent_type = "grok-bot";
+  page.requests[0].respond(data); await page.controller.ready;
+  const html = page.node("#board-data").innerHTML;
+  assert.match(html, /src="\/static\/worker-avatars\/grok-bot\.webp"/);
+  assert.match(html, /自报类型：grok-bot · 未验证/);
+  assert.doesNotMatch(html, /https:\/\//);
 });
 test("root must choose a named shop; private shop DTO fields are not rendered", async () => {
   const page = fixture({ auth: { role: "admin", shop_id: null, superadmin: true }, platform: true });
