@@ -5,7 +5,7 @@ const path = require("node:path");
 const vm = require("node:vm");
 const test = require("node:test");
 const { webcrypto, generateKeyPairSync, sign, createHash, randomUUID } = require("node:crypto");
-const { appFixture, flush } = require("./app-fixture.cjs");
+const { appFixture, flush, product } = require("./app-fixture.cjs");
 const source = fs.readFileSync(path.join(__dirname, "../extore/static/proxy-routing.js"), "utf8");
 const hexID = () => randomUUID().replace(/-/g, "");
 const plain = (value) => JSON.parse(JSON.stringify(value));
@@ -227,4 +227,140 @@ test("a damaged wrapper separator cannot fall through to A's legacy POST", async
   }
   const legacy = "EXR2ABCD-AAAAAAAA-AAAAAAAA-AAAAAAAA";
   assert.deepEqual(plain(await page.api.routeCodes(legacy)), { localCodes: [legacy], groups: [] });
+});
+
+test("a same-origin signed legacy /proxy path stays local on the homepage", async () => {
+  const current = issuer("https://proxy.example.com");
+  current.route.path = "/proxy";
+  const code = current.code();
+  const page = browser({ metadata: [current.route] });
+  const result = await page.api.routeCodes(code);
+  assert.deepEqual(plain(result), { localCodes: [code], groups: [] });
+  assert.equal(page.navigations.length, 0);
+  assert.equal(page.requests.length, 1);
+  assert.equal(page.requests[0].options.body, undefined);
+});
+
+test("a remote signed /proxy path is preserved and becomes local after the issuer redirects home", async () => {
+  const current = issuer();
+  current.route.path = "/proxy";
+  const code = current.code();
+  const entry = browser({ metadata: [current.route] });
+  const result = await entry.api.routeCodes(code);
+  assert.equal(result.localCodes.length, 0);
+  assert.equal(result.groups.length, 1);
+  const destination = new URL(entry.api.destination(result.groups[0]));
+  assert.equal(destination.origin, current.route.origin);
+  assert.equal(destination.pathname, "/proxy");
+  assert.equal(destination.search, "");
+  assert.equal(decodeURIComponent(destination.hash.slice(13)), code);
+
+  // The HTTP compatibility redirect changes only the URL path. Browsers retain
+  // the fragment, while the immutable route used to verify the card stays /proxy.
+  const receiving = browser({ hash: destination.hash, metadata: [current.route] });
+  receiving.location.origin = current.route.origin;
+  assert.deepEqual(receiving.replacements, ["/"]);
+  const incoming = receiving.api.consumeIncoming();
+  assert.equal(incoming, code);
+  assert.deepEqual(plain(await receiving.api.routeCodes(incoming)), { localCodes: [code], groups: [] });
+  assert.equal(receiving.api.consumeIncoming(), "");
+  assert.equal(receiving.navigations.length, 0);
+  assert.ok(!JSON.stringify(entry.requests.concat(receiving.requests)).includes(code));
+});
+
+test("changing a signed legacy /proxy pin to / fails rather than rewriting its signature scope", async () => {
+  const current = issuer("https://proxy.example.com");
+  current.route.path = "/proxy";
+  const code = current.code();
+  const page = browser({ metadata: [{ ...current.route, path: "/" }] });
+  await assert.rejects(page.api.routeCodes(code), /Unable to verify/);
+  assert.equal(page.navigations.length, 0);
+  assert.equal(page.requests.length, 1);
+  assert.equal(page.requests[0].url, "/api/proxy/routes");
+  assert.equal(page.requests[0].options.body, undefined);
+});
+
+test("the app submits a verified same-origin /proxy card exactly once without navigating to /proxy", async () => {
+  const current = issuer("https://example.test");
+  current.route.path = "/proxy";
+  const code = current.code();
+  const routing = browser({ metadata: [current.route] });
+  const page = appFixture();
+  page.navigate("/");
+  const routed = routing.api.routeCodes(code, { origin: page.context.location.origin, path: page.context.location.pathname });
+  page.context.window.ExtoreProxyRouting = {
+    ...routing.api,
+    routeCodes: (raw) => { assert.equal(raw, code); return routed; },
+  };
+  const pending = page.context.exchangeCode(code);
+  await routed;
+  await flush();
+  assert.equal(page.requests.length, 1);
+  assert.equal(page.requests[0].url, "/api/exchange");
+  assert.equal(page.requests[0].options.method, "POST");
+  assert.equal(page.requests[0].body.code, code);
+  assert.equal(page.context.location.pathname, "/");
+  page.requests[0].respond({ token: "local-receipt", product: product("Legacy local product") });
+  await pending;
+  assert.equal(page.context.location.pathname, "/receipt");
+  assert.equal(page.requests.length, 1);
+  assert.equal(routing.navigations.length, 0);
+});
+
+test("a rejected legacy-path signature never reaches the app exchange POST", async () => {
+  const current = issuer("https://example.test");
+  current.route.path = "/proxy";
+  const code = current.code();
+  const routing = browser({ metadata: [{ ...current.route, path: "/" }] });
+  const page = appFixture();
+  page.navigate("/");
+  page.context.window.ExtoreProxyRouting = {
+    ...routing.api,
+    routeCodes: (raw) => routing.api.routeCodes(raw, { origin: page.context.location.origin, path: page.context.location.pathname }),
+  };
+  await assert.rejects(page.context.exchangeCode(code), /Unable to verify/);
+  assert.equal(page.requests.length, 0);
+  assert.equal(page.context.location.pathname, "/");
+});
+
+test("routing choice returns to a clean homepage without sending the remote card", async () => {
+  const current = issuer();
+  current.route.path = "/proxy";
+  const code = current.code();
+  const page = appFixture();
+  page.navigate("/#unrelated-fragment");
+  let controls;
+  let incomingReads = 0;
+  const result = { groups: [{ route: current.route, codes: [code] }], localCodes: [] };
+  page.context.window.ExtoreProxyRouting = {
+    isRoutedCode: (value) => /^EXR[0-9]+(?:\.|$)/i.test(value),
+    routeCodes: async () => result,
+    publicResult: (value) => ({ routing: true, local_count: value.localCodes.length, groups: value.groups.map(({ route, codes }) => ({ origin: route.origin, count: codes.length })) }),
+    renderRoutingChoice(_app, value, helpers) { controls = helpers; return this.publicResult(value); },
+    consumeIncoming() { incomingReads++; return ""; },
+  };
+  await page.context.exchangeCode(code);
+  assert.equal(page.requests.length, 0);
+  controls.onBack();
+  assert.equal(page.context.location.pathname, "/");
+  assert.equal(page.context.location.hash, "");
+  assert.equal(page.requests[0].url, "/api/auth/status");
+  page.requests[0].respond({ role: null });
+  await flush();
+  assert.equal(page.requests[1].url, "/api/products");
+  page.requests[1].respond([]);
+  await flush();
+  assert.equal(incomingReads, 1);
+  assert.deepEqual(page.requests.map(({ url }) => url), ["/api/auth/status", "/api/products"]);
+  assert.ok(!JSON.stringify(page.requests).includes(code));
+  assert.ok(!JSON.stringify(page.requests).includes("A".repeat(32)));
+  assert.equal(page.context.location.hash, "");
+});
+
+test("the public header has one redemption entry and no standalone /proxy navigation", () => {
+  const html = fs.readFileSync(path.join(__dirname, "../extore/static/index.html"), "utf8");
+  const header = html.slice(html.indexOf("<header>"), html.indexOf("</header>"));
+  assert.doesNotMatch(header, /href=["']\/proxy(?:[?#"'])/);
+  assert.equal((header.match(/href=["']\/["']/g) || []).length, 1);
+  assert.match(header, /id="header-context"[^>]*href="\/"/);
 });

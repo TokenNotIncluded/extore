@@ -54,7 +54,7 @@ function fixture(handler, { language = "zh-CN", batches = [{ id: "fixture-batch"
       this.html = value;
       this.children = [];
       for (const [, tag, attributes] of value.matchAll(
-        /<([a-z]+)\b([^>]*)>/g,
+        /<([a-z][a-z0-9-]*)\b([^>]*)>/g,
       )) {
         const element = new Node(tag, attributes);
         const id = attributes.match(/\bid="([^"]*)"/)?.[1];
