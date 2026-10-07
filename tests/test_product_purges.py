@@ -326,7 +326,7 @@ def test_schema16_only_adds_empty_purge_table_and_preserves_old55(owner, setup_p
     init()
     init()
     with db() as c:
-        assert c.execute("PRAGMA user_version").fetchone()[0] == 17
+        assert c.execute("PRAGMA user_version").fetchone()[0] == 18
         names = {
             r["name"]
             for r in c.execute(

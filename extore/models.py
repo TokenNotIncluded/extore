@@ -231,6 +231,7 @@ class ProductVariant(BaseModel):
 class Product(BaseModel):
     name: str = Field(min_length=1, max_length=120)
     description: str = Field(default="", max_length=20000)
+    workshop_slogan: str = Field(default="", max_length=4000, strict=True)
     logo: str = Field(default="", max_length=2000)
     image: str = Field(default="", max_length=2000)
     public: bool = False
@@ -263,6 +264,13 @@ class Product(BaseModel):
     processor_id: str = Field(default="", max_length=100, pattern=r"^[a-zA-Z0-9_-]*$")
     processor_config: dict[str, str] = Field(default_factory=dict, max_length=30)
     task_flow: dict | None = None
+
+    @field_validator("workshop_slogan")
+    @classmethod
+    def work_instructions(cls, value):
+        from .work_instructions import normalize_slogan
+
+        return normalize_slogan(value)
 
     @field_validator("support_email")
     @classmethod

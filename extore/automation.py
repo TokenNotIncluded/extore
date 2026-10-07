@@ -16,6 +16,7 @@ from .models import JobUpdate
 from .security import authorize_management, fail, rate_limit, require_cli_bearer
 from .service import apply_update, job, job_view, product
 from .shops import require_enabled_product
+from .work_instructions import instructions
 
 router = APIRouter(prefix="/api/manage")
 POLL_INTERVAL = 0.5
@@ -189,6 +190,7 @@ def _work_item(c, row, binding):
     return {
         "product_id": row["product_id"],
         "device_id": binding["device_id"],
+        "instructions": instructions(c, row["product_id"]),
         "job": {
             name: details[name]
             for name in (

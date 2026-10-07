@@ -93,6 +93,7 @@ from .service import (
 from .source import router as source_router
 from .text_cards import router as text_cards_router
 from .variants import card_variant, issued_variant_ids
+from .work_instructions import router as work_instructions_router
 
 
 @asynccontextmanager
@@ -122,6 +123,7 @@ app.include_router(private_worker_router)
 app.include_router(proxy_routes_router)
 app.include_router(maintenance_router)
 app.include_router(text_cards_router)
+app.include_router(work_instructions_router)
 
 
 @app.middleware("http")
@@ -841,6 +843,8 @@ def save_product(c, pid, body, actor, actor_session=None):
     from .processor_profiles import persist_product_configuration
 
     values = body.model_dump()
+    if "workshop_slogan" not in body.model_fields_set:
+        values["workshop_slogan"] = old["workshop_slogan"]
     persist_product_configuration(c, pid, values, actor_session=actor_session)
     c.execute(
         "UPDATE products SET config=? WHERE id=?",
@@ -1426,6 +1430,8 @@ def edit_managed_product(
         pid = management_scope(c, s, product_id, "product.edit")
         old = product(c, pid)
         values = body.model_dump()
+        if "workshop_slogan" not in body.model_fields_set:
+            values["workshop_slogan"] = old["workshop_slogan"]
         if s["role"] == "staff" and any(
             values[field] != old[field]
             for field in ("processor_id", "processor_config")

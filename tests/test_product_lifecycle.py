@@ -317,7 +317,7 @@ def test_additive_schema15_preserves_all_old54_tables(owner, setup_product):
     init()
     init()
     with db() as c:
-        assert c.execute("PRAGMA user_version").fetchone()[0] == 17
+        assert c.execute("PRAGMA user_version").fetchone()[0] == 18
         after = {
             r["name"]: r["sql"]
             for r in c.execute(

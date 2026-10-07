@@ -9,6 +9,7 @@ from fastapi import APIRouter, Query, Request
 
 from .db import db
 from .security import authorize_management, fail, session
+from .work_instructions import stored_slogan
 
 router = APIRouter(prefix="/api/manage", tags=["progress board"])
 STATES = (
@@ -74,7 +75,7 @@ def _scope(c, s, shop_id, product_id):
     elif not shop_id:
         fail("请先选择要查看进度的店铺", 400)
     shop = c.execute(
-        "SELECT id,name,enabled FROM shops WHERE id=?", (shop_id,)
+        "SELECT id,name,enabled,factory_slogan FROM shops WHERE id=?", (shop_id,)
     ).fetchone()
     if shop is None:
         fail("店铺不存在", 404)
@@ -88,7 +89,11 @@ def _scope(c, s, shop_id, product_id):
             fail("商品不存在", 404)
         if target["shop_id"] != shop_id:
             fail("商品不属于所选店铺", 403)
-    return {"id": shop_id, "name": _name(shop["name"], "店铺")}, product_id
+    return {
+        "id": shop_id,
+        "name": _name(shop["name"], "店铺"),
+        "factory_slogan": stored_slogan(shop["factory_slogan"]),
+    }, product_id
 
 
 def _steps(c, row):
@@ -165,7 +170,11 @@ def progress_board(
             "SELECT p.id, CASE WHEN json_valid(p.config) THEN CASE "
             "WHEN json_type(p.config,'$.name')='text' THEN json_extract(p.config,'$.name') END END name, "
             "CASE WHEN json_valid(p.config) THEN CASE WHEN json_type(p.config,'$.mode')='text' "
-            "THEN json_extract(p.config,'$.mode') END END mode "
+            "THEN json_extract(p.config,'$.mode') END END mode, "
+            "CASE WHEN json_valid(p.config) THEN CASE "
+            "WHEN json_type(p.config,'$.workshop_slogan')='text' "
+            "THEN json_extract(p.config,'$.workshop_slogan') "
+            "WHEN json_type(p.config,'$.workshop_slogan') IS NULL THEN '' END END workshop_slogan "
             "FROM products p WHERE " + clause + " ORDER BY p.created,p.id LIMIT 501",
             args,
         ).fetchall()
@@ -176,6 +185,7 @@ def progress_board(
                 "id": r["id"],
                 "name": _name(r["name"], "商品"),
                 "mode": r["mode"] if r["mode"] in MODES else "unknown",
+                "workshop_slogan": stored_slogan(r["workshop_slogan"]),
                 "counts": _counts(),
                 "jobs": [],
             }

@@ -717,6 +717,8 @@ async def deliver_v2(context, *, recheck=None):
         "callback_url": ORIGIN
         + f"/api/callbacks/v2/{scope.product_id}/{scope.job_id}/result",
     }
+    if context.get("instructions") is not None:
+        payload["instructions"] = context["instructions"]
     raw = _json(payload)
     if len(raw) > MAX_RESULT_BYTES:
         raise ValueError("私有处理器任务输入过大")

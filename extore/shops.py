@@ -24,6 +24,10 @@ def init_schema(c):
         c.execute(
             f"ALTER TABLE shops ADD COLUMN storage_limit_bytes INTEGER NOT NULL DEFAULT {int(UPLOAD_SHOP_BYTES)} CHECK(storage_limit_bytes>0)"
         )
+    if "factory_slogan" not in columns:
+        c.execute(
+            "ALTER TABLE shops ADD COLUMN factory_slogan TEXT NOT NULL DEFAULT ''"
+        )
     c.execute(
         "CREATE TABLE IF NOT EXISTS shop_integration_keys (shop_id TEXT PRIMARY KEY REFERENCES shops(id) ON DELETE CASCADE,key_digest TEXT UNIQUE NOT NULL,created REAL NOT NULL)"
     )

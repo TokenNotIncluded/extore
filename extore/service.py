@@ -19,6 +19,7 @@ def product(c, pid):
     config = json.loads(row["config"])
     config.setdefault("progress_steps", [])
     config.setdefault("support_email", "")
+    config.setdefault("workshop_slogan", "")
     config["variants"] = resolve_product_variants(config)
     config.setdefault("processor_id", "")
     config.setdefault("processor_config", {})
@@ -62,6 +63,7 @@ def public_product(p):
             "processor_binding",
             "configured_fields",
             "task_flow",
+            "workshop_slogan",
             "deleted",
             "deleted_at",
             "deleted_by",
@@ -440,6 +442,9 @@ def job_view(c, row, staff=False):
         result["queue_ahead"] + 1 if row["state"] in ("queued", "processing") else 0
     )
     if staff:
+        from .work_instructions import instructions
+
+        result["instructions"] = instructions(c, row["product_id"])
         result["params"] = json.loads(row["params"])
         result["claimed_by"] = row["claimed_by"]
         from .agent_identity import processing_worker

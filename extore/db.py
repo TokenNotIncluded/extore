@@ -203,6 +203,9 @@ def event(c, kind, product_id, job=None):
             c, job
         )
         if kind == "redemption.requested":
+            from .work_instructions import instructions
+
+            payload["data"]["instructions"] = instructions(c, product_id)
             payload["data"]["params"] = json.loads(job["params"])
     else:
         payload["data"] = {}

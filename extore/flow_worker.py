@@ -316,6 +316,14 @@ def _validated_context(c, dispatch, *, state=None):
         != dispatch["payload_digest"]
     ):
         raise DispatchInvalid("流程回调已失效")
+    from .work_instructions import instructions
+
+    # Keep the encrypted execution/fingerprint unchanged for pending historical
+    # dispatches. Attach live merchant configuration only after scope validation.
+    try:
+        context["instructions"] = instructions(c, dispatch["product_id"])
+    except HTTPException:
+        raise DispatchInvalid("流程回调已失效") from None
     return context
 
 

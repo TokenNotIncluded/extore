@@ -289,6 +289,9 @@ async def execute_script(row, p, task_flow_epoch=None):
         )
         row["variant"] = card_variant(c, trusted_job)
         row["steps"], row["completed_steps"] = progress_view(c, trusted_job)
+        from .work_instructions import instructions
+
+        row["instructions"] = instructions(c, trusted_job["product_id"])
     p = {**p, "processor_config": configuration}
     row["shop_context"] = shop_context
     row["workflow"] = workflow
@@ -323,6 +326,11 @@ async def _execute_processor(row, p, processor_package):
     check = row.get("_check_execution", lambda **kwargs: None)
     limits = workflow["runtime"]
     payload = {
+        **(
+            {"instructions": row["instructions"], "product_id": row["product_id"]}
+            if "instructions" in row
+            else {}
+        ),
         "params": json.loads(row["params"]),
         "configuration": p["processor_config"],
         "variant": row["variant"],
