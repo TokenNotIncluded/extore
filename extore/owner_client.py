@@ -693,6 +693,9 @@ def add_parser(commands):
     _scope(products)
     products.add_argument("--detail", action="store_true")
     products.add_argument("--output", type=Path)
+    products.add_argument(
+        "--view", choices=("active", "deleted", "all"), default="active"
+    )
     queues = sub.add_parser(
         "queues", help="compact pending queues across merchant products"
     )
@@ -791,6 +794,10 @@ def add_parser(commands):
         _scope(parser)
         parser.add_argument("--detail", action="store_true")
         parser.add_argument("--output", type=Path)
+        if operation == "list":
+            parser.add_argument(
+                "--view", choices=("active", "deleted", "all"), default="active"
+            )
         if operation in ("create", "quick"):
             business._json_arguments(parser)
     # Owner configuration reads may be exported without redaction to a private
@@ -825,14 +832,14 @@ def _owner_request(client, owner, method, path, **kwargs):
     return client.request(owner, method, path, **kwargs)
 
 
-def _global_products(client, owner, *, compact=False):
+def _global_products(client, owner, *, compact=False, view="active"):
     return _objects(
         _owner_request(
             client,
             owner,
             "GET",
             "/api/admin/products",
-            params={"compact": "true"} if compact else None,
+            params={"compact": "true", "view": view} if compact else {"view": view},
         )
     )
 
@@ -841,7 +848,26 @@ class _BusinessOwner(OwnerClient):
     """Adapt shared product operations to their owner audit endpoints."""
 
     def request(self, grant, method, path, **kwargs):
-        if path == "/api/manage/product" and method == "PUT":
+        if (path == "/api/manage/product" and method == "DELETE") or (
+            path == "/api/manage/product/restore" and method == "POST"
+        ):
+            params = kwargs.get("params") or {}
+            selected_product = grant.get("product_id") or params.get("product_id")
+            if (
+                not isinstance(selected_product, str)
+                or not re.fullmatch(r"[A-Za-z0-9_-]{1,100}", selected_product)
+                or params.get("product_id") != selected_product
+            ):
+                raise ManageError(
+                    "Lifecycle request belongs to a different product", code="no_scope"
+                )
+            path = (
+                "/api/admin/products/"
+                + quote(selected_product, safe="")
+                + ("/restore" if method == "POST" else "")
+            )
+            kwargs.pop("params", None)
+        elif path == "/api/manage/product" and method == "PUT":
             body = kwargs.get("json", {})
             if (
                 body.get("webhook_secret") == "[redacted]"
@@ -875,6 +901,8 @@ _API_ROUTES = (
     ("GET", r"/api/admin/products"),
     ("POST", r"/api/admin/products(?:/quick)?"),
     ("PUT", r"/api/admin/products/[A-Za-z0-9_-]+"),
+    ("DELETE", r"/api/admin/products/[A-Za-z0-9_-]+"),
+    ("POST", r"/api/admin/products/[A-Za-z0-9_-]+/restore"),
     (
         "GET",
         r"/api/admin/(?:product-templates|processors|storage|cards|card-stats|card-inventory|staff|events|sessions|audit|cli-devices)",
@@ -890,6 +918,8 @@ _API_ROUTES = (
     ),
     ("POST", r"/api/manage/(?:batch|cards|links)"),
     ("PUT", r"/api/manage/product"),
+    ("DELETE", r"/api/manage/product"),
+    ("POST", r"/api/manage/product/restore"),
     ("POST", r"/api/manage/(?:cards|links)/[A-Za-z0-9_-]+/revoke"),
     ("GET", r"/api/manage/cards/[A-Za-z0-9_-]+/history"),
     ("POST", r"/api/manage/events/[A-Za-z0-9_-]+/retry"),
@@ -968,6 +998,37 @@ def _api(client, owner, args):
     body = (
         shop_commands.private_json(args) if private_input else business.read_json(args)
     )
+    lifecycle = (
+        "delete"
+        if args.method == "DELETE"
+        and (
+            args.path == "/api/manage/product"
+            or re.fullmatch(r"/api/admin/products/[A-Za-z0-9_-]+", args.path)
+        )
+        else "restore"
+        if args.method == "POST"
+        and (
+            args.path == "/api/manage/product/restore"
+            or re.fullmatch(r"/api/admin/products/[A-Za-z0-9_-]+/restore", args.path)
+        )
+        else None
+    )
+    if lifecycle:
+        if not isinstance(args.product, str) or not re.fullmatch(
+            r"[A-Za-z0-9_-]{1,100}", args.product
+        ):
+            raise ManageError(
+                "Product lifecycle API requests require one valid --product",
+                code="no_scope",
+            )
+        match = re.fullmatch(
+            r"/api/admin/products/([A-Za-z0-9_-]+)(?:/restore)?", args.path
+        )
+        if match and match[1] != args.product:
+            raise ManageError(
+                "Request belongs to a different selected product", code="no_scope"
+            )
+        body = business.product_lifecycle_body(args, lifecycle, body)
     if args.product:
         if (
             query.get("product_id", args.product) != args.product
@@ -997,6 +1058,8 @@ def _api(client, owner, args):
         "/api/manage/jobs",
     ):
         query.setdefault("compact", "false" if args.detail or args.output else "true")
+        if args.path in ("/api/admin/products", "/api/manage/products"):
+            query.setdefault("view", "active")
         if args.path == "/api/manage/jobs":
             query.setdefault("view", "active")
     kwargs = {"params": query or None}
@@ -1019,6 +1082,13 @@ def _api(client, owner, args):
             _owner_request(client, owner, args.method, args.path, **kwargs)
         )
         return business._finish(args, {"ok": True, "result": value})
+    if lifecycle:
+        value = business.product_lifecycle_result(
+            _owner_request(client, owner, args.method, args.path, **kwargs),
+            args.product,
+            lifecycle,
+        )
+        return business._finish(args, {"ok": True, "result": value})
     if secret or args.output:
         return _secret_output(
             args,
@@ -1030,6 +1100,7 @@ def _api(client, owner, args):
 
 
 def dispatch(client, args):
+    business.require_product_delete_confirmation(args)
     origin = origin_from_url(args.origin) if getattr(args, "origin", None) else None
     command = args.manage_command
     if command == "login":
@@ -1216,7 +1287,7 @@ def dispatch(client, args):
         return business._finish(args, _object(result))
     if command == "products" or command == "product" and args.operation == "list":
         items = _global_products(
-            client, owner, compact=not args.detail and not args.output
+            client, owner, compact=not args.detail and not args.output, view=args.view
         )
         if args.output:
             return _secret_output(args, "products", lambda: items)
@@ -1229,6 +1300,8 @@ def dispatch(client, args):
             "view_policy",
             "public",
             "active",
+            "deleted",
+            "deleted_at",
             "parameters_count",
             "outputs_count",
             "variants",
@@ -1273,7 +1346,10 @@ def dispatch(client, args):
         ids = (
             [args.product]
             if args.product
-            else [item["id"] for item in _global_products(client, owner, compact=True)]
+            else [
+                item["id"]
+                for item in _global_products(client, owner, compact=True, view="all")
+            ]
         )
         queues = []
         for product_id in ids:

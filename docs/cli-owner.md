@@ -188,3 +188,37 @@ extore admin logout --all
 ```
 
 `admin logout` 撤销所选店主设备及它的全部 CLI 会话，然后移除本地密钥；网络失败时保留本地密钥供重试。这与 `manage logout` 只结束当前商品 CLI 会话并移除本地记录不同。单独撤销一条会话不会阻止仍有效设备继续续签。
+
+### 商品回收站
+
+删除商品会停售并移入回收站，可以恢复。它不会删除卡密、订单任务、领取链接或附件；原卡密仍能兑换，已提交任务仍能处理。彻底清除存储不是这些命令的功能。
+
+```sh
+extore admin product delete --product PRODUCT_ID --yes
+extore admin products --view deleted
+extore admin product list --view all
+extore admin product restore --product PRODUCT_ID
+```
+
+商品列表默认 `--view active`，也可选择 `deleted` 或 `all`。跨商品队列会查询全部商品，保留回收站商品的旧任务。商品删除必须显式写 `--yes`，缺少这个参数时不会发送删除请求，也不会为了删除而续期会话。店主命令沿用一次性挑战和设备签名，并在审计中记录店主身份。
+
+商品授权 CLI 使用相同命令：
+
+```sh
+extore manage product delete --product PRODUCT_ID --yes
+extore manage products --view deleted
+extore manage product restore --product PRODUCT_ID
+```
+
+这两个操作要求同一份商品授权明确包含 `product.delete`，不要求 `product.edit`。旧链接、旧授权，以及原来的“完整管理”权限集合不会自动新增删除权限；需要管理者另行批准。CLI 不会合并多个链接来凑权限，也不会把删除操作应用到其他商品。
+
+通用 API 命令同样要求确认，并且 JSON 只能是 `{"confirmed":true}`。未提供 JSON 时，CLI 会在 `--yes` 的明确确认下生成这个正文。恢复不接收商品配置正文。
+
+```sh
+extore admin api DELETE /api/admin/products/PRODUCT_ID --product PRODUCT_ID --yes
+extore admin api POST /api/admin/products/PRODUCT_ID/restore --product PRODUCT_ID
+extore manage api DELETE /api/manage/product --product PRODUCT_ID --yes
+extore manage api POST /api/manage/product/restore --product PRODUCT_ID
+```
+
+通用店主 API 的路径商品 ID、`--product` 和查询中的商品 ID 必须一致。CLI 只输出商品 ID、是否已删除以及删除时间，不输出响应里的配置、卡密或凭据。

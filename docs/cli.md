@@ -351,3 +351,5 @@ extore manage logout --all
 `logout` 结束所选当前 CLI 会话，清理相应待审批申请与不再使用的本地恢复密钥，保留其他商品的授权。店铺快照中多个商品共用授权密钥，退出一个商品会保留其余成员所需的密钥。`logout --all` 同时清理所有本地授权、设备密钥和待审批申请，服务器仍保留审计记录。
 
 需要彻底阻止设备续签时，在后台撤销流水线授权或设备；撤销管理链接同时停止其设备、会话及下级授权。主动授权被撤销后，先退出相应范围，再申请新设备码，由店主重新批准；整组授权可用 `logout --origin SERVER` 清理该服务器所有本地记录后重新申请。旧链接兼容入口须提供仍有效且有额度的新授权，不能绕过撤销或绑定次数。会话界面区分 browser / cli 渠道，并显示绑定设备信息。
+
+商品可以通过 CLI 移入回收站和恢复：`extore admin product delete --product PRODUCT_ID --yes`、`extore admin product restore --product PRODUCT_ID`。商品授权下使用 `extore manage product delete/restore`，需要明确批准的 `product.delete` 权限；已有授权不会自动扩权。列表的 `--view active|deleted|all` 默认显示未删除商品。删除只停售，原卡密、任务、领取链接和附件保留，聚合队列仍包括旧任务。完整示例见 [商品回收站](cli-owner.md#商品回收站)。

@@ -2,6 +2,7 @@
 
 import argparse
 import json
+import math
 import os
 import re
 import secrets
@@ -46,6 +47,7 @@ PERMISSIONS = (
     "cards.manage",
     "events.manage",
     "links.delegate",
+    "product.delete",
 )
 JSON_LIMIT = 256000
 TEXT_IMPORT_LIMIT = 2 * 1024 * 1024
@@ -127,7 +129,11 @@ def cleanup_limit(value):
 
 
 def add_commands(subcommands):
-    product = _group(subcommands, "product", ("get", "update", "schema", "prompt"))
+    product = _group(
+        subcommands,
+        "product",
+        ("get", "update", "schema", "prompt", "delete", "restore"),
+    )
     for parser in product.values():
         parser.description = (
             "variants.price is an optional reference price for configuring an "
@@ -138,6 +144,11 @@ def add_commands(subcommands):
         "--include-secrets",
         action="store_true",
         help="include fulfillment configuration only in an explicit private --output file",
+    )
+    product["delete"].add_argument(
+        "--yes",
+        action="store_true",
+        help="confirm moving this product to the recycle bin; existing cards and tasks remain valid",
     )
     _json_arguments(product["update"])
     for action in ("schema", "prompt"):
@@ -222,6 +233,11 @@ def add_commands(subcommands):
     api.add_argument("path", help="relative /api/manage/ route without query strings")
     api.add_argument(
         "--query", action="append", default=[], help="query KEY=VALUE; repeat as needed"
+    )
+    api.add_argument(
+        "--yes",
+        action="store_true",
+        help="explicitly confirm product deletion; never inferred from JSON",
     )
     _json_arguments(api, required=False)
 
@@ -439,9 +455,91 @@ def _product(client, grant):
     return _object(_request(client, grant, "GET", "/api/manage/product"))
 
 
+def require_product_delete_confirmation(args):
+    """Run before grant/session renewal so an unconfirmed delete stays local."""
+    command = getattr(args, "manage_command", "")
+    named_operation = getattr(args, "operation", "")
+    if command == "product" and named_operation in ("delete", "restore"):
+        if not isinstance(getattr(args, "product", None), str) or not re.fullmatch(
+            r"[A-Za-z0-9_-]{1,100}", args.product
+        ):
+            raise ManageError("Select one valid --product ID", code="invalid_input")
+    named = command == "product" and named_operation == "delete"
+    generic = (
+        command == "api"
+        and getattr(args, "method", "") == "DELETE"
+        and (
+            getattr(args, "path", "") == "/api/manage/product"
+            or re.fullmatch(
+                r"/api/admin/products/[A-Za-z0-9_-]+", getattr(args, "path", "")
+            )
+        )
+    )
+    if (named or generic) and getattr(args, "yes", False) is not True:
+        raise ManageError(
+            "Product deletion requires --yes; existing cards and tasks are retained",
+            code="confirmation_required",
+        )
+
+
+def product_lifecycle_body(args, operation, body=None):
+    if operation == "delete":
+        if getattr(args, "yes", False) is not True:
+            raise ManageError(
+                "Product deletion requires --yes", code="confirmation_required"
+            )
+        require_product_delete_confirmation(args)
+        if body is not None and (
+            not isinstance(body, dict)
+            or set(body) != {"confirmed"}
+            or body.get("confirmed") is not True
+        ):
+            raise ManageError(
+                "Product deletion JSON must be exactly {confirmed:true}",
+                code="invalid_input",
+            )
+        return {"confirmed": True}
+    if body not in (None, {}):
+        raise ManageError(
+            "Product restoration does not accept configuration or identity fields",
+            code="invalid_input",
+        )
+    return None
+
+
+def product_lifecycle_result(value, product_id, operation):
+    value = _object(value)
+    deleted = operation == "delete"
+    timestamp = value.get("deleted_at")
+    if (
+        not {"ok", "product_id", "deleted", "deleted_at"}.issubset(value)
+        or value.get("ok") is not True
+        or value.get("product_id") != product_id
+        or value.get("deleted") is not deleted
+        or (
+            deleted
+            and (
+                type(timestamp) not in (int, float)
+                or timestamp <= 0
+                or timestamp > 253402300799
+                or not math.isfinite(timestamp)
+            )
+        )
+        or (not deleted and timestamp is not None)
+    ):
+        raise ManageError("Invalid product lifecycle response", code="invalid_response")
+    return {
+        "ok": True,
+        "product_id": product_id,
+        "deleted": deleted,
+        "deleted_at": timestamp,
+    }
+
+
 def dispatch(client, args, origin):
     command = args.manage_command
     operation = getattr(args, "operation", "")
+    require_product_delete_confirmation(args)
     if command == "source":
         if origin:
             selected = origin
@@ -470,7 +568,9 @@ def dispatch(client, args, origin):
         "processors": "product.edit",
     }.get(command, "")
     if command == "product" and operation != "schema":
-        permission = "product.edit"
+        permission = (
+            "product.delete" if operation in ("delete", "restore") else "product.edit"
+        )
     include_secrets = (
         command == "product" and operation == "get" and args.include_secrets
     )
@@ -617,8 +717,20 @@ def dispatch(client, args, origin):
 
 def product_command(client, grant, args):
     operation = args.operation
+    if operation in ("delete", "restore"):
+        body = product_lifecycle_body(args, operation)
+        result = _request(
+            client,
+            grant,
+            "DELETE" if operation == "delete" else "POST",
+            "/api/manage/product" + ("/restore" if operation == "restore" else ""),
+            **({"json": body} if body is not None else {}),
+        )
+        return product_lifecycle_result(result, grant["product_id"], operation)
     if operation == "schema":
-        products = _objects(client.request(grant, "GET", "/api/manage/products"))
+        products = _objects(
+            client.request(grant, "GET", "/api/manage/products", params={"view": "all"})
+        )
         product = next(
             (item for item in products if item.get("id") == grant["product_id"]), None
         )
@@ -1012,6 +1124,8 @@ _API_ROUTES = (
     ("GET", r"products", ""),
     ("GET", r"product", "product.edit"),
     ("PUT", r"product", "product.edit"),
+    ("DELETE", r"product", "product.delete"),
+    ("POST", r"product/restore", "product.delete"),
     ("GET", r"processors", "product.edit"),
     ("GET", r"jobs", "queue.view"),
     ("POST", r"batch", "queue.process"),
@@ -1068,7 +1182,17 @@ def api_request(client, args, origin):
             "This route has a dedicated command or is unavailable to product CLI credentials",
             code="invalid_path",
         )
+    require_product_delete_confirmation(args)
     body = read_json(args)
+    lifecycle = (
+        "delete"
+        if args.method == "DELETE" and relative == "product"
+        else "restore"
+        if args.method == "POST" and relative == "product/restore"
+        else None
+    )
+    if lifecycle:
+        body = product_lifecycle_body(args, lifecycle, body)
     if relative == "batch" and body and body.get("action") == "retry":
         matched = "queue.retry"
     grant = _grant(client, args, origin, matched)
@@ -1098,6 +1222,7 @@ def api_request(client, args, origin):
         body["product_id"] = grant["product_id"]
     if relative == "products":
         query.setdefault("compact", "true" if not args.detail else "false")
+        query.setdefault("view", "active")
     if relative == "jobs":
         query.setdefault("compact", "true" if not args.detail else "false")
         query.setdefault("view", "active")
@@ -1118,6 +1243,8 @@ def api_request(client, args, origin):
         params=query,
         **({"json": body} if body is not None else {}),
     )
+    if lifecycle:
+        result = product_lifecycle_result(result, grant["product_id"], lifecycle)
     if not args.detail and relative == "processors":
         result = [_processor_summary(item) for item in _objects(result)]
     return _finish(args, {"ok": True, "result": _public(result)})

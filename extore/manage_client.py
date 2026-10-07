@@ -1698,7 +1698,7 @@ class ManageClient:
             **({"stale": result["stale"]} if "stale" in result else {}),
         }
 
-    def products(self, *, origin=None, grant_id=None, detail=False):
+    def products(self, *, origin=None, grant_id=None, detail=False, view="active"):
         grants, errors = self.grants(origin=origin, grant_id=grant_id)
         products = {}
         for grant in grants:
@@ -1707,7 +1707,7 @@ class ManageClient:
                     grant,
                     "GET",
                     "/api/manage/products",
-                    params={"compact": "false" if detail else "true"},
+                    params={"compact": "false" if detail else "true", "view": view},
                 )
                 for product in _objects(result):
                     if product.get("id") != grant["product_id"]:
@@ -1725,6 +1725,8 @@ class ManageClient:
                                     "mode",
                                     "delivery",
                                     "view_policy",
+                                    "deleted",
+                                    "deleted_at",
                                 )
                                 if key in product
                             },
@@ -2368,6 +2370,12 @@ def add_parser(commands):
         action="store_true",
         help="include current input/output schemas and tutorials",
     )
+    products.add_argument(
+        "--view",
+        choices=("active", "deleted", "all"),
+        default="active",
+        help="active products by default; deleted products are recoverable",
+    )
     queues = subcommands.add_parser(
         "queues", help="compact pending queues across all authorized products"
     )
@@ -2657,7 +2665,9 @@ def dispatch(client, args, command, origin):
             )
         return client.login(invitation, args.client_name)
     if command == "products":
-        return client.products(origin=origin, grant_id=grant_id, detail=args.detail)
+        return client.products(
+            origin=origin, grant_id=grant_id, detail=args.detail, view=args.view
+        )
     if command == "queues":
         return client.queues(
             product=args.product,
