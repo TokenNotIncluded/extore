@@ -392,6 +392,9 @@ def create_shop(body: ShopCreate, request: Request):
             "INSERT INTO shops(id,name,email,created,storage_limit_bytes) VALUES (?,?,?,?,?)",
             (sid, body.name.strip(), body.email, time.time(), UPLOAD_SHOP_BYTES),
         )
+        from .proxy_routes import ensure_shop_issuer
+
+        ensure_shop_issuer(c, sid)
         expires = _mail_token(c, "invite", body.email, sid)
         audit(c, "superadmin", "shop.create", sid)
         return {
@@ -550,6 +553,9 @@ def confirm_registration(
                 UPLOAD_SHOP_BYTES,
             ),
         )
+        from .proxy_routes import ensure_shop_issuer
+
+        ensure_shop_issuer(c, sid)
         create_session(
             c,
             response,

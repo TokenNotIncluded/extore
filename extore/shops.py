@@ -83,6 +83,14 @@ def default_shop(c):
             "INSERT INTO shops(id,name,created,verified,legacy,storage_limit_bytes) VALUES (?,?,?,1,1,?)",
             (value, "默认店铺", time.time(), UPLOAD_SHOP_BYTES),
         )
+        # During first schema setup proxy tables are created later. Subsequent
+        # legacy-shop recreation follows the same mandatory identity rule.
+        if "current" in {
+            r["name"] for r in c.execute("PRAGMA table_info(proxy_identities)")
+        }:
+            from .proxy_routes import ensure_shop_issuer
+
+            ensure_shop_issuer(c, value)
     set_setting(c, "legacy_shop_id", value)
     return value
 

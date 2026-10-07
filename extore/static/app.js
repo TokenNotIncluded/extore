@@ -555,7 +555,6 @@ function syncPreferenceControls() {
     "Language: Auto",
   );
   $("#header-context").textContent = tr("兑换与领取", "Redeem & collect");
-  if ($("#proxy-entry-link")) $("#proxy-entry-link").textContent = tr("代理兑换", "Routed redemption");
 }
 syncPreferenceControls();
 preferences.subscribe(({ resolved }) => {
@@ -683,7 +682,7 @@ async function exchangeCode(code, options = {}) {
         return window.ExtoreProxyRouting.renderRoutingChoice(app, grouped, {
           tr, esc,
           onLocal: (local) => context.active() && routingPage === queueLoadId ? exchangeCode(local, { ...options, skipProxyRouting: true }) : undefined,
-          onBack: () => { history.replaceState({}, "", "/proxy"); start(); },
+          onBack: () => { history.replaceState({}, "", "/"); start(); },
         });
       }
       code = grouped.localCodes.join("\n");

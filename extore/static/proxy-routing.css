@@ -20,9 +20,30 @@
 .proxy-route-row p { margin: 4px 0; }
 .proxy-route-domain { overflow-wrap: anywhere; }
 .proxy-route-row button { flex-shrink: 0; min-height: 44px; }
-.proxy-entry-link { color: var(--ink); text-decoration: none; min-height: 44px; display: inline-flex; align-items: center; }
-.proxy-entry-link:hover { text-decoration: underline; }
 @media (max-width: 520px) {
   .proxy-route-row { align-items: stretch; flex-direction: column; gap: 12px; }
   .proxy-route-row button { width: 100%; }
+}
+
+.proxy-config { max-width: 1060px; }
+.proxy-config-section { margin: 48px 0; }
+.proxy-config-section > h3 { margin-bottom: 12px; }
+.proxy-config .caption { max-width: 74ch; }
+.proxy-config details > summary { padding: 12px 0; min-height: 44px; cursor: pointer; }
+.proxy-config h4 { margin: 0 0 8px; font-size: 17px; }
+.proxy-identity-row { display: flex; align-items: start; justify-content: space-between; gap: 24px; padding: 20px 0; }
+.proxy-identity-row .mono, .proxy-route-config-row .mono { overflow-wrap: anywhere; }
+.proxy-route-config-row { padding: 24px 0 32px; }
+.proxy-route-config-row + .proxy-route-config-row { border-top: 1px dashed var(--dashed-line); }
+.proxy-config .proxy-prompt { margin: 16px 0; }
+.proxy-config .proxy-import { margin-top: 32px; }
+.proxy-config #proxy-identity-form { max-width: 560px; padding: 12px 0; }
+.proxy-config .proxy-history > summary { font-size: 18px; font-weight: 600; }
+.proxy-config .proxy-history > div { margin-top: 20px; }
+@media (max-width: 640px) {
+  .proxy-config-section { margin: 36px 0; }
+  .proxy-route-config-row .section-head { align-items: start; flex-direction: column; gap: 16px; }
+  .proxy-route-config-row .actions { flex-wrap: wrap; }
+  .proxy-config input, .proxy-config textarea, .proxy-config select { font-size: 16px; }
+  .proxy-identity-row { gap: 12px; }
 }

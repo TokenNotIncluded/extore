@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import Literal
 
 from fastapi import FastAPI, HTTPException, Request, Response
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse, JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 
 from . import auth, product_lifecycle, shops
@@ -1824,7 +1824,6 @@ app.mount("/static", StaticFiles(directory=STATIC), name="static")
 @app.api_route("/admin", methods=["GET", "HEAD"])
 @app.api_route("/staff", methods=["GET", "HEAD"])
 @app.api_route("/receipt", methods=["GET", "HEAD"])
-@app.api_route("/proxy", methods=["GET", "HEAD"])
 @app.api_route("/cli/owner", methods=["GET", "HEAD"])
 @app.api_route("/cli/device", methods=["GET", "HEAD"])
 @app.api_route("/account", methods=["GET", "HEAD"])
@@ -1835,3 +1834,12 @@ app.mount("/static", StaticFiles(directory=STATIC), name="static")
 @app.api_route("/account/security", methods=["GET", "HEAD"])
 def index():
     return FileResponse(STATIC / "index.html")
+
+
+@app.api_route("/proxy", methods=["GET", "HEAD"], include_in_schema=False)
+def legacy_proxy_entry():
+    # Browsers retain the original fragment when Location has no fragment.
+    # No code or query is copied into an HTTP redirect target.
+    return RedirectResponse(
+        "/", status_code=308, headers={"Referrer-Policy": "no-referrer"}
+    )

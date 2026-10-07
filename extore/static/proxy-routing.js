@@ -112,7 +112,7 @@
       const identity = route.route_id + ":" + parsed.secret;
       if (seen.has(identity)) continue;
       seen.add(identity);
-      if (route.origin === origin && (route.path === path || route.path === "/")) localCodes.push(code);
+      if (route.origin === origin && (route.path === path || route.path === "/" || route.path === "/proxy")) localCodes.push(code);
       else {
         if (!groups.has(route.route_id)) groups.set(route.route_id, { route, codes: [] });
         groups.get(route.route_id).codes.push(code);

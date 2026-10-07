@@ -19,6 +19,7 @@ def clean():
     init()
     with db() as c:
         for table in (
+            "proxy_issued_cards",
             "proxy_routes",
             "proxy_identities",
             "automation_requests",
