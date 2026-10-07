@@ -67,7 +67,12 @@ def add_commands(subcommands):
     business._scope(cleanup, product=False)
     cleanup.set_defaults(operation="cleanup")
     cleanup.add_argument("--yes", action="store_true", required=True)
-    for parser in (*identities.values(), *routes.values(), cleanup):
+    cleanup_preview = proxy_groups.add_parser(
+        "cleanup-preview", help="preview unused routing history without deleting it"
+    )
+    business._scope(cleanup_preview, product=False)
+    cleanup_preview.set_defaults(operation="cleanup-preview")
+    for parser in (*identities.values(), *routes.values(), cleanup, cleanup_preview):
         parser.add_argument(
             "--shop", help="explicit shop UUID; required for platform-root devices"
         )
@@ -94,7 +99,9 @@ def add_commands(subcommands):
     for operation in ("export", "enable", "disable", "default"):
         routes[operation].add_argument("id", help="immutable route ID")
     routes["default"].add_argument(
-        "--clear", action="store_true", help="stop using this route for new issuance"
+        "--clear",
+        action="store_true",
+        help="legacy option; rejected because a shop must retain a current issuer",
     )
     maintenance = _operations(
         subcommands.add_parser(
@@ -614,6 +621,10 @@ def _proxy_cleanup_metadata(value, *, shop, target=None, identity=False, preview
         "deleted_route_ids",
         "deleted_identity_count",
         "deleted_route_count",
+        "eligible_identity_ids",
+        "eligible_route_ids",
+        "eligible_identity_count",
+        "eligible_route_count",
     )
     result = {key: value[key] for key in keys if key in value}
     if target is not None:
@@ -627,10 +638,22 @@ def _proxy_cleanup_metadata(value, *, shop, target=None, identity=False, preview
                 "Cleanup response does not match the selected identity or route",
                 code="invalid_response",
             )
-    if preview and type(value.get("eligible")) is not bool:
+    if preview and target is not None and type(value.get("eligible")) is not bool:
         raise ManageError("Invalid cleanup preview", code="invalid_response")
     if not preview and value.get("ok") is not True:
         raise ManageError("Invalid cleanup result", code="invalid_response")
+    if target is None:
+        prefix = "eligible" if preview else "deleted"
+        required = {
+            prefix + "_identity_ids",
+            prefix + "_route_ids",
+            prefix + "_identity_count",
+            prefix + "_route_count",
+        }
+        if not required <= result.keys():
+            raise ManageError(
+                "Invalid aggregate cleanup result", code="invalid_response"
+            )
     for key in (
         "ok",
         "eligible",
@@ -646,10 +669,17 @@ def _proxy_cleanup_metadata(value, *, shop, target=None, identity=False, preview
         "issued_card_count",
         "deleted_identity_count",
         "deleted_route_count",
+        "eligible_identity_count",
+        "eligible_route_count",
     ):
         if key in result and (type(result[key]) is not int or result[key] < 0):
             raise ManageError("Invalid cleanup count", code="invalid_response")
-    for key in ("deleted_identity_ids", "deleted_route_ids"):
+    for key in (
+        "deleted_identity_ids",
+        "deleted_route_ids",
+        "eligible_identity_ids",
+        "eligible_route_ids",
+    ):
         if key in result and (
             not isinstance(result[key], list)
             or any(
@@ -669,6 +699,8 @@ def _proxy_cleanup_metadata(value, *, shop, target=None, identity=False, preview
     for count, ids in (
         ("deleted_identity_count", "deleted_identity_ids"),
         ("deleted_route_count", "deleted_route_ids"),
+        ("eligible_identity_count", "eligible_identity_ids"),
+        ("eligible_route_count", "eligible_route_ids"),
     ):
         if (
             count in result
@@ -684,7 +716,22 @@ def _proxy_cleanup_metadata(value, *, shop, target=None, identity=False, preview
     return result
 
 
+def require_proxy_current(args):
+    """Reject clearing the mandatory issuer before any owner session renewal."""
+    if (
+        getattr(args, "manage_command", None) == "proxy"
+        and getattr(args, "proxy_command", None) == "routes"
+        and getattr(args, "operation", None) == "default"
+        and getattr(args, "clear", False)
+    ):
+        raise ManageError(
+            "A shop must retain a current issuer; --clear is no longer supported",
+            code="invalid_input",
+        )
+
+
 def _proxy_dispatch(client, owner, args):
+    require_proxy_current(args)
     if "shop_id" not in owner:
         raise ManageError("Refresh the pinned owner identity", code="invalid_response")
     shop = args.shop or owner["shop_id"]
@@ -705,12 +752,20 @@ def _proxy_dispatch(client, owner, args):
                 "Issuer response belongs to a different shop", code="invalid_response"
             )
         return business._finish(args, {"ok": True, "result": proxy_metadata(value)})
-    if group == "cleanup":
+    if group in ("cleanup", "cleanup-preview"):
+        preview = group == "cleanup-preview"
         value = client.request(
-            owner, "POST", PROXY_PREFIX + "/cleanup", json={"shop_id": shop}
+            owner,
+            "GET" if preview else "POST",
+            PROXY_PREFIX + "/cleanup",
+            **({"params": query} if preview else {"json": {"shop_id": shop}}),
         )
         return business._finish(
-            args, {"ok": True, "result": _proxy_cleanup_metadata(value, shop=shop)}
+            args,
+            {
+                "ok": True,
+                "result": _proxy_cleanup_metadata(value, shop=shop, preview=preview),
+            },
         )
     if operation in ("cleanup-preview", "delete"):
         if not isinstance(args.id, str) or not re.fullmatch(r"[0-9a-f]{32}", args.id):

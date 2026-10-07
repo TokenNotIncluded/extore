@@ -140,6 +140,68 @@ def test_cleanup_aggregate_returns_only_deleted_identifiers_and_counts(tmp_path)
     ]
 
 
+def test_aggregate_cleanup_preview_is_read_only_and_returns_scoped_counts(tmp_path):
+    client = Client(
+        {
+            "shop_id": SHOP,
+            "eligible_identity_ids": [IDENTITY],
+            "eligible_route_ids": [ROUTE],
+            "eligible_identity_count": 1,
+            "eligible_route_count": 1,
+            "private_key": PRIVATE,
+        }
+    )
+    result = shop_commands.dispatch(client, OWNER, args(tmp_path, "cleanup-preview"))
+    assert result["result"]["eligible_route_count"] == 1
+    assert PRIVATE not in json.dumps(result)
+    assert client.calls == [
+        ("GET", "/api/admin/proxy/cleanup", {"params": {"shop_id": SHOP}})
+    ]
+
+
+@pytest.mark.parametrize(
+    "changes",
+    [
+        {"eligible_identity_count": 2},
+        {"eligible_route_count": True},
+        {"eligible_identity_ids": [IDENTITY, IDENTITY], "eligible_identity_count": 2},
+        {"eligible_route_ids": [{"private_key": PRIVATE}]},
+        {"shop_id": "another-shop"},
+    ],
+)
+def test_aggregate_preview_rejects_inconsistent_counts_and_foreign_scope(
+    tmp_path, changes
+):
+    client = Client(
+        {
+            "shop_id": SHOP,
+            "eligible_identity_ids": [IDENTITY],
+            "eligible_route_ids": [ROUTE],
+            "eligible_identity_count": 1,
+            "eligible_route_count": 1,
+            **changes,
+        }
+    )
+    with pytest.raises(ManageError) as error:
+        shop_commands.dispatch(client, OWNER, args(tmp_path, "cleanup-preview"))
+    assert error.value.code == "invalid_response"
+
+
+def test_clear_mandatory_issuer_is_rejected_before_any_owner_http_request(tmp_path):
+    peer = OwnerMerchant()
+    profile = tmp_path / "private" / "owner.json"
+    authorize(profile, peer)
+    before = len(peer.calls)
+    with pytest.raises(ManageError) as error:
+        owner_client.execute(
+            arguments(
+                profile, "proxy", "routes", "default", ROUTE, "--clear", "--shop", SHOP
+            ),
+            transport=httpx.MockTransport(peer),
+        )
+    assert error.value.code == "invalid_input" and len(peer.calls) == before
+
+
 @pytest.mark.parametrize(
     "argv",
     [
@@ -172,6 +234,7 @@ def test_cleanup_rejects_non_identity_paths_before_any_remote_call(tmp_path, tar
         ("identities", "cleanup-preview", IDENTITY),
         ("routes", "delete", ROUTE, "--yes"),
         ("cleanup", "--yes"),
+        ("cleanup-preview",),
     ],
 )
 def test_new_commands_require_explicit_root_shop_and_reject_foreign_merchant(
@@ -273,6 +336,7 @@ def test_actual_owner_transport_signs_delete_and_aggregate_cleanup(tmp_path):
     assert observed == [
         ("DELETE", "/api/admin/proxy/routes/" + ROUTE + "?shop_id=" + SHOP),
         ("POST", "/api/admin/proxy/cleanup"),
+        ("GET", "/api/admin/proxy/cleanup"),
     ]
 
 

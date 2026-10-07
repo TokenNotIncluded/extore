@@ -949,7 +949,7 @@ _API_ROUTES = (
     ("GET", r"/api/admin/maintenance"),
     ("PUT", r"/api/admin/maintenance/policy"),
     ("POST", r"/api/admin/maintenance/cleanup"),
-    ("GET", r"/api/admin/proxy/(?:identities|routes)"),
+    ("GET", r"/api/admin/proxy/(?:identities|routes|cleanup)"),
     ("POST", r"/api/admin/proxy/(?:identities|routes|cleanup)"),
     ("PUT", r"/api/admin/proxy/routes/[0-9a-f]{32}"),
     ("GET", r"/api/admin/proxy/(?:identities|routes)/[0-9a-f]{32}/cleanup-preview"),
@@ -1186,6 +1186,7 @@ def _api(client, owner, args):
 
 def dispatch(client, args):
     business.require_product_delete_confirmation(args)
+    shop_commands.require_proxy_current(args)
     origin = origin_from_url(args.origin) if getattr(args, "origin", None) else None
     command = args.manage_command
     if command == "login":
