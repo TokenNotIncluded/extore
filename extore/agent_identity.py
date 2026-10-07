@@ -36,11 +36,15 @@ def init_schema(c):
     c.execute(
         "CREATE TABLE IF NOT EXISTS job_worker_identities ("
         "job_id TEXT NOT NULL REFERENCES jobs(id) ON DELETE CASCADE,"
-        "attempt INTEGER NOT NULL,actor TEXT NOT NULL,device_ref TEXT,"
+        "attempt INTEGER NOT NULL,actor TEXT NOT NULL,device_ref TEXT,worker_ref TEXT,"
         "client_name TEXT NOT NULL,agent_type TEXT,channel TEXT NOT NULL "
         "CHECK(channel IN ('cli','browser','automatic')),claimed_at REAL NOT NULL,"
         "PRIMARY KEY(job_id,attempt))"
     )
+    if "worker_ref" not in {
+        r["name"] for r in c.execute("PRAGMA table_info(job_worker_identities)")
+    }:
+        c.execute("ALTER TABLE job_worker_identities ADD COLUMN worker_ref TEXT")
 
 
 def record_claim(c, row, actor, *, session=None, device_id=None):
@@ -50,15 +54,27 @@ def record_claim(c, row, actor, *, session=None, device_id=None):
     device_id = device_id or (session or {}).get("device_id")
     if device_id:
         device = c.execute(
-            "SELECT id,staff_id,client_name,agent_type,revoked FROM cli_devices WHERE id=?",
+            "SELECT id,staff_id,public_key,client_name,agent_type,revoked FROM cli_devices WHERE id=?",
             (device_id,),
         ).fetchone()
         if device is None or device["revoked"] or device["staff_id"] != actor:
             fail("CLI 领取身份已失效", 401)
         name, agent_type = normalize_identity(
-            device["client_name"], device["agent_type"]
+            device["client_name"],
+            device["agent_type"],
+            legacy=device["agent_type"] is None,
         )
         channel, ref = "cli", device["id"]
+        binding = c.execute(
+            "SELECT b.authorization_id FROM pipeline_bindings b JOIN pipeline_authorizations a "
+            "ON a.id=b.authorization_id WHERE b.device_id=? AND b.staff_id=? AND a.public_key=?",
+            (device["id"], actor, device["public_key"]),
+        ).fetchone()
+        worker_ref = (
+            "authorization:" + binding["authorization_id"]
+            if binding
+            else "device:" + device["id"]
+        )
     elif actor == "worker":
         name, agent_type, channel, ref = "商品处理器", "processor", "automatic", None
     elif (session or {}).get("role") == "admin":
@@ -71,13 +87,25 @@ def record_claim(c, row, actor, *, session=None, device_id=None):
             or "处理人员"
         )
         agent_type, channel, ref = "human", "browser", None
+    if not device_id:
+        worker_ref = None
     c.execute(
         "INSERT INTO job_worker_identities(job_id,attempt,actor,device_ref,client_name,"
-        "agent_type,channel,claimed_at) VALUES (?,?,?,?,?,?,?,?) ON CONFLICT(job_id,attempt) "
+        "agent_type,channel,claimed_at,worker_ref) VALUES (?,?,?,?,?,?,?,?,?) ON CONFLICT(job_id,attempt) "
         "DO UPDATE SET actor=excluded.actor,device_ref=excluded.device_ref,"
         "client_name=excluded.client_name,agent_type=excluded.agent_type,"
-        "channel=excluded.channel,claimed_at=excluded.claimed_at",
-        (row["id"], row["attempt"], actor, ref, name, agent_type, channel, time.time()),
+        "channel=excluded.channel,claimed_at=excluded.claimed_at,worker_ref=excluded.worker_ref",
+        (
+            row["id"],
+            row["attempt"],
+            actor,
+            ref,
+            name,
+            agent_type,
+            channel,
+            time.time(),
+            worker_ref,
+        ),
     )
 
 

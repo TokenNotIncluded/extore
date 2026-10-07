@@ -31,7 +31,7 @@ IDENTITY_JOIN = (
     " LEFT JOIN job_worker_identities wi ON wi.job_id=j.id AND wi.attempt=j.attempt "
     "AND wi.actor=j.claimed_by "
 )
-WORKER_KEY = "CASE WHEN wi.channel='cli' AND wi.device_ref IS NOT NULL THEN 'cli:'||wi.device_ref ELSE j.claimed_by END"
+WORKER_KEY = "CASE WHEN wi.channel='cli' AND wi.device_ref IS NOT NULL THEN COALESCE(wi.worker_ref,'cli:'||wi.device_ref) ELSE j.claimed_by END"
 
 
 def _counts():
