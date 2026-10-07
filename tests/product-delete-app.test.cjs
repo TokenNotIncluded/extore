@@ -53,7 +53,7 @@ test("deleted products remain selectable for their unfinished task queues", asyn
   page.navigate("/admin");
   page.set({ role: "admin", tab: "jobs" });
   const rendering = page.context.renderJobs("", "product");
-  assert.equal(page.requests[0].url, "/api/manage/products?view=all");
+  assert.equal(page.requests[0].url, "/api/manage/products?view=history");
   page.requests[0].respond([{ ...product(), deleted: true, deleted_at: 123 }]);
   await flush();
   page.requests[1].respond([{ ...job("task", "queued"), product_id: "product", params: {}, files: [] }]);
@@ -72,7 +72,7 @@ test("card history receives deleted products without replacing the active produc
   let received;
   page.context.window.ExtoreCards = { render(ctx) { received = ctx; } };
   const rendering = page.context.renderCards();
-  assert.equal(page.requests[0].url, "/api/admin/products?view=all");
+  assert.equal(page.requests[0].url, "/api/admin/products?view=history");
   page.requests[0].respond([active, deleted]);
   await rendering;
   assert.equal(received.productId, deleted.id);

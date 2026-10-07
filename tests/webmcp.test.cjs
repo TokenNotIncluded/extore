@@ -11,6 +11,7 @@ const plain = (value) => JSON.parse(JSON.stringify(value));
 const nextTurn = () => new Promise((resolve) => setTimeout(resolve, 0));
 const permissionCodes = [
   "queue.view", "queue.process", "queue.retry", "product.edit", "product.delete", "fulfillment.configure", "cards.manage", "events.manage", "links.delegate",
+  "product.purge",
 ];
 const staffContext = (overrides = {}) => ({
   page: "staff", role: "staff", tab: "jobs", productId: "p1", queueProductId: "p1",
@@ -123,7 +124,7 @@ async function harness(t, options = {}) {
     if (url === "/auth/status") return { role: state.role, product_id: state.productId, permissions: state.permissions, link_expires: state.linkExpires };
     if (["/products", "/admin/products", "/manage/products"].includes(url.split("?")[0])) {
       const view = new URL("https://extore.test" + url).searchParams.get("view") || "active";
-      return products.filter((p) => view === "all" || (view === "deleted" ? p.deleted === true : p.deleted !== true));
+      return products.filter((p) => view === "history" || ((p.purged !== true && p.purged_at == null) && (view === "all" || (view === "deleted" ? p.deleted === true : p.deleted !== true))));
     }
     if (["/admin/processors", "/manage/processors"].includes(url)) return processorCatalog;
     if (url === "/manage/product" && method === "GET") return products.find((p) => p.id === state.productId);
@@ -876,6 +877,95 @@ test("product deletion is independently delegated and does not grant product edi
   assert.equal(deleter.tool("product_delete").annotations.destructiveHint, true);
   assert.equal(deleter.tool("product_restore").annotations.destructiveHint, false);
   assert.equal(deleter.tool("product_delete").annotations.consequentialHint, true);
+});
+
+test("permanent purge has an independent tenth grant and purge-only navigation reads safe summaries", async (t) => {
+  const old = await harness(t, { context: staffContext({ tab: "products", permissions: permissionCodes.filter((p) => p !== "product.purge") }) });
+  assert.equal(old.names().includes("extore_product_purge"), false);
+  assert.equal(old.names().includes("extore_trash_empty"), false);
+  const h = await harness(t, { context: staffContext({ permissions: ["product.purge"] }), products: [product({ deleted: true, shop_id: "shop-a" })] });
+  assert.equal((await h.call("ui_navigate", { page: "staff", tab: "products" })).ok, true);
+  await h.settle();
+  assert.equal(h.tool("product_purge").annotations.destructiveHint, true);
+  assert.equal(h.tool("trash_empty").annotations.consequentialHint, true);
+  assert.equal(h.names().includes("extore_product_update"), false);
+  assert.equal(h.names().includes("extore_product_restore"), false);
+  assert.equal((await h.call("products_admin_list", { view: "deleted" })).ok, true);
+  assert.equal(h.calls.some((call) => call.url === "/manage/product"), false);
+});
+
+test("native trash clearing rejects absent confirmation, implicit IDs, duplicates and oversized snapshots", async (t) => {
+  const h = await harness(t, { context: { page: "admin", role: "admin", tab: "products" } });
+  for (const input of [{ confirm: true }, { product_ids: [], confirm: true }, { product_ids: ["p1"], confirm: false }, { product_ids: ["p1", "p1"], confirm: true }, { product_ids: Array.from({ length: 501 }, (_, index) => "p" + index), confirm: true }, { product_ids: ["p1"], confirm: true, all: true }]) rejected(await h.call("trash_empty", input));
+  rejected(await h.call("product_purge", { product_id: "p1" }));
+  assert.equal(h.calls.length, 0);
+});
+
+test("native purge clears only declared IDs despite later trash arrivals and returns a bounded DTO", async (t) => {
+  const products = [product({ deleted: true, shop_id: "shop-a" }), product({ id: "p2", deleted: true, shop_id: "shop-a" }), product({ id: "later", deleted: true, shop_id: "shop-a" })];
+  const h = await harness(t, { context: { page: "admin", role: "admin", tab: "products" }, actions: { productsPurged: async (ids) => { assert.deepEqual(plain(ids), ["p1", "p2"]); } }, api: async (url, body, method) => {
+    if (url === "/auth/status") return { role: "admin" };
+    if (url === "/admin/products?view=deleted&shop_id=shop-a") return products;
+    assert.equal(url, "/admin/products/empty-trash?shop_id=shop-a");
+    assert.equal(method, "POST");
+    assert.deepEqual(plain(body), { confirmed: true, product_ids: ["p1", "p2"] });
+    return { ok: true, purged_product_ids: ["p2", "p1"], purged_count: 2, preserved_fulfillment: true, token: "DO-NOT-ECHO" };
+  } });
+  const result = await h.call("trash_empty", { product_ids: ["p1", "p2"], shop_id: "shop-a", confirm: true });
+  assert.equal(result.ok, true);
+  assert.deepEqual(plain(result.data), { ok: true, purged_product_ids: ["p2", "p1"], purged_count: 2, preserved_fulfillment: true });
+  assert.equal(JSON.stringify(result).includes("DO-NOT-ECHO"), false);
+  assert.equal(mutations(h).length, 1);
+});
+
+test("native purge refuses mixed shops, missing trash and a changed management session before mutation", async (t) => {
+  const h = await harness(t, { context: { page: "admin", role: "admin", tab: "products" }, products: [product({ deleted: true, shop_id: "shop-a" }), product({ id: "p2", deleted: true, shop_id: "shop-b" })] });
+  rejected(await h.call("trash_empty", { product_ids: ["p1", "p2"], confirm: true }), "forbidden");
+  rejected(await h.call("trash_empty", { product_ids: ["missing"], confirm: true }), "not_found");
+  assert.equal(mutations(h).length, 0);
+  const revoked = await harness(t, { context: staffContext({ tab: "products", permissions: ["product.purge"] }), api: async (url) => {
+    assert.equal(url, "/auth/status");
+    return { role: "staff", product_id: "p1", permissions: ["product.delete"] };
+  } });
+  rejected(await revoked.call("product_purge", { product_id: "p1", confirm: true }), "forbidden");
+  assert.deepEqual(revoked.calls.map((call) => call.url), ["/auth/status"]);
+});
+
+test("staff permanent purge is exactly one scoped product with no editing access", async (t) => {
+  const h = await harness(t, { context: staffContext({ tab: "products", permissions: ["product.purge"] }), actions: { productsPurged: async () => {} }, api: async (url, body, method) => {
+    if (url === "/auth/status") return { role: "staff", product_id: "p1", permissions: ["product.purge"] };
+    if (url === "/manage/products?view=deleted") return [product({ deleted: true, shop_id: "shop-a" })];
+    assert.equal(url, "/manage/product/purge?product_id=p1");
+    assert.equal(method, "POST");
+    assert.deepEqual(plain(body), { confirmed: true });
+    return { ok: true, product_id: "p1", deleted: true, purged: true, purged_at: 123 };
+  } });
+  rejected(await h.call("product_purge", { product_id: "p2", confirm: true }), "forbidden");
+  rejected(await h.call("trash_empty", { product_ids: ["p1", "p2"], confirm: true }), "forbidden");
+  assert.equal((await h.call("product_purge", { product_id: "p1", confirm: true })).ok, true);
+  assert.equal(h.calls.some((call) => call.url === "/manage/product"), false);
+});
+
+test("malformed permanent purge success cannot invalidate a cache or report successful clearing", async (t) => {
+  const h = await harness(t, { context: { page: "admin", role: "admin", tab: "products" }, actions: { productsPurged: async () => assert.fail("Malformed result invalidated cache") }, api: async (url) => {
+    if (url === "/auth/status") return { role: "admin" };
+    if (url === "/admin/products?view=deleted") return [product({ deleted: true, shop_id: "shop-a" })];
+    return { ok: true, purged_product_ids: ["other"], purged_count: 1, preserved_fulfillment: true };
+  } });
+  rejected(await h.call("trash_empty", { product_ids: ["p1"], confirm: true }), "unavailable");
+  assert.equal(h.calls.some((call) => call.name === "productsPurged"), false);
+});
+
+test("purged products remain in fulfillment history queues and hidden from product management lists", async (t) => {
+  const history = product({ purged: true, purged_at: 123, deleted: true });
+  const h = await harness(t, { context: { page: "admin", role: "admin", tab: "jobs", queueProductId: "p1" }, products: [history] });
+  assert.equal((await h.call("queue_products", {})).data.length, 1);
+  assert.equal((await h.call("queue_select", { product_id: "p1" })).ok, true);
+  assert.ok(h.calls.some((call) => call.url === "/manage/products?view=history"));
+  const manager = await harness(t, { context: { page: "admin", role: "admin", tab: "products" }, products: [history] });
+  assert.deepEqual(plain((await manager.call("products_admin_list", { view: "all" })).data), []);
+  rejected(await manager.call("product_restore", { product_id: "p1", confirm: true }), "not_found");
+  assert.equal(mutations(manager).length, 0);
 });
 
 test("product deletion and restoration require exact explicit confirmation before any request", async (t) => {
@@ -2021,7 +2111,7 @@ test("queue selection checks fresh authorized products and updates visible conte
   const result = await h.call("queue_select", { product_id: "p2" });
   assert.equal(result.ok, true);
   assert.equal(h.state.queueProductId, "p2");
-  assert.ok(h.calls.some((c) => c.url === "/manage/products"));
+  assert.ok(h.calls.some((c) => c.url === "/manage/products?view=history"));
   assert.ok(h.calls.some((c) => c.name === "selectQueue" && c.args[0] === "p2"));
   await h.settle();
   rejected(await saved.execute({ product_id: "p1", ids: ["j1"], confirm: true }), "stale_context");
@@ -2146,7 +2236,7 @@ test("queue context changes during fresh product authorization cannot select a s
     context: { page: "admin", role: "admin", tab: "jobs", queueProductId: "p1" },
     api: async (url) => {
       if (url === "/auth/status") return { role: "admin" };
-      if (url === "/manage/products") { started(); return waiting; }
+      if (url === "/manage/products?view=history") { started(); return waiting; }
       assert.fail("Unexpected API: " + url);
     },
   });

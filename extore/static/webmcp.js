@@ -24,6 +24,7 @@
     "cards.manage",
     "events.manage",
     "links.delegate",
+    "product.purge",
   ];
   const fulfillmentFields = [
     "mode",
@@ -234,14 +235,17 @@
       c.tab || "",
       c.productsView || "active",
       c.productDeleted === true,
+      c.productPurged === true,
       c.queueProductId || "",
       c.queueProduct?.mode || "",
       c.queueProduct?.delivery || "",
       c.queueProduct?.outputs || [],
       c.queueProduct?.deleted === true,
+      c.queueProduct?.purged === true,
       c.product?.id || "",
       c.product?.parameters || [],
       c.product?.deleted === true,
+      c.product?.purged === true,
       Boolean(c.batch),
       c.cardId || "",
       c.currentToken || "",
@@ -1286,7 +1290,7 @@
           const granted = context().permissions || [];
           const permitted =
             input.tab === "products"
-              ? ["product.edit", "product.delete"].some((p) => granted.includes(p))
+              ? ["product.edit", "product.delete", "product.purge"].some((p) => granted.includes(p))
               : input.tab === "jobs"
               ? ["queue.view", "queue.process", "queue.retry"].some((p) =>
                   granted.includes(p),
@@ -1670,11 +1674,13 @@
       const rows = await managementProducts(signal, view);
       checkInvocation(signal);
       if (!Array.isArray(rows)) throw new ToolError("unavailable", "Product metadata is unavailable. Refresh this management page.");
-      const found = rows.find((p) => p?.id === input.product_id);
+      const found = rows.find((p) => p?.id === input.product_id && p.purged !== true && p.purged_at == null);
       if (!found) throw new ToolError("not_found", "Product not found in this management scope.");
       return found;
     };
     const assertActiveProduct = (found) => {
+      if (found.purged === true || found.purged_at != null)
+        throw new ToolError("product_purged", "This permanently removed product cannot be restored, edited or used for new codes or links. Existing fulfillment remains available.");
       if (found.deleted === true || found.deleted_at != null)
         throw new ToolError("product_deleted", "Restore this deleted product before editing, issuing cards, creating links or exporting a new listing.");
       return found;
@@ -1688,9 +1694,10 @@
       if (!found) throw new ToolError("not_found", "Product not found in this management scope.");
       return assertActiveProduct(found);
     };
-    const scopedProductDeleted = scoped && (c.productDeleted === true ||
+    const scopedProductDeleted = scoped && (c.productDeleted === true || c.productPurged === true ||
       (c.product?.id === c.productId && c.product.deleted === true) ||
-      (c.queueProduct?.id === c.productId && c.queueProduct.deleted === true));
+      (c.product?.id === c.productId && (c.product.purged === true || c.product.purged_at != null)) ||
+      (c.queueProduct?.id === c.productId && (c.queueProduct.deleted === true || c.queueProduct.purged === true || c.queueProduct.purged_at != null)));
     if (manager) {
       add(
         "session_logout",
@@ -1756,8 +1763,8 @@
         }, { ...readonly, ...authority() },
       );
     }
-    if ((can("product.edit") || can("product.delete")) && (c.tab || "products") === "products") {
-      const readAuthority = authority(can("product.edit") ? "product.edit" : "product.delete");
+    if ((can("product.edit") || can("product.delete") || can("product.purge")) && (c.tab || "products") === "products") {
+      const readAuthority = authority(can("product.edit") ? "product.edit" : can("product.delete") ? "product.delete" : "product.purge");
       add(
         "products_admin_list", "管理商品列表",
         "List only products authorized for this session, including hidden products. view defaults to active; deleted shows recoverable deleted products and all includes both. Product links see only their own product. Deletion metadata is included; integration secrets are omitted.",
@@ -1767,7 +1774,7 @@
           checkInvocation(signal);
           if (!Array.isArray(rows)) throw new ToolError("unavailable", "Product metadata is unavailable. Refresh this management page.");
           const view = input.view || "active";
-          return rows.filter((p) => p && (!scoped || p.id === c.productId) &&
+          return rows.filter((p) => p && p.purged !== true && p.purged_at == null && (!scoped || p.id === c.productId) &&
             (view === "all" || (view === "deleted"
               ? p.deleted === true || p.deleted_at != null
               : p.deleted !== true && p.deleted_at == null)));
@@ -1795,6 +1802,34 @@
           await updateUI();
           return project(data, ["ok", "product_id", "deleted", "deleted_at"]);
         }, { ...write, ...authority("product.delete"), destructive: !restore },
+      );
+      if (can("product.purge")) for (const bulk of [false, true]) add(
+        bulk ? "trash_empty" : "product_purge",
+        bulk ? "清空商品回收站" : "彻底删除商品",
+        "Permanently remove only explicitly named products that are currently in this shop's recycle bin. This cannot be undone or restored. Existing card redemptions, tasks, receipt links and deliveries are preserved. Requires the independent product.purge permission and explicit confirm:true. Bulk IDs are a fixed reviewed snapshot, up to 500 unique products from one shop; never add later trash arrivals or split a mixed-shop request into batches.",
+        object(bulk ? { product_ids: { type: "array", items: id, minItems: 1, maxItems: 500, uniqueItems: true }, ...(admin ? { shop_id: id } : {}), confirm: confirmed } : { product_id: id, confirm: confirmed }, bulk ? ["product_ids", "confirm"] : ["product_id", "confirm"]),
+        async (input, signal) => {
+          const ids = bulk ? [...input.product_ids] : [input.product_id];
+          ids.forEach((product_id) => assertProduct({ product_id }));
+          if (scoped && ids.length !== 1) throw new ToolError("forbidden", "This product link can clear only its own product.");
+          if (input.shop_id && c.shopId && input.shop_id !== c.shopId) throw new ToolError("forbidden", "The requested shop is outside this management session.");
+          const rows = await request(query(admin ? "/admin/products" : "/manage/products", { view: "deleted", ...(input.shop_id ? { shop_id: input.shop_id } : {}) }, ["view", "shop_id"]), undefined, "GET", signal);
+          checkInvocation(signal);
+          if (!Array.isArray(rows)) throw new ToolError("unavailable", "Recycle-bin metadata is unavailable. Refresh the list.");
+          const selected = ids.map((product_id) => rows.find((p) => p?.id === product_id && (!scoped || p.id === c.productId) && p.purged !== true && p.purged_at == null && (p.deleted === true || p.deleted_at != null)));
+          if (selected.some((product) => !product)) throw new ToolError("not_found", "A named product is no longer in this authorized recycle bin. Review the list again.");
+          const shops = new Set(selected.map((p) => p.shop_id || c.shopId || ""));
+          if (shops.size !== 1 || (input.shop_id && [...shops][0] !== input.shop_id)) throw new ToolError("forbidden", "Clear products from only one explicitly reviewed shop at a time.");
+          const endpoint = admin ? bulk ? "/admin/products/empty-trash" : "/admin/products/" + ids[0] + "/purge" : bulk ? "/manage/products/empty-trash" : "/manage/product/purge";
+          const data = await request(query(endpoint, { ...(!admin ? { product_id: ids[0] } : {}), ...(bulk && admin && input.shop_id ? { shop_id: input.shop_id } : {}) }, ["product_id", "shop_id"]), { confirmed: true, ...(bulk ? { product_ids: ids } : {}) }, "POST", signal);
+          const valid = bulk
+            ? data?.ok === true && data.preserved_fulfillment === true && data.purged_count === ids.length && Array.isArray(data.purged_product_ids) && data.purged_product_ids.length === ids.length && new Set(data.purged_product_ids).size === ids.length && data.purged_product_ids.every((id) => ids.includes(id))
+            : data?.ok === true && data.product_id === ids[0] && data.deleted === true && data.purged === true && Number.isFinite(data.purged_at) && data.purged_at > 0;
+          if (!valid) throw new ToolError("unavailable", "Could not confirm permanent removal. Review the recycle bin before another action.");
+          if (typeof adapter.actions?.productsPurged === "function") await action("productsPurged", [ids], signal);
+          await updateUI();
+          return project(data, bulk ? ["ok", "purged_product_ids", "purged_count", "preserved_fulfillment"] : ["ok", "product_id", "deleted", "purged", "purged_at"]);
+        }, { ...write, ...authority("product.purge"), destructive: true },
       );
     }
     if (can("product.edit") && (c.tab || "products") === "products") {
@@ -2311,7 +2346,7 @@
           "可处理的商品队列",
           "List authorized product queues. Each product has a separate queue; staff sees only their assigned product.",
           object(),
-          (_, signal) => request("/manage/products", undefined, "GET", signal),
+          (_, signal) => request("/manage/products?view=history", undefined, "GET", signal),
           { ...readonly, ...manage },
         );
         add(
@@ -2321,7 +2356,7 @@
           object({ product_id: id }, ["product_id"]),
           async (input, signal) => {
             const products = await request(
-              "/manage/products",
+              "/manage/products?view=history",
               undefined,
               "GET",
               signal,

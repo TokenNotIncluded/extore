@@ -44,7 +44,7 @@
   const variantLabel = (variant) =>
     `${variant.name}${variant.price != null ? ` · ${variantPrice(variant)}` : ""}${variant.enabled === false ? tr(" · 已停用", " · Disabled") : ""}`;
   const productDeleted = (product) =>
-    product?.deleted === true || product?.deleted_at != null;
+    product?.deleted === true || product?.deleted_at != null || product?.purged === true || product?.purged_at != null;
   const status = (value) => {
     const style = value.startsWith("failed") || value === "rejected"
       ? "failed"

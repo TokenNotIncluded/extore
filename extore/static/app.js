@@ -34,6 +34,7 @@ let lang = preferences.resolved.language,
   products = [],
   productsView = "active",
   managedProductDeleted = false,
+  managedProductPurged = false,
   cardProductId = "",
   queueProductId = "",
   queueView = "active",
@@ -1259,8 +1260,10 @@ const permissionLabels = {
   "events.manage": "查看事件与重新投递",
   "links.delegate": "创建与撤销下级管理链接",
   "product.delete": "删除与恢复商品（保留旧卡密和任务）",
+  "product.purge": "彻底删除商品与清空回收站（不可恢复商品）",
 };
 function acceptAuth(auth) {
+  const sameProductSession = role === auth.role && managedProductId === (auth.product_id || null) && authStatus.session_id && authStatus.session_id === auth.session_id;
   authStatus = auth;
   role = auth.role;
   permissions = auth.permissions || [];
@@ -1271,7 +1274,7 @@ function acceptAuth(auth) {
   managementMaxCLIUses = auth.max_cli_uses ?? 1;
   managementRemainingCLIUses = auth.remaining_cli_uses ?? Math.max(0, managementMaxCLIUses - (auth.cli_uses || 0));
   managementLinkId = auth.link_id || auth.staff_id || null;
-  managedProductDeleted = false;
+  if (!sameProductSession) { managedProductDeleted = false; managedProductPurged = false; }
   if (location.pathname === "/admin" && role === "admin" && $("#management-identity")) $("#management-identity").textContent = managementIdentity();
 }
 function managementIdentity() {
@@ -1290,7 +1293,7 @@ function managementTabs() {
     ["cards", "卡密", "cards.manage"],
     ["staff", "管理链接", "links.delegate"],
     ["events", "事件记录", "events.manage"],
-  ].filter(([key, , permission]) => permitted(permission) || (key === "products" && permitted("product.delete")));
+  ].filter(([key, , permission]) => permitted(permission) || (key === "products" && (permitted("product.delete") || permitted("product.purge"))));
   items.push(["sessions", "会话与审计"]);
   if (role === "admin") {
     items.push(["security", "账户安全"], ["profiles", "商品处理器配置"], ["proxy", "兑换路由"]);
@@ -1328,7 +1331,7 @@ async function renderTab() {
       if (permitted("product.edit")) products = [await api("/manage/product")];
       else products = await api("/manage/products?view=" + productsView);
       const product = products.find((item) => item.id === managedProductId);
-      if (product) managedProductDeleted = product.deleted === true || Boolean(product.deleted_at);
+      if (product) { managedProductPurged = product.purged === true || product.purged_at != null; managedProductDeleted = managedProductPurged || product.deleted === true || product.deleted_at != null; }
     }
     await renderProducts();
   }
@@ -1415,6 +1418,8 @@ function productUIContext(visibleProducts = products) {
     canConfigure: permitted("fulfillment.configure"),
     canEdit: permitted("product.edit"),
     canDelete: permitted("product.delete"),
+    canPurge: permitted("product.purge"),
+    productId: role === "staff" ? managedProductId : null,
     shopId: authStatus.shop_id,
     superadmin: window.ExtoreAccount?.rootScope(authStatus) === true,
     canManageCards: permitted("cards.manage"),
@@ -1425,17 +1430,19 @@ function productUIContext(visibleProducts = products) {
       tab === "products",
     onSaved: (updated) => {
       if (loadId === queueLoadId && authStatus.shop_id === scope && authStatus.session_id === sessionId && location.pathname === pathname && tab === "products") {
-        if (selectedProductsView === "active") products = updated.filter((product) => product.deleted !== true && !product.deleted_at);
+        if (selectedProductsView === "active") products = updated.filter((product) => product.deleted !== true && product.deleted_at == null && product.purged !== true && product.purged_at == null);
         else {
           const cached = new Map(products.map((product) => [product.id, product]));
           for (const product of updated) {
-            if (product.deleted === true || product.deleted_at) cached.delete(product.id);
+            if (product.deleted === true || product.deleted_at != null || product.purged === true || product.purged_at != null) cached.delete(product.id);
             else cached.set(product.id, product);
           }
           products = [...cached.values()];
         }
         const managed = updated.find((product) => product.id === managedProductId);
-        if (managed) managedProductDeleted = managed.deleted === true || Boolean(managed.deleted_at);
+        if (managed) { managedProductPurged = managed.purged === true || managed.purged_at != null; managedProductDeleted = managedProductPurged || managed.deleted === true || managed.deleted_at != null; }
+        const queued = updated.find((product) => product.id === queueProduct?.id);
+        if (queued?.purged === true || queued?.purged_at != null) queueProduct = { ...queueProduct, deleted: true, purged: true, purged_at: queued.purged_at };
       }
     },
     onViewChange: (view, fallbackProducts = visibleProducts) => renderProducts(view, true, { view: selectedProductsView, products: fallbackProducts }),
@@ -1463,7 +1470,7 @@ async function renderProducts(requestedView = productsView, refresh = false, fal
     if (loadId !== queueLoadId || pathname !== location.pathname || tab !== "products" || authority !== managementAuthority() || authStatus.session_id !== options.expectedSessionId) return;
     if (view === "active") products = visibleProducts;
     const managed = visibleProducts.find((product) => product.id === managedProductId);
-    if (managed) managedProductDeleted = managed.deleted === true || Boolean(managed.deleted_at);
+    if (managed) { managedProductPurged = managed.purged === true || managed.purged_at != null; managedProductDeleted = managedProductPurged || managed.deleted === true || managed.deleted_at != null; }
   }
   return window.ExtoreProducts.render(productUIContext(visibleProducts));
 }
@@ -1506,7 +1513,7 @@ async function renderJobs(filter = "", requestedProductId = queueProductId, requ
   if ($("#batch-form")) $("#batch-form").innerHTML = "";
   const active = () =>
     loadId === queueLoadId && managementAuthority() === authority && authStatus.session_id === requestOptions.expectedSessionId && location.pathname === pathname && tab === "jobs";
-  const available = await api("/manage/products?view=all", undefined, "GET", requestOptions);
+  const available = await api("/manage/products?view=history", undefined, "GET", requestOptions);
   if (!active()) return;
   if (!available.length) {
     queueProductId = "";
@@ -1521,6 +1528,10 @@ async function renderJobs(filter = "", requestedProductId = queueProductId, requ
   const productId = selectedProduct.id;
   queueProductId = productId;
   queueProduct = selectedProduct;
+  if (role === "staff" && productId === managedProductId) {
+    managedProductPurged = selectedProduct.purged === true || selectedProduct.purged_at != null;
+    managedProductDeleted = managedProductPurged || selectedProduct.deleted === true || selectedProduct.deleted_at != null;
+  }
   const query = new URLSearchParams({ product_id: productId, view });
   if (filter) query.set("state", filter);
   const rows = await api("/manage/jobs?" + query, undefined, "GET", requestOptions);
@@ -1763,7 +1774,7 @@ async function renderJobs(filter = "", requestedProductId = queueProductId, requ
 async function renderCards() {
   const loadId = queueLoadId;
   const pathname = location.pathname;
-  const available = await api((role === "staff" ? "/manage" : "/admin") + "/products?view=all");
+  const available = await api((role === "staff" ? "/manage" : "/admin") + "/products?view=history");
   if (
     loadId !== queueLoadId ||
     pathname !== location.pathname ||
@@ -2163,10 +2174,18 @@ window.ExtoreWebMCP?.configure({
     permissions,
     productsView,
     productDeleted: managedProductDeleted,
+    productPurged: managedProductPurged,
     productId: managedProductId,
     linkExpires: managementExpires,
   }),
   actions: {
+    productsPurged: async (ids, options = {}) => {
+      if (options.signal?.aborted || !permitted("product.purge") || !["/admin", "/staff"].includes(location.pathname) || !Array.isArray(ids) || !ids.length || ids.length > 500 || new Set(ids).size !== ids.length || (role === "staff" && (ids.length !== 1 || ids[0] !== managedProductId))) throw new Error("商品清理操作上下文已失效。");
+      products = products.filter((product) => !ids.includes(product.id));
+      if (ids.includes(managedProductId)) { managedProductPurged = true; managedProductDeleted = true; }
+      if (ids.includes(queueProduct?.id)) queueProduct = { ...queueProduct, deleted: true, purged: true };
+      return { ok: true };
+    },
     selectReceiptCard: async (cardId, options = {}) => {
       const context = receiptRequestContext(options);
       const data = await readReceipt(options);
@@ -2189,7 +2208,7 @@ window.ExtoreWebMCP?.configure({
     navigate,
     selectQueue: async (productId, options = {}) => {
       const available = await api(
-        "/manage/products?view=all",
+        "/manage/products?view=history",
         undefined,
         "GET",
         options,

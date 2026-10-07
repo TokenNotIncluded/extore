@@ -1145,8 +1145,29 @@ th {
   margin-top: 12px;
 }
 .product-lifecycle-confirmation button,
-.product-lifecycle-toolbar select {
+.product-lifecycle-toolbar select,
+.product-lifecycle-toolbar button {
   min-height: 44px;
+}
+.product-purge-snapshot {
+  max-height: 240px;
+  overflow: auto;
+  overflow-wrap: anywhere;
+  padding-left: 22px;
+  margin-top: 16px;
+}
+.product-lifecycle-toolbar .field {
+  flex: 1 1 200px;
+  min-width: 0;
+  max-width: 100%;
+}
+.product-lifecycle-toolbar select {
+  width: 100%;
+  max-width: 100%;
+}
+.product-lifecycle-confirmation .actions button {
+  max-width: 100%;
+  white-space: normal;
 }
 .variant-summary {
   display: flex;

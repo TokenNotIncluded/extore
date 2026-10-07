@@ -216,6 +216,16 @@ test("历史商品保留在选择器中，默认优先选择未删除商品", as
   assert.equal(page.nodes.get("#cards-product-notice").textContent, "");
 });
 
+test("purged 商品仍可查看旧卡密，但不能发行或补充库存", async () => {
+  const page = fixture();
+  await page.module.render({ ...page.options, products: [{ id: "product-a", name: "历史商品", purged: true, purged_at: 123 }] });
+  assert.equal(page.nodes.get("#cards-issue-submit").disabled, true);
+  page.nodes.get("#cards-issue").fire("submit");
+  await settle();
+  assert.equal(page.requests.filter((request) => request.method === "POST").length, 0);
+  assert.ok(page.requests.some((request) => request.url.includes("card-inventory")));
+});
+
 test("显式选择已删除商品仍可查卡密和历史，禁止发行并阻止手动提交", async () => {
   const page = fixture(({ url }) => Promise.resolve(
     url.includes("card-stats") ? { summary: { total: 1 } }

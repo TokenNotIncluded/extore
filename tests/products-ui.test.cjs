@@ -165,6 +165,8 @@ function page(options = {}) {
     canConfigure: options.canConfigure ?? true,
     canEdit: options.canEdit ?? true,
     canDelete: options.canDelete ?? false,
+    canPurge: options.canPurge ?? false,
+    productId: options.productId || null,
     canManageCards: options.canManageCards ?? false,
     lang: "zh-CN",
     isCurrent: () => active,
@@ -235,6 +237,121 @@ async function editProduct(p, value = product(), processors = catalog) {
   p.requests[0].resolve(processors);
   await editing;
 }
+
+test("trash purge is independently delegated and an empty recycle bin cannot be cleared", async () => {
+  const p = page({ role: "staff", canEdit: false, canDelete: true, products: [product({ deleted: true })] });
+  p.ctx.productView = "deleted";
+  await p.ui.render(p.ctx);
+  assert.equal(p.node("#empty-product-trash"), null);
+  assert.equal(p.node('[data-purge="product-one"]'), null);
+  const empty = page({ role: "staff", canEdit: false, canPurge: true });
+  empty.ctx.productView = "deleted";
+  await empty.ui.render(empty.ctx);
+  assert.equal(empty.node("#empty-product-trash").disabled, true);
+  await empty.node("#empty-product-trash").emit("click");
+  assert.equal(empty.requests.length, 0);
+});
+
+test("trash clear confirms an immutable visible snapshot and cancellation performs no write", async () => {
+  const p = page({ products: [product({ deleted: true, shop_id: "shop-a" }), product({ id: "second", name: "Second", deleted: true, shop_id: "shop-a" })] });
+  p.ctx.productView = "deleted";
+  await p.ui.render(p.ctx);
+  await p.node("#empty-product-trash").emit("click");
+  assert.match(p.node("#product-lifecycle-confirmation").innerHTML, /彻底删除 2 个商品/);
+  assert.match(p.node("#product-lifecycle-confirmation").innerHTML, /商品不能恢复.*旧卡密仍可兑换/);
+  assert.equal(p.requests.length, 0);
+  const oldConfirm = p.node("#confirm-product-purge");
+  await p.node("#cancel-product-purge").emit("click");
+  await oldConfirm.emit("click");
+  assert.equal(p.requests.length, 0);
+  await p.node("#empty-product-trash").emit("click");
+  p.ctx.products.push(product({ id: "late", name: "LATE ARRIVAL", deleted: true, shop_id: "shop-a" }));
+  await p.node("#confirm-product-purge").emit("click");
+  assert.equal(p.requests[0].url, "/admin/products/empty-trash?shop_id=shop-a");
+  assert.deepEqual(JSON.parse(JSON.stringify(p.requests[0].body)), { confirmed: true, product_ids: ["product-one", "second"] });
+  p.requests[0].resolve({ ok: true, purged_product_ids: ["second", "product-one"], purged_count: 2, preserved_fulfillment: true });
+  await flush();
+  p.requests[1].resolve([product({ id: "late", name: "LATE ARRIVAL", deleted: true, shop_id: "shop-a" })]);
+  await flush();
+  assert.equal(p.saved[0].find((product) => product.id === "product-one").purged, true);
+  assert.ok(p.node('[data-purge="late"]'));
+  assert.equal(p.node('[data-purge="product-one"]'), null);
+});
+
+test("root trash clearing requires one selected shop and never mixes its product IDs", async () => {
+  const p = page({ products: [product({ deleted: true, shop_id: "shop-a", shop_name: "Shop A" }), product({ id: "second", name: "Shop B product", deleted: true, shop_id: "shop-b", shop_name: "Shop B" })] });
+  p.ctx.productView = "deleted";
+  await p.ui.render(p.ctx);
+  assert.equal(p.node("#empty-product-trash").disabled, true);
+  p.node("#trash-shop").value = "shop-a";
+  await p.node("#trash-shop").emit("change");
+  assert.equal(p.node("#empty-product-trash").disabled, false);
+  await p.node("#empty-product-trash").emit("click");
+  assert.match(p.node("#product-lifecycle-confirmation").innerHTML, /彻底删除 1 个商品/);
+  assert.doesNotMatch(p.node("#product-lifecycle-confirmation").innerHTML, /Shop B product/);
+  await p.node("#confirm-product-purge").emit("click");
+  assert.deepEqual(JSON.parse(JSON.stringify(p.requests[0].body.product_ids)), ["product-one"]);
+  assert.match(p.requests[0].url, /shop_id=shop-a/);
+  p.requests[0].reject(new Error("Network unavailable"));
+  await flush();
+});
+
+test("permanent purge failure preserves trash and re-enables explicit confirmation", async () => {
+  const p = page({ role: "staff", canEdit: false, canPurge: true, productId: "product-one", products: [product({ deleted: true })] });
+  p.ctx.productView = "deleted";
+  await p.ui.render(p.ctx);
+  await p.node('[data-purge="product-one"]').emit("click");
+  await p.node("#confirm-product-purge").emit("click");
+  assert.equal(p.requests[0].url, "/manage/product/purge?product_id=product-one");
+  assert.deepEqual(JSON.parse(JSON.stringify(p.requests[0].body)), { confirmed: true });
+  assert.equal(p.node("#confirm-product-purge").disabled, true);
+  p.requests[0].reject(new Error("Permission revoked"));
+  await flush();
+  assert.equal(p.node("#confirm-product-purge").disabled, false);
+  assert.equal(p.node("#cancel-product-purge").disabled, false);
+  assert.match(p.node("#error").textContent, /Permission revoked/);
+  assert.equal(p.saved.length, 0);
+  assert.ok(p.node('[data-purge="product-one"]'));
+});
+
+test("late permanent purge results and malformed success DTOs cannot replace another view", async () => {
+  const p = page({ role: "staff", canEdit: false, canPurge: true, products: [product({ deleted: true })] });
+  p.ctx.productView = "deleted";
+  await p.ui.render(p.ctx);
+  await p.node("#empty-product-trash").emit("click");
+  await p.node("#confirm-product-purge").emit("click");
+  p.requests[0].resolve({ ok: true, purged_product_ids: ["other"], purged_count: 1, preserved_fulfillment: true });
+  await flush();
+  assert.match(p.node("#error").textContent, /未能确认清理结果/);
+  assert.equal(p.saved.length, 0);
+  await p.node("#confirm-product-purge").emit("click");
+  p.leave();
+  p.workspace.innerHTML = "another view";
+  p.requests[1].resolve({ ok: true, purged_product_ids: ["product-one"], purged_count: 1, preserved_fulfillment: true });
+  await flush();
+  assert.equal(p.workspace.innerHTML, "another view");
+  assert.equal(p.requests.length, 2);
+  assert.equal(p.saved.length, 0);
+});
+
+test("oversized trash snapshots never silently truncate or send a partial purge", async () => {
+  const p = page({ role: "staff", canEdit: false, canPurge: true, products: Array.from({ length: 501 }, (_, index) => product({ id: "item-" + index, deleted: true, shop_id: "shop-a" })) });
+  p.ctx.productView = "deleted";
+  await p.ui.render(p.ctx);
+  assert.equal(p.node("#empty-product-trash").disabled, true);
+  await p.node("#empty-product-trash").emit("click");
+  assert.equal(p.requests.length, 0);
+  assert.match(p.workspace.innerHTML, /500/);
+});
+
+test("purged products disappear even from all-products DTOs and cannot be restored or configured", async () => {
+  const p = page({ role: "staff", canEdit: true, canDelete: true, canPurge: true, products: [product({ purged: true, purged_at: 123 })] });
+  p.ctx.productView = "all";
+  await p.ui.render(p.ctx);
+  for (const name of ["edit", "export", "delete", "restore", "purge"]) assert.equal(p.node(`[data-${name}="product-one"]`), null);
+  await p.ui.edit(p.ctx, product({ purged: true, purged_at: 123 }));
+  assert.equal(p.requests.length, 0);
+});
 
 test("deleting a product requires the inline confirmation and cancel sends no mutation", async () => {
   const p = page({ role: "staff", canDelete: true, products: [product()] });

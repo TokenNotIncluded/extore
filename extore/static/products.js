@@ -59,7 +59,8 @@
     Array.isArray(product.variants) && product.variants.length
       ? product.variants
       : [defaultVariant()];
-  const isDeleted = (product) => product?.deleted === true || Boolean(product?.deleted_at);
+  const isPurged = (product) => product?.purged === true || product?.purged_at != null;
+  const isDeleted = (product) => isPurged(product) || product?.deleted === true || product?.deleted_at != null;
   let generatedId = 0;
   const newItemId = (prefix) => {
     const random = globalThis.crypto?.randomUUID
@@ -152,7 +153,7 @@
         return;
       }
       if (!current()) return;
-      if (!saved || saved.id !== productId)
+      if (!saved || saved.id !== productId || isDeleted(saved))
         throw new Error("这个商品已不存在，无法复制资料");
       const options = {
         lang: ctx.lang,
@@ -176,16 +177,24 @@
     const owner = ctx.role === "admin";
     const tr = (zh, en) => ctx.lang === "en" ? en : zh;
     const productView = ["active", "deleted", "all"].includes(ctx.productView) ? ctx.productView : "active";
-    const products = (ctx.products || []).filter((product) => productView === "all" || isDeleted(product) === (productView === "deleted"));
+    const products = (ctx.products || []).filter((product) => !isPurged(product) && (productView === "all" || isDeleted(product) === (productView === "deleted")));
     const activeProducts = products.filter((product) => !isDeleted(product));
     const canDelete = owner || ctx.canDelete === true;
+    const canPurge = owner || ctx.canPurge === true;
     const canEdit = owner || ctx.canEdit !== false;
     const canCreate = owner && productView !== "deleted";
+    const trashProducts = products.filter(isDeleted);
+    const shopIdOf = (product) => product.shop_id || ctx.shopId || "";
+    const trashShops = [...new Set(trashProducts.map(shopIdOf))];
+    const chooseTrashShop = trashShops.length > 1;
+    let selectedTrashShop = chooseTrashShop ? "" : trashShops[0] || "";
+    const selectedTrash = () => trashProducts.filter((product) => !chooseTrashShop || shopIdOf(product) === selectedTrashShop);
+    const clearDisabled = () => (chooseTrashShop && !selectedTrashShop) || !selectedTrash().length || selectedTrash().length > 500;
     ctx.workspace.innerHTML = `<div class="section-head"><h2>${tr("商品", "Products")}</h2>${canCreate ? `<button id="new-product">${tr("新建商品", "New product")}</button>` : ""}</div>
-      <div class="toolbar product-lifecycle-toolbar">${select("products-view", tr("商品视图", "Product view"), [["active", tr("在售商品", "Active products")], ["deleted", tr("回收站", "Recycle bin")], ["all", tr("全部商品", "All products")]], productView)}</div><div id="product-lifecycle-confirmation" aria-live="polite"></div>
+      <div class="toolbar product-lifecycle-toolbar">${select("products-view", tr("商品视图", "Product view"), [["active", tr("在售商品", "Active products")], ["deleted", tr("回收站", "Recycle bin")], ["all", tr("全部商品", "All products")]], productView)}${productView === "deleted" && canPurge ? `${chooseTrashShop ? select("trash-shop", tr("清空范围：店铺", "Clear scope: shop"), [["", tr("先选择一个店铺", "Choose one shop first")], ...trashShops.map((id) => [id, trashProducts.find((product) => shopIdOf(product) === id)?.shop_name || id || tr("当前店铺", "Current shop")])], selectedTrashShop) : ""}<button type="button" id="empty-product-trash" class="danger" ${clearDisabled() ? "disabled" : ""}>${tr("清空回收站", "Empty recycle bin")}</button>` : ""}</div>${productView === "deleted" && trashProducts.length > 500 ? `<p class="caption">${tr("单次最多清理同一店铺的 500 个商品；超过时请逐个彻底删除。", "Remove up to 500 products from one shop per confirmation. Larger shop selections must be removed individually.")}</p>` : ""}<div id="product-lifecycle-confirmation" aria-live="polite"></div>
       ${canCreate ? `<div class="form-divider"><div class="grid">${select("quick-template", "快速新建模板", [["random", "随机选择模板"]], "random")}<div class="field"><label for="quick-product">生成私有草稿与 AI 配置链接</label><button id="quick-product" class="secondary" disabled>随机快速新建</button></div></div><p class="caption">先创建一个私有商品，再把仅能配置这个商品的链接交给 AI 完善。配置链接有效期为 7 天。复制已有商品后，需重新填写私密发货配置。</p></div>` : ""}
       ${createdLink ? `<div class="parameter" id="quick-created"><h3>商品已创建 · ${escape(createdLink.productName)}</h3><p class="caption">这个链接只允许编辑当前商品与发货配置。请复制保存；离开后完整链接不再显示。</p>${field("quick-management-link", "AI 商品配置链接", createdLink.url, "text", "readonly")}<div class="toolbar"><button id="copy-quick-link" class="secondary">${ctx.lang === "en" ? "Copy link" : "复制链接"}</button><button id="edit-quick-product" class="secondary">继续配置商品</button></div></div>` : ""}
-      ${products.length ? `<div class="product-list">${products.map((product) => `<article class="product-row">${product.logo ? `<img src="${escape(product.logo)}" alt="" loading="lazy" referrerpolicy="no-referrer">` : `<div class="product-icon">${icon}</div>`}<div class="product-info"><h3>${escape(product.name)}</h3><p>${isDeleted(product) ? tr("已删除 · 旧卡密与任务仍有效", "Deleted · existing codes and tasks remain valid") : `${product.public ? "公开展示" : "仅持卡可见"} · ${escape({ manual: "队列", stock: "一卡一文本", webhook: "外部 Webhook", script: "商品处理器" }[product.mode] || product.mode)} · ${product.delivery === "service" ? "服务状态" : "内容交付"}`}</p><div class="variant-summary">${productVariants(product).map((variant) => `<span>${escape(variant.name)} · ${escape(priceLabel(variant))}${variant.enabled === false ? " · 已停用" : ""}</span>`).join("")}</div><div class="mono muted">${escape(product.id)}</div></div><div class="product-actions">${isDeleted(product) ? (canDelete ? `<button type="button" class="secondary" data-restore="${escape(product.id)}">${tr("恢复商品", "Restore product")}</button>` : "") : `${canEdit ? `<button class="secondary" data-edit="${escape(product.id)}">${tr("配置", "Configure")}</button><button type="button" class="secondary" data-export="${escape(product.id)}">${tr("复制商品资料", "Copy product info")}</button>` : ""}${canDelete ? `<button type="button" class="danger" data-delete="${escape(product.id)}">${tr("删除商品", "Delete product")}</button>` : ""}`}</div></article>`).join("")}</div>` : `<div class="empty">${productView === "deleted" ? tr("回收站暂无商品。", "The recycle bin is empty.") : tr("暂无商品。", "No products here.")}</div>`}
+      ${products.length ? `<div class="product-list">${products.map((product) => `<article class="product-row">${product.logo ? `<img src="${escape(product.logo)}" alt="" loading="lazy" referrerpolicy="no-referrer">` : `<div class="product-icon">${icon}</div>`}<div class="product-info"><h3>${escape(product.name)}</h3><p>${isDeleted(product) ? tr("已删除 · 旧卡密与任务仍有效", "Deleted · existing codes and tasks remain valid") : `${product.public ? "公开展示" : "仅持卡可见"} · ${escape({ manual: "队列", stock: "一卡一文本", webhook: "外部 Webhook", script: "商品处理器" }[product.mode] || product.mode)} · ${product.delivery === "service" ? "服务状态" : "内容交付"}`}</p><div class="variant-summary">${productVariants(product).map((variant) => `<span>${escape(variant.name)} · ${escape(priceLabel(variant))}${variant.enabled === false ? " · 已停用" : ""}</span>`).join("")}</div><div class="mono muted">${escape(product.id)}</div></div><div class="product-actions">${isDeleted(product) ? `${canDelete ? `<button type="button" class="secondary" data-restore="${escape(product.id)}">${tr("恢复商品", "Restore product")}</button>` : ""}${canPurge ? `<button type="button" class="danger" data-purge="${escape(product.id)}">${tr("彻底删除", "Delete permanently")}</button>` : ""}` : `${canEdit ? `<button class="secondary" data-edit="${escape(product.id)}">${tr("配置", "Configure")}</button><button type="button" class="secondary" data-export="${escape(product.id)}">${tr("复制商品资料", "Copy product info")}</button>` : ""}${canDelete ? `<button type="button" class="danger" data-delete="${escape(product.id)}">${tr("删除商品", "Delete product")}</button>` : ""}`}</div></article>`).join("")}</div>` : `<div class="empty">${productView === "deleted" ? tr("回收站暂无商品。", "The recycle bin is empty.") : tr("暂无商品。", "No products here.")}</div>`}
       <div id="product-export-panel"></div>
       <div id="error" class="error" role="alert"></div>`;
     let confirmation = 0;
@@ -200,6 +209,52 @@
       return render(ctx);
     };
     on("#products-view", "change", () => reload($("#products-view").value));
+    const purge = async (items, bulk, shopId = "") => {
+      if (!active() || !canPurge) return;
+      const snapshot = items.map((product) => ({ id: product.id, name: product.name }));
+      const ids = snapshot.map((product) => product.id);
+      if (!ids.length || ids.length > 500 || new Set(ids).size !== ids.length ||
+          items.some((product) => !isDeleted(product) || isPurged(product)) ||
+          (bulk && new Set(items.map(shopIdOf)).size !== 1) ||
+          (ctx.role === "staff" && (ids.length !== 1 || (ctx.productId && ids[0] !== ctx.productId))))
+        throw new Error(tr("请刷新回收站，选择当前有权处理的商品（最多 500 个）。", "Refresh the recycle bin and select authorized products, up to 500."));
+      const generation = ++confirmation;
+      const panel = $("#product-lifecycle-confirmation");
+      panel.innerHTML = `<section class="product-lifecycle-confirmation"><h3>${tr(`彻底删除 ${ids.length} 个商品？`, `Permanently remove ${ids.length} ${ids.length === 1 ? "product" : "products"}?`)}</h3><p>${tr("商品不能恢复。旧卡密仍可兑换，已有任务、领取链接和交付内容继续保留。只清理下面列出的商品，稍后进入回收站的商品不会被清理。", "These products cannot be restored. Existing codes can still be redeemed; tasks, receipt links and deliveries are preserved. Only the products listed below will be removed. Products moved to the recycle bin later are excluded.")}</p><ul class="product-purge-snapshot">${snapshot.map((product) => `<li>${escape(product.name)}</li>`).join("")}</ul><div class="actions"><button type="button" class="danger" id="confirm-product-purge">${tr(bulk ? "确认清空这些商品" : "确认彻底删除", bulk ? "Confirm clearing these products" : "Confirm permanent removal")}</button><button type="button" class="secondary" id="cancel-product-purge">${tr("取消", "Cancel")}</button></div></section>`;
+      on("#cancel-product-purge", "click", () => { confirmation++; panel.innerHTML = ""; });
+      on("#confirm-product-purge", "click", async () => {
+        if (!active() || generation !== confirmation || !canPurge) return;
+        const cancel = $("#cancel-product-purge");
+        if (cancel) cancel.disabled = true;
+        const endpoint = owner
+          ? bulk ? "/admin/products/empty-trash" + (shopId ? "?" + new URLSearchParams({ shop_id: shopId }) : "") : "/admin/products/" + encodeURIComponent(ids[0]) + "/purge"
+          : (bulk ? "/manage/products/empty-trash?" : "/manage/product/purge?") + new URLSearchParams({ product_id: ids[0] });
+        let result;
+        try { result = await ctx.api(endpoint, { confirmed: true, ...(bulk ? { product_ids: ids } : {}) }, "POST"); }
+        finally { if (active() && generation === confirmation && cancel?.isConnected) cancel.disabled = false; }
+        if (!active() || generation !== confirmation) return;
+        const valid = bulk
+          ? result?.ok === true && result.preserved_fulfillment === true && result.purged_count === ids.length && Array.isArray(result.purged_product_ids) && result.purged_product_ids.length === ids.length && new Set(result.purged_product_ids).size === ids.length && result.purged_product_ids.every((id) => ids.includes(id))
+          : result?.ok === true && result.product_id === ids[0] && result.deleted === true && result.purged === true && Number.isFinite(result.purged_at) && result.purged_at > 0;
+        if (!valid) throw new Error(tr("未能确认清理结果，请刷新回收站后检查。", "Could not confirm permanent removal. Refresh the recycle bin and check."));
+        ctx.products = ctx.products.map((product) => ids.includes(product.id) ? { ...product, deleted: true, purged: true, ...(bulk ? {} : { purged_at: result.purged_at }) } : product);
+        ctx.onSaved(ctx.products);
+        ctx.notify(tr("商品已彻底移除，旧卡密、任务和交付仍保留。", "Products permanently removed. Existing codes, tasks and deliveries are preserved."));
+        await reload();
+      });
+    };
+    on("#trash-shop", "change", () => {
+      const selected = $("#trash-shop").value;
+      selectedTrashShop = trashShops.includes(selected) ? selected : "";
+      $("#empty-product-trash").disabled = clearDisabled();
+      confirmation++;
+      $("#product-lifecycle-confirmation").innerHTML = "";
+    });
+    on("#empty-product-trash", "click", () => {
+      if (clearDisabled()) return;
+      return purge(selectedTrash(), true, selectedTrashShop);
+    });
+    all("[data-purge]").forEach((node) => node.addEventListener("click", () => perform(() => purge(products.filter((product) => product.id === node.dataset.purge), false), node)));
     const lifecycle = async (product, deleted) => {
       if (!active() || !canDelete || isDeleted(product) === deleted) return;
       const generation = ++confirmation;
@@ -225,7 +280,7 @@
     all("[data-delete]").forEach((node) => node.addEventListener("click", () => perform(() => lifecycle(products.find((product) => product.id === node.dataset.delete), true), node)));
     all("[data-restore]").forEach((node) => node.addEventListener("click", () => perform(async () => {
       const product = products.find((product) => product.id === node.dataset.restore);
-      if (!active() || !canDelete || !isDeleted(product)) return;
+      if (!active() || !canDelete || !isDeleted(product) || isPurged(product)) return;
       const endpoint = owner ? "/admin/products/" + encodeURIComponent(product.id) + "/restore" : "/manage/product/restore?" + new URLSearchParams({ product_id: product.id });
       const result = await ctx.api(endpoint, {}, "POST");
       if (!active()) return;
