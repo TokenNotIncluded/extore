@@ -1727,6 +1727,8 @@ class ManageClient:
                                     "view_policy",
                                     "deleted",
                                     "deleted_at",
+                                    "purged",
+                                    "purged_at",
                                 )
                                 if key in product
                             },
@@ -2372,7 +2374,7 @@ def add_parser(commands):
     )
     products.add_argument(
         "--view",
-        choices=("active", "deleted", "all"),
+        choices=("active", "deleted", "all", "history"),
         default="active",
         help="active products by default; deleted products are recoverable",
     )

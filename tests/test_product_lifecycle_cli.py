@@ -41,7 +41,7 @@ class LifecycleOwner(OwnerMerchant):
             return httpx.Response(
                 200,
                 json=rows
-                if view == "all" or (view == "deleted") == self.deleted
+                if view in ("all", "history") or (view == "deleted") == self.deleted
                 else [],
             )
         if request.method == "DELETE" and path == "/api/admin/products/product-a":
@@ -72,7 +72,7 @@ class LifecycleManager(MockMerchant):
     def __init__(self):
         super().__init__()
         self.links["delete"] = ("product-a", ["product.delete"])
-        self.links["legacyfull"] = ("product-a", list(PERMISSIONS[:-1]))
+        self.links["legacyfull"] = ("product-a", list(PERMISSIONS[:8]))
         self.deleted = False
         self.lifecycle_calls = []
         self.product_queries = []
@@ -117,7 +117,7 @@ class LifecycleManager(MockMerchant):
             return httpx.Response(
                 200,
                 json=rows
-                if view == "all" or (view == "deleted") == self.deleted
+                if view in ("all", "history") or (view == "deleted") == self.deleted
                 else [],
             )
         return response
@@ -145,7 +145,7 @@ def test_named_owner_delete_restore_signed_actions_and_recycle_views(tmp_path):
     )
     queued = owner_run(profile, peer, "queues")
     assert queued["queues"][0]["product_id"] == "product-a"
-    assert peer.queries[-2][2]["view"] == "all"
+    assert peer.queries[-2][2]["view"] == "history"
     restored = owner_run(profile, peer, "product", "restore", "--product", "product-a")
     assert restored["deleted"] is False and restored["deleted_at"] is None
     assert owner_run(profile, peer, "products")["products"]

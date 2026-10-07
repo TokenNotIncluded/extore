@@ -694,7 +694,7 @@ def add_parser(commands):
     products.add_argument("--detail", action="store_true")
     products.add_argument("--output", type=Path)
     products.add_argument(
-        "--view", choices=("active", "deleted", "all"), default="active"
+        "--view", choices=("active", "deleted", "all", "history"), default="active"
     )
     queues = sub.add_parser(
         "queues", help="compact pending queues across merchant products"
@@ -767,7 +767,7 @@ def add_parser(commands):
             parser.add_argument("--field", required=True)
             parser.add_argument("--file", type=Path, required=True)
     business.add_commands(sub)
-    for name in ("sessions", "devices", "events"):
+    for name in ("sessions", "devices", "events", "trash"):
         operations = next(
             action
             for action in sub.choices[name]._actions
@@ -777,6 +777,24 @@ def add_parser(commands):
             for action in parser._actions:
                 if action.dest == "product":
                     action.required = False
+    trash_parser = next(
+        action
+        for action in sub.choices["trash"]._actions
+        if isinstance(action, argparse._SubParsersAction)
+    ).choices["empty"]
+    for action in list(trash_parser._actions):
+        if action.dest == "product":
+            trash_parser._remove_action(action)
+            for group in trash_parser._action_groups:
+                if action in group._group_actions:
+                    group._group_actions.remove(action)
+            for option in action.option_strings:
+                trash_parser._option_string_actions.pop(option, None)
+        elif action.dest == "yes":
+            action.help = "permanently empty the selected shop's recycle bin; sold fulfillment remains"
+    trash_parser.add_argument(
+        "--shop", help="explicit shop ID; required for a platform-wide owner device"
+    )
     for name in ("audit", "processors", "api"):
         for action in sub.choices[name]._actions:
             if action.dest == "product":
@@ -796,7 +814,9 @@ def add_parser(commands):
         parser.add_argument("--output", type=Path)
         if operation == "list":
             parser.add_argument(
-                "--view", choices=("active", "deleted", "all"), default="active"
+                "--view",
+                choices=("active", "deleted", "all", "history"),
+                default="active",
             )
         if operation in ("create", "quick"):
             business._json_arguments(parser)
@@ -849,7 +869,8 @@ class _BusinessOwner(OwnerClient):
 
     def request(self, grant, method, path, **kwargs):
         if (path == "/api/manage/product" and method == "DELETE") or (
-            path == "/api/manage/product/restore" and method == "POST"
+            path in ("/api/manage/product/restore", "/api/manage/product/purge")
+            and method == "POST"
         ):
             params = kwargs.get("params") or {}
             selected_product = grant.get("product_id") or params.get("product_id")
@@ -864,7 +885,7 @@ class _BusinessOwner(OwnerClient):
             path = (
                 "/api/admin/products/"
                 + quote(selected_product, safe="")
-                + ("/restore" if method == "POST" else "")
+                + ("/" + path.rsplit("/", 1)[1] if method == "POST" else "")
             )
             kwargs.pop("params", None)
         elif path == "/api/manage/product" and method == "PUT":
@@ -903,6 +924,8 @@ _API_ROUTES = (
     ("PUT", r"/api/admin/products/[A-Za-z0-9_-]+"),
     ("DELETE", r"/api/admin/products/[A-Za-z0-9_-]+"),
     ("POST", r"/api/admin/products/[A-Za-z0-9_-]+/restore"),
+    ("POST", r"/api/admin/products/[A-Za-z0-9_-]+/purge"),
+    ("POST", r"/api/admin/products/empty-trash"),
     (
         "GET",
         r"/api/admin/(?:product-templates|processors|storage|cards|card-stats|card-inventory|staff|events|sessions|audit|cli-devices)",
@@ -920,6 +943,8 @@ _API_ROUTES = (
     ("PUT", r"/api/manage/product"),
     ("DELETE", r"/api/manage/product"),
     ("POST", r"/api/manage/product/restore"),
+    ("POST", r"/api/manage/product/purge"),
+    ("POST", r"/api/manage/products/empty-trash"),
     ("POST", r"/api/manage/(?:cards|links)/[A-Za-z0-9_-]+/revoke"),
     ("GET", r"/api/manage/cards/[A-Za-z0-9_-]+/history"),
     ("POST", r"/api/manage/events/[A-Za-z0-9_-]+/retry"),
@@ -1011,8 +1036,27 @@ def _api(client, owner, args):
             args.path == "/api/manage/product/restore"
             or re.fullmatch(r"/api/admin/products/[A-Za-z0-9_-]+/restore", args.path)
         )
+        else "purge"
+        if args.method == "POST"
+        and (
+            args.path == "/api/manage/product/purge"
+            or re.fullmatch(r"/api/admin/products/[A-Za-z0-9_-]+/purge", args.path)
+        )
         else None
     )
+    bulk = args.method == "POST" and args.path in (
+        "/api/admin/products/empty-trash",
+        "/api/manage/products/empty-trash",
+    )
+    if bulk:
+        ids = business.purge_product_ids(body)
+        if args.path.startswith("/api/manage/") and ids != [args.product]:
+            raise ManageError(
+                "Product-scoped empty-trash needs only the selected --product",
+                code="no_scope",
+            )
+        if args.product and ids != [args.product]:
+            raise ManageError("Empty-trash IDs differ from --product", code="no_scope")
     if lifecycle:
         if not isinstance(args.product, str) or not re.fullmatch(
             r"[A-Za-z0-9_-]{1,100}", args.product
@@ -1022,7 +1066,7 @@ def _api(client, owner, args):
                 code="no_scope",
             )
         match = re.fullmatch(
-            r"/api/admin/products/([A-Za-z0-9_-]+)(?:/restore)?", args.path
+            r"/api/admin/products/([A-Za-z0-9_-]+)(?:/(?:restore|purge))?", args.path
         )
         if match and match[1] != args.product:
             raise ManageError(
@@ -1080,6 +1124,11 @@ def _api(client, owner, args):
             shop_commands._profile_shop(owner, body["shop_id"])
         value = shop_commands.profile_metadata(
             _owner_request(client, owner, args.method, args.path, **kwargs)
+        )
+        return business._finish(args, {"ok": True, "result": value})
+    if bulk:
+        value = business.purge_result(
+            _owner_request(client, owner, args.method, args.path, **kwargs), ids
         )
         return business._finish(args, {"ok": True, "result": value})
     if lifecycle:
@@ -1181,6 +1230,18 @@ def dispatch(client, args):
             removed.append(owner["id"])
         return {"ok": True, "removed": removed}
     owner = client._select(origin, getattr(args, "grant", None))
+    if command == "trash":
+        selected_shop = args.shop or owner.get("shop_id")
+        if not isinstance(selected_shop, str) or not re.fullmatch(
+            r"[A-Za-z0-9_-]{1,100}", selected_shop
+        ):
+            raise ManageError(
+                "Platform trash empty requires one explicit --shop", code="no_scope"
+            )
+        if owner.get("shop_id") is not None and selected_shop != owner["shop_id"]:
+            raise ManageError(
+                "Recycle bin belongs to a different shop", code="no_scope"
+            )
     client.session(owner)
     client.active_owner = owner
     if command in shop_commands.COMMANDS:
@@ -1285,6 +1346,39 @@ def dispatch(client, args):
                 json=business.read_json(args),
             )
         return business._finish(args, _object(result))
+    if command == "trash":
+        rows = _owner_request(
+            client,
+            owner,
+            "GET",
+            "/api/admin/products",
+            params={"view": "deleted", "compact": "true", "shop_id": selected_shop},
+        )
+        ids = business.trash_snapshot(rows, shop_id=selected_shop)
+        result = (
+            business.purge_result(
+                {
+                    "ok": True,
+                    "purged_product_ids": [],
+                    "purged_count": 0,
+                    "preserved_fulfillment": True,
+                },
+                [],
+            )
+            if not ids
+            else business.purge_result(
+                _owner_request(
+                    client,
+                    owner,
+                    "POST",
+                    "/api/admin/products/empty-trash",
+                    params={"shop_id": selected_shop},
+                    json={"confirmed": True, "product_ids": ids},
+                ),
+                ids,
+            )
+        )
+        return business._finish(args, result)
     if command == "products" or command == "product" and args.operation == "list":
         items = _global_products(
             client, owner, compact=not args.detail and not args.output, view=args.view
@@ -1302,6 +1396,8 @@ def dispatch(client, args):
             "active",
             "deleted",
             "deleted_at",
+            "purged",
+            "purged_at",
             "parameters_count",
             "outputs_count",
             "variants",
@@ -1348,7 +1444,9 @@ def dispatch(client, args):
             if args.product
             else [
                 item["id"]
-                for item in _global_products(client, owner, compact=True, view="all")
+                for item in _global_products(
+                    client, owner, compact=True, view="history"
+                )
             ]
         )
         queues = []

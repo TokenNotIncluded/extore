@@ -352,4 +352,6 @@ extore manage logout --all
 
 需要彻底阻止设备续签时，在后台撤销流水线授权或设备；撤销管理链接同时停止其设备、会话及下级授权。主动授权被撤销后，先退出相应范围，再申请新设备码，由店主重新批准；整组授权可用 `logout --origin SERVER` 清理该服务器所有本地记录后重新申请。旧链接兼容入口须提供仍有效且有额度的新授权，不能绕过撤销或绑定次数。会话界面区分 browser / cli 渠道，并显示绑定设备信息。
 
-商品可以通过 CLI 移入回收站和恢复：`extore admin product delete --product PRODUCT_ID --yes`、`extore admin product restore --product PRODUCT_ID`。商品授权下使用 `extore manage product delete/restore`，需要明确批准的 `product.delete` 权限；已有授权不会自动扩权。列表的 `--view active|deleted|all` 默认显示未删除商品。删除只停售，原卡密、任务、领取链接和附件保留，聚合队列仍包括旧任务。完整示例见 [商品回收站](cli-owner.md#商品回收站)。
+商品可以通过 CLI 移入回收站和恢复：`extore admin product delete --product PRODUCT_ID --yes`、`extore admin product restore --product PRODUCT_ID`。商品授权下使用 `extore manage product delete/restore`，需要明确批准的 `product.delete` 权限；已有授权不会自动扩权。列表的 `--view active|deleted|all|history` 默认显示未删除商品，`history` 还保留永久移出回收站的商品用于履约查询。删除只停售，原卡密、任务、领取链接和附件保留，聚合队列仍包括旧任务。完整示例见 [商品回收站](cli-owner.md#商品回收站)。
+
+清空回收站：`extore admin trash empty --yes`，平台管理员必须另加 `--shop SHOP_ID`；商品授权只可执行 `extore manage trash empty --product PRODUCT_ID --yes`。单商品使用 `product purge --product PRODUCT_ID --yes`。这些操作永久移出商品、不可恢复，需要独立的 `product.purge` 权限，保留原卡密、任务与交付。CLI 提交明确 ID 快照，空回收站不写入，超过 500 个商品拒绝隐式批量。详见 [永久移出回收站](cli-owner.md#永久移出回收站)。

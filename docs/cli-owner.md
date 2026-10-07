@@ -200,7 +200,7 @@ extore admin product list --view all
 extore admin product restore --product PRODUCT_ID
 ```
 
-商品列表默认 `--view active`，也可选择 `deleted` 或 `all`。跨商品队列会查询全部商品，保留回收站商品的旧任务。商品删除必须显式写 `--yes`，缺少这个参数时不会发送删除请求，也不会为了删除而续期会话。店主命令沿用一次性挑战和设备签名，并在审计中记录店主身份。
+商品列表默认 `--view active`，也可选择 `deleted`、`all` 或 `history`。`all` 包含未删除和回收站商品；`history` 还包含永久移出回收站的商品。跨商品队列使用历史视图，保留旧任务。商品删除必须显式写 `--yes`，缺少这个参数时不会发送删除请求，也不会为了删除而续期会话。店主命令沿用一次性挑战和设备签名，并在审计中记录店主身份。
 
 商品授权 CLI 使用相同命令：
 
@@ -222,3 +222,28 @@ extore manage api POST /api/manage/product/restore --product PRODUCT_ID
 ```
 
 通用店主 API 的路径商品 ID、`--product` 和查询中的商品 ID 必须一致。CLI 只输出商品 ID、是否已删除以及删除时间，不输出响应里的配置、卡密或凭据。
+
+### 永久移出回收站
+
+```sh
+extore admin product purge --product PRODUCT_ID --yes
+extore admin trash empty --yes
+extore admin trash empty --shop SHOP_ID --yes
+extore manage product purge --product PRODUCT_ID --yes
+extore manage trash empty --product PRODUCT_ID --yes
+```
+
+`purge` 和清空回收站永久移出商品，不能恢复。它们保留已售卡密、任务、领取链接和交付内容，不是磁盘清理命令。永久移出的商品不能再编辑、配置、发行新卡密或创建管理链接；已有履约仍可继续。需要查询旧商品时使用 `extore admin products --view history` 或 `extore manage products --view history`，结果会标记 `purged`，普通列表的 `active`、`deleted`、`all` 均隐藏它们。
+
+店主的 `admin trash empty` 固定处理本店。平台管理员必须提供 `--shop SHOP_ID`，不能隐式清空所有店铺。CLI 先读取所选店铺的回收站，验证每个商品属于该店，再提交明确商品 ID 快照；空回收站不发送写请求，超过 500 个商品会拒绝并要求显式分批操作。商品授权下的 `manage trash empty --product PRODUCT_ID` 只处理该授权商品，不会聚合多个链接。
+
+这些命令必须在命令中明确写 `--yes`；没有确认时不会续签会话或发送网络请求。商品授权需要独立的 `product.purge` 权限，旧九项权限、`product.delete` 以及旧完整管理链接均不会自动获得它。店主写请求继续使用一次性挑战与设备签名。
+
+通用 API 也必须提供 `--yes`。单商品永久移出的正文只能是 `{"confirmed":true}`；批量正文必须由调用者明确提供 `{"confirmed":true,"product_ids":["PRODUCT_ID"]}`，最多 500 个不同 ID。商品授权中的批量 ID 只能是 `--product` 指定的一个商品。店主批量 ID 必须同属一家店铺；`--query shop_id=SHOP_ID` 可进一步固定店铺范围。
+
+```sh
+extore admin api POST /api/admin/products/PRODUCT_ID/purge --product PRODUCT_ID --yes
+extore manage api POST /api/manage/product/purge --product PRODUCT_ID --yes
+extore admin api POST /api/admin/products/empty-trash --yes --query shop_id=SHOP_ID --json-file explicit-product-ids.json
+extore manage api POST /api/manage/products/empty-trash --product PRODUCT_ID --yes --json-file explicit-product-ids.json
+```

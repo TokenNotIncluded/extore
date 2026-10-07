@@ -24,6 +24,7 @@ COMMANDS = {
     "processors",
     "source",
     "api",
+    "trash",
 }
 STATUSES = (
     "unused",
@@ -48,6 +49,7 @@ PERMISSIONS = (
     "events.manage",
     "links.delegate",
     "product.delete",
+    "product.purge",
 )
 JSON_LIMIT = 256000
 TEXT_IMPORT_LIMIT = 2 * 1024 * 1024
@@ -132,7 +134,7 @@ def add_commands(subcommands):
     product = _group(
         subcommands,
         "product",
-        ("get", "update", "schema", "prompt", "delete", "restore"),
+        ("get", "update", "schema", "prompt", "delete", "restore", "purge"),
     )
     for parser in product.values():
         parser.description = (
@@ -149,6 +151,17 @@ def add_commands(subcommands):
         "--yes",
         action="store_true",
         help="confirm moving this product to the recycle bin; existing cards and tasks remain valid",
+    )
+    product["purge"].add_argument(
+        "--yes",
+        action="store_true",
+        help="permanently remove this retired product from the recycle bin; sold fulfillment remains",
+    )
+    trash = _group(subcommands, "trash", ("empty",))
+    trash["empty"].add_argument(
+        "--yes",
+        action="store_true",
+        help="permanently empty this product's recycle bin entry; sold fulfillment remains",
     )
     _json_arguments(product["update"])
     for action in ("schema", "prompt"):
@@ -459,12 +472,17 @@ def require_product_delete_confirmation(args):
     """Run before grant/session renewal so an unconfirmed delete stays local."""
     command = getattr(args, "manage_command", "")
     named_operation = getattr(args, "operation", "")
-    if command == "product" and named_operation in ("delete", "restore"):
+    if command == "product" and named_operation in ("delete", "restore", "purge"):
         if not isinstance(getattr(args, "product", None), str) or not re.fullmatch(
             r"[A-Za-z0-9_-]{1,100}", args.product
         ):
             raise ManageError("Select one valid --product ID", code="invalid_input")
-    named = command == "product" and named_operation == "delete"
+    named = (
+        command == "product"
+        and named_operation in ("delete", "purge")
+        or command == "trash"
+        and named_operation == "empty"
+    )
     generic = (
         command == "api"
         and getattr(args, "method", "") == "DELETE"
@@ -472,6 +490,21 @@ def require_product_delete_confirmation(args):
             getattr(args, "path", "") == "/api/manage/product"
             or re.fullmatch(
                 r"/api/admin/products/[A-Za-z0-9_-]+", getattr(args, "path", "")
+            )
+        )
+    )
+    generic = generic or (
+        command == "api"
+        and getattr(args, "method", "") == "POST"
+        and (
+            getattr(args, "path", "")
+            in (
+                "/api/manage/product/purge",
+                "/api/manage/products/empty-trash",
+                "/api/admin/products/empty-trash",
+            )
+            or re.fullmatch(
+                r"/api/admin/products/[A-Za-z0-9_-]+/purge", getattr(args, "path", "")
             )
         )
     )
@@ -483,7 +516,7 @@ def require_product_delete_confirmation(args):
 
 
 def product_lifecycle_body(args, operation, body=None):
-    if operation == "delete":
+    if operation in ("delete", "purge"):
         if getattr(args, "yes", False) is not True:
             raise ManageError(
                 "Product deletion requires --yes", code="confirmation_required"
@@ -507,8 +540,108 @@ def product_lifecycle_body(args, operation, body=None):
     return None
 
 
+def purge_product_ids(body):
+    if (
+        not isinstance(body, dict)
+        or set(body) != {"confirmed", "product_ids"}
+        or body.get("confirmed") is not True
+    ):
+        raise ManageError(
+            "Empty-trash JSON needs only confirmed:true and explicit product_ids",
+            code="invalid_input",
+        )
+    ids = body["product_ids"]
+    if (
+        not isinstance(ids, list)
+        or not 1 <= len(ids) <= 500
+        or any(
+            not isinstance(item, str) or not re.fullmatch(r"[A-Za-z0-9_-]{1,100}", item)
+            for item in ids
+        )
+        or len(ids) != len(set(ids))
+    ):
+        raise ManageError(
+            "Select 1 to 500 unique product IDs; split larger snapshots explicitly",
+            code="invalid_input",
+        )
+    return list(ids)
+
+
+def purge_result(value, product_ids):
+    value = _object(value)
+    ids = value.get("purged_product_ids")
+    if (
+        value.get("ok") is not True
+        or not isinstance(ids, list)
+        or any(not isinstance(item, str) for item in ids)
+        or len(ids) != len(set(ids))
+        or set(ids) != set(product_ids)
+        or type(value.get("purged_count")) is not int
+        or value["purged_count"] != len(ids)
+        or value.get("preserved_fulfillment") is not True
+    ):
+        raise ManageError("Invalid empty-trash response", code="invalid_response")
+    return {
+        "ok": True,
+        "purged_product_ids": ids,
+        "purged_count": len(ids),
+        "preserved_fulfillment": True,
+    }
+
+
+def trash_snapshot(items, *, product_id=None, shop_id=None):
+    rows = _objects(items)
+    if len(rows) > 500:
+        raise ManageError(
+            "More than 500 deleted products; purge explicit batches instead",
+            code="invalid_input",
+        )
+    ids = []
+    for row in rows:
+        pid = row.get("id")
+        if (
+            not isinstance(pid, str)
+            or not re.fullmatch(r"[A-Za-z0-9_-]{1,100}", pid)
+            or pid in ids
+            or row.get("deleted") is not True
+            or row.get("purged") is True
+            or product_id is not None
+            and pid != product_id
+            or shop_id is not None
+            and row.get("shop_id") != shop_id
+        ):
+            raise ManageError(
+                "Invalid or out-of-scope recycle bin snapshot", code="invalid_response"
+            )
+        ids.append(pid)
+    return ids
+
+
 def product_lifecycle_result(value, product_id, operation):
     value = _object(value)
+    if operation == "purge":
+        timestamp = value.get("purged_at")
+        if (
+            not {"ok", "product_id", "deleted", "purged", "purged_at"}.issubset(value)
+            or value.get("ok") is not True
+            or value.get("product_id") != product_id
+            or value.get("deleted") is not True
+            or value.get("purged") is not True
+            or type(timestamp) not in (int, float)
+            or timestamp <= 0
+            or timestamp > 253402300799
+            or not math.isfinite(timestamp)
+        ):
+            raise ManageError(
+                "Invalid permanent-retirement response", code="invalid_response"
+            )
+        return {
+            "ok": True,
+            "product_id": product_id,
+            "deleted": True,
+            "purged": True,
+            "purged_at": timestamp,
+        }
     deleted = operation == "delete"
     timestamp = value.get("deleted_at")
     if (
@@ -569,8 +702,14 @@ def dispatch(client, args, origin):
     }.get(command, "")
     if command == "product" and operation != "schema":
         permission = (
-            "product.delete" if operation in ("delete", "restore") else "product.edit"
+            "product.purge"
+            if operation == "purge"
+            else "product.delete"
+            if operation in ("delete", "restore")
+            else "product.edit"
         )
+    if command == "trash":
+        permission = "product.purge"
     include_secrets = (
         command == "product" and operation == "get" and args.include_secrets
     )
@@ -588,7 +727,41 @@ def dispatch(client, args, origin):
         )
     else:
         grant = _grant(client, args, origin, permission)
-    if command == "product":
+    if command == "trash":
+        rows = client.request(
+            grant,
+            "GET",
+            "/api/manage/products",
+            params={
+                "view": "deleted",
+                "compact": "true",
+                "product_id": grant["product_id"],
+            },
+        )
+        ids = trash_snapshot(rows, product_id=grant["product_id"])
+        result = (
+            purge_result(
+                {
+                    "ok": True,
+                    "purged_product_ids": [],
+                    "purged_count": 0,
+                    "preserved_fulfillment": True,
+                },
+                [],
+            )
+            if not ids
+            else purge_result(
+                _request(
+                    client,
+                    grant,
+                    "POST",
+                    "/api/manage/products/empty-trash",
+                    json={"confirmed": True, "product_ids": ids},
+                ),
+                ids,
+            )
+        )
+    elif command == "product":
         result = product_command(client, grant, args)
     elif command == "cards":
         result = cards_command(client, grant, args)
@@ -717,19 +890,22 @@ def dispatch(client, args, origin):
 
 def product_command(client, grant, args):
     operation = args.operation
-    if operation in ("delete", "restore"):
+    if operation in ("delete", "restore", "purge"):
         body = product_lifecycle_body(args, operation)
         result = _request(
             client,
             grant,
             "DELETE" if operation == "delete" else "POST",
-            "/api/manage/product" + ("/restore" if operation == "restore" else ""),
+            "/api/manage/product"
+            + ("/" + operation if operation in ("restore", "purge") else ""),
             **({"json": body} if body is not None else {}),
         )
         return product_lifecycle_result(result, grant["product_id"], operation)
     if operation == "schema":
         products = _objects(
-            client.request(grant, "GET", "/api/manage/products", params={"view": "all"})
+            client.request(
+                grant, "GET", "/api/manage/products", params={"view": "history"}
+            )
         )
         product = next(
             (item for item in products if item.get("id") == grant["product_id"]), None
@@ -742,6 +918,11 @@ def product_command(client, grant, args):
         }
     product = _product(client, grant)
     if operation == "update":
+        if product.get("purged") is True:
+            raise ManageError(
+                "Permanently retired products cannot be edited or reconfigured",
+                code="invalid_state",
+            )
         patch = read_json(args)
         if any(key in patch for key in ("id", "product_id")):
             raise ManageError(
@@ -1126,6 +1307,8 @@ _API_ROUTES = (
     ("PUT", r"product", "product.edit"),
     ("DELETE", r"product", "product.delete"),
     ("POST", r"product/restore", "product.delete"),
+    ("POST", r"product/purge", "product.purge"),
+    ("POST", r"products/empty-trash", "product.purge"),
     ("GET", r"processors", "product.edit"),
     ("GET", r"jobs", "queue.view"),
     ("POST", r"batch", "queue.process"),
@@ -1189,8 +1372,18 @@ def api_request(client, args, origin):
         if args.method == "DELETE" and relative == "product"
         else "restore"
         if args.method == "POST" and relative == "product/restore"
+        else "purge"
+        if args.method == "POST" and relative == "product/purge"
         else None
     )
+    bulk = args.method == "POST" and relative == "products/empty-trash"
+    if bulk:
+        ids = purge_product_ids(body)
+        if ids != [args.product]:
+            raise ManageError(
+                "Empty-trash product IDs must contain only the selected grant product",
+                code="no_scope",
+            )
     if lifecycle:
         body = product_lifecycle_body(args, lifecycle, body)
     if relative == "batch" and body and body.get("action") == "retry":
@@ -1245,6 +1438,8 @@ def api_request(client, args, origin):
     )
     if lifecycle:
         result = product_lifecycle_result(result, grant["product_id"], lifecycle)
+    if bulk:
+        result = purge_result(result, ids)
     if not args.detail and relative == "processors":
         result = [_processor_summary(item) for item in _objects(result)]
     return _finish(args, {"ok": True, "result": _public(result)})
