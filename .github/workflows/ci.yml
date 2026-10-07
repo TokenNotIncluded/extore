@@ -27,6 +27,8 @@ jobs:
       - run: uv sync --frozen --python 3.12
       - run: uv run ruff check extore scripts tests
       - run: uv run ruff format --check extore scripts tests
+      - run: uv run ruff check --config pyproject.toml processors/official/extore_processors processors/official/tests
+      - run: uv run ruff format --check --config pyproject.toml processors/official/extore_processors processors/official/tests
       - run: uv run pytest -q
       - run: uv run python -m compileall -q extore scripts
       - run: node --check extore/static/account.js

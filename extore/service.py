@@ -176,8 +176,11 @@ def validate_params(p, params):
         fail("提交了未定义的参数")
     clean = {}
     for f in p["parameters"]:
-        v = params.get(f["key"], "").strip()
-        if f["required"] and not v:
+        raw = params.get(f["key"], "")
+        # Processor code owns normalization, including CSV rows and indentation.
+        # Other products retain their existing field trimming behavior.
+        v = raw if p["mode"] == "script" else raw.strip()
+        if f["required"] and not v.strip():
             fail(f"请填写 {next(iter(f['label'].values()))}")
         if len(v) > 10000:
             fail("参数内容过长")

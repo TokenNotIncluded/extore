@@ -769,6 +769,23 @@ test("explicit empty bound text remains empty and missing values never invent pr
   assert.doesNotMatch(p.node("#processor-configuration").innerHTML, /Default template/);
 });
 
+test("bound public select choices preview the localized label without exposing secret choices or defaults", async () => {
+  const processors = [{ ...readableCatalog[0], configuration: [
+    { ...fieldDefinition("format", "select"), secret: false, default: "default-not-bound", options: [{ value: "csv", label: { "zh-CN": "CSV 表格 <img onerror=bad>", en: "CSV table <img onerror=bad>" } }] },
+    { ...fieldDefinition("token", "select"), secret: true, options: [{ value: "SECRET_CHOICE", label: "Hidden" }] },
+  ] }];
+  for (const lang of ["zh-CN", "en"]) {
+    const p = page(); p.ctx.lang = lang;
+    await editProduct(p, product({ shop_id: "shop-one", mode: "script", processor_id: "personalized_text" }), processors);
+    p.requests[1].resolve([boundProfile()]);
+    p.requests[2].resolve({ product_id: "product-one", profile: boundProfile({ configuration: { format: "csv", token: "SECRET_CHOICE" } }) }); await flush();
+    assert.equal(p.node("#profile-preview-0").value, lang === "en" ? "CSV table <img onerror=bad>" : "CSV 表格 <img onerror=bad>");
+    assert.equal(p.node("#profile-preview-0").readOnly, true);
+    assert.equal(p.node("#profile-preview-1"), null);
+    assert.doesNotMatch(p.node("#processor-configuration").innerHTML, /<img|SECRET_CHOICE|default-not-bound/);
+  }
+});
+
 test("duplicate configuration names hide conflicting secrets regardless of declaration order", async () => {
   const p = page();
   const processors = [{ ...readableCatalog[0], configuration: [

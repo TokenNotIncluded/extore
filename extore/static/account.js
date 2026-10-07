@@ -303,6 +303,12 @@
         return [...fields.values()];
       };
       const label = (value, fallback) => typeof value === "object" && value ? tr(value["zh-CN"] || fallback, value.en || fallback) : value || fallback;
+      const choices = (definition) => {
+        const options = definition.options;
+        if (!Array.isArray(options) || !options.length || options.some((option) => !option || typeof option.value !== "string" || !option.value)) throw new Error(tr("处理器选项配置无效，请更新处理器。", "Processor choices are invalid. Update the processor."));
+        if (new Set(options.map((option) => option.value)).size !== options.length) throw new Error(tr("处理器选项不能重复，请更新处理器。", "Processor choices must be unique. Update the processor."));
+        return options;
+      };
       const limits = [
         { key: "timeout_seconds", name: "超时（秒）", min: 10, max: 120, default: 120 },
         { key: "memory_mb", name: "内存（MiB）", min: 64, max: 512, default: 256 },
@@ -313,13 +319,21 @@
       const drafts = new Map();
       const fieldsHTML = (spec, prefix, existing, configuration = {}) => definitions(spec).map((definition, index) => {
         const sensitive = definition.secret !== false, id = prefix + index;
-        const name = label(definition.label, definition.key) + (existing && sensitive ? "（留空保留）" : !existing && definition.required ? " *" : "");
+        const name = label(definition.label, definition.key) + (existing && sensitive ? tr("（留空保留）", " (leave empty to keep)") : definition.required ? " *" : "");
         const max = Number.isInteger(definition.max_length) && definition.max_length > 0 ? Math.min(definition.max_length, 10000) : 10000;
-        const attrs = `maxlength="${max}" ${definition.required && !existing ? "required" : ""}`;
-        if (sensitive) return secret(id, name, attrs);
+        const description = label(definition.description, "");
+        const help = description ? `<p id="${id}-help" class="caption">${esc(description)}</p>` : "";
+        const attrs = `maxlength="${max}" ${definition.required && (!existing || !sensitive) ? "required" : ""}${help ? ` aria-describedby="${id}-help"` : ""}`;
+        // A secret is never filled from stored configuration or a default, even
+        // when the code declares an enumerated choice for it.
+        if (sensitive) return secret(id, name, attrs) + help;
         const value = existing ? configuration[definition.key] ?? "" : definition.default ?? "";
-        if (definition.type === "textarea") return `<div class="field"><label for="${id}">${esc(name)}</label><textarea id="${id}" rows="5" ${attrs}>${esc(value)}</textarea></div>`;
-        return field(id, name, ["text", "url", "email", "tel", "number"].includes(definition.type) ? definition.type : "text", attrs, value);
+        if (definition.type === "select") {
+          const options = choices(definition), invalid = value !== "" && !options.some((option) => option.value === value);
+          return `<div class="field"><label for="${id}">${esc(name)}</label><select id="${id}" ${definition.required ? "required" : ""}${help ? ` aria-describedby="${id}-help"` : ""}><option value="" ${value === "" ? "selected" : ""}>${esc(existing && !definition.required ? tr("清空此选项", "Clear this option") : tr("请选择", "Choose an option"))}</option>${invalid ? `<option value="${esc(value)}" disabled selected>${esc(tr("无效选项，请重新选择", "Invalid option, choose again"))}</option>` : ""}${options.map((option) => `<option value="${esc(option.value)}" ${value === option.value ? "selected" : ""}>${esc(label(option.label, option.value))}</option>`).join("")}</select>${help}</div>`;
+        }
+        if (definition.type === "textarea") return `<div class="field"><label for="${id}">${esc(name)}</label><textarea id="${id}" rows="5" ${attrs}>${esc(value)}</textarea></div>${help}`;
+        return field(id, name, ["text", "url", "email", "tel", "number"].includes(definition.type) ? definition.type : "text", attrs, value) + help;
       }).join("") || '<p class="caption">此处理器没有额外参数。</p>';
       const rowHTML = (prefix, kind, row) => {
         const base = `${prefix}${kind}-${row.id}`;
@@ -330,7 +344,7 @@
         for (const [name, value] of Object.entries(workflow.variables || {})) if (typeof value === "string") state.variables.push({ id: state.nextId++, name, value, originalName: name });
         for (const name of Array.isArray(workflow.configured_secret_names) ? workflow.configured_secret_names : []) if (typeof name === "string") state.secrets.push({ id: state.nextId++, name, originalName: name });
         drafts.set(prefix, state);
-        return `<fieldset class="processor-settings"><legend>处理器参数</legend>${fieldsHTML(spec, prefix, !!item, item?.configuration || {})}<p class="caption">普通模板可直接编辑；处理器凭据不回读，留空保留。</p></fieldset><details class="processor-workflow" ${state.variables.length ? "open" : ""}><summary id="${prefix}variable-summary">普通变量 · ${state.variables.length}</summary><fieldset class="processor-workflow-fields"><legend>普通变量</legend><p class="caption">名称使用大写字母、数字与下划线；系统保留名不能使用，保存时会校验。程序通过 Task.environment[NAME] 读取，同时传入 EXTORE_WORKFLOW_NAME。普通变量可见，请把凭据放入密钥。</p><div id="${prefix}variables">${state.variables.map((row) => rowHTML(prefix, "variable", row)).join("")}</div><div class="processor-workflow-actions actions"><button id="${prefix}add-variable" type="button" class="secondary">添加变量</button></div></fieldset></details><details class="processor-workflow" ${state.secrets.length ? "open" : ""}><summary id="${prefix}secret-summary">密钥 · ${state.secrets.length}</summary><fieldset class="processor-workflow-fields"><legend>密钥</legend><p class="caption">只显示已配置的名称，值只写入、不回读。留空保留；删除在保存后生效。改名请删除旧密钥，再添加新名称和值。</p><div id="${prefix}secrets">${state.secrets.map((row) => rowHTML(prefix, "secret", row)).join("")}</div><div class="processor-workflow-actions actions"><button id="${prefix}add-secret" type="button" class="secondary">添加密钥</button></div></fieldset></details><details class="processor-workflow"><summary>运行限制</summary><fieldset class="processor-workflow-fields"><legend>运行限制</legend><div class="processor-runtime-grid grid">${limits.map((limit) => field(prefix + "runtime-" + limit.key, limit.name, "number", `required min="${limit.min}" max="${limit.max}" step="1" inputmode="numeric"`, workflow.runtime?.[limit.key] ?? limit.default)).join("")}</div><p class="caption">超时 10–120 秒，内存 64–512 MiB，CPU 时间 1–120 秒，输出 65,536–1,000,000 字节。仅运行离线预设处理器；配置不能改变启动命令、镜像、软件包、网络或挂载。</p></fieldset></details>`;
+        return `${spec?.description ? `<p class="caption processor-description">${esc(label(spec.description, ""))}</p>` : ""}<fieldset class="processor-settings"><legend>处理器参数</legend>${fieldsHTML(spec, prefix, !!item, item?.configuration || {})}<p class="caption">普通模板可直接编辑；处理器凭据不回读，留空保留。</p></fieldset><details class="processor-workflow" ${state.variables.length ? "open" : ""}><summary id="${prefix}variable-summary">普通变量 · ${state.variables.length}</summary><fieldset class="processor-workflow-fields"><legend>普通变量</legend><p class="caption">名称使用大写字母、数字与下划线；系统保留名不能使用，保存时会校验。程序通过 Task.environment[NAME] 读取，同时传入 EXTORE_WORKFLOW_NAME。普通变量可见，请把凭据放入密钥。</p><div id="${prefix}variables">${state.variables.map((row) => rowHTML(prefix, "variable", row)).join("")}</div><div class="processor-workflow-actions actions"><button id="${prefix}add-variable" type="button" class="secondary">添加变量</button></div></fieldset></details><details class="processor-workflow" ${state.secrets.length ? "open" : ""}><summary id="${prefix}secret-summary">密钥 · ${state.secrets.length}</summary><fieldset class="processor-workflow-fields"><legend>密钥</legend><p class="caption">只显示已配置的名称，值只写入、不回读。留空保留；删除在保存后生效。改名请删除旧密钥，再添加新名称和值。</p><div id="${prefix}secrets">${state.secrets.map((row) => rowHTML(prefix, "secret", row)).join("")}</div><div class="processor-workflow-actions actions"><button id="${prefix}add-secret" type="button" class="secondary">添加密钥</button></div></fieldset></details><details class="processor-workflow"><summary>运行限制</summary><fieldset class="processor-workflow-fields"><legend>运行限制</legend><div class="processor-runtime-grid grid">${limits.map((limit) => field(prefix + "runtime-" + limit.key, limit.name, "number", `required min="${limit.min}" max="${limit.max}" step="1" inputmode="numeric"`, workflow.runtime?.[limit.key] ?? limit.default)).join("")}</div><p class="caption">超时 10–120 秒，内存 64–512 MiB，CPU 时间 1–120 秒，输出 65,536–1,000,000 字节。仅运行离线预设处理器；配置不能改变启动命令、镜像、软件包、网络或挂载。</p></fieldset></details>`;
       };
       const wireWorkflow = (prefix) => {
         const state = drafts.get(prefix);
@@ -357,6 +371,11 @@
       };
       const capture = (spec, prefix) => Object.fromEntries(definitions(spec).flatMap((definition, index) => {
         const value = $("#" + prefix + index)?.value || "";
+        if (definition.type === "select") {
+          const options = choices(definition);
+          if (value && !options.some((option) => option.value === value)) throw new Error(tr("请选择处理器声明的有效选项：", "Choose a valid processor option: ") + label(definition.label, definition.key));
+          if (!value && definition.secret === false && definition.required) throw new Error(tr("请选择必填选项：", "Choose the required option: ") + label(definition.label, definition.key));
+        }
         return definition.secret === false || value !== "" ? [[definition.key, value]] : [];
       }));
       const captureWorkflow = (prefix) => {

@@ -20,7 +20,7 @@ function fixture(options = {}) {
   const element = (attributes = "", tagName = "div") => {
     const listeners = new Map(), children = new Set();
     const attributeValues = new Map([...attributes.matchAll(/\b([a-z][a-z0-9-]*)="([^"]*)"/gi)].map(([, name, value]) => [name, decode(value)]));
-    const node = { attributes, value: attributeValues.get("value") || "", defaultValue: attributeValues.get("value") || "", checked: /\bchecked\b/.test(attributes), hidden: /(?:^|\s)hidden(?:\s|$)/.test(attributes), disabled: /(?:^|\s)disabled(?:\s|$)/.test(attributes), textContent: "", dataset: {}, isConnected: true,
+    const node = { attributes, tagName: tagName.toUpperCase(), value: attributeValues.get("value") || "", defaultValue: attributeValues.get("value") || "", checked: /\bchecked\b/.test(attributes), hidden: /(?:^|\s)hidden(?:\s|$)/.test(attributes), disabled: /(?:^|\s)disabled(?:\s|$)/.test(attributes), textContent: "", dataset: {}, isConnected: true,
       addEventListener(event, fn) { listeners.set(event, fn); }, emit(event) { if (tagName === "button" && node.disabled) return; return listeners.get(event)?.({ preventDefault() {} }); },
       setAttribute(name, value) { attributeValues.set(name, String(value)); }, getAttribute(name) { return attributeValues.get(name) ?? null; },
       focus() { node.focused = true; }, select() { node.selected = true; }, setSelectionRange(start, end) { node.selectionStart = start; node.selectionEnd = end; },
@@ -29,6 +29,14 @@ function fixture(options = {}) {
     };
     for (const entry of attributes.matchAll(/\bdata-([a-z-]+)="([^"]*)"/g)) node.dataset[entry[1].replace(/-([a-z])/g, (_, c) => c.toUpperCase())] = decode(entry[2]);
     let markup = "";
+    const selectValues = (html) => {
+      for (const select of html.matchAll(/<select\b([^>]*)>([\s\S]*?)<\/select>/gi)) {
+        const id = select[1].match(/\bid="([^"]+)"/)?.[1], child = nodes.get("#" + id);
+        const options = [...select[2].matchAll(/<option\b([^>]*)>/gi)];
+        const selected = options.find((option) => /(?:^|\s)selected(?:\s|$)/.test(option[1])) || options[0];
+        if (child) child.value = child.defaultValue = decode(selected?.[1].match(/\bvalue="([^"]*)"/)?.[1] || "");
+      }
+    };
     const disconnectChildren = () => {
       for (const [key, child] of children) {
         child.isConnected = false;
@@ -52,6 +60,7 @@ function fixture(options = {}) {
         const id = textarea[1].match(/\bid="([^"]+)"/)?.[1], child = nodes.get("#" + id);
         if (child) child.value = child.defaultValue = decode(textarea[2]);
       }
+      selectValues(markup);
     } });
     node.insertAdjacentHTML = (position, value) => {
       assert.equal(position, "beforeend");
@@ -67,6 +76,7 @@ function fixture(options = {}) {
         const id = textarea[1].match(/\bid="([^"]+)"/)?.[1], child = nodes.get("#" + id);
         if (child) child.value = child.defaultValue = decode(textarea[2]);
       }
+      selectValues(fragment);
     };
     return node;
   };
@@ -91,6 +101,7 @@ function fixture(options = {}) {
   vm.runInContext(source, context);
   const ui = context.window.ExtoreAccount;
   const instance = ui.mount({ root, auth: options.auth || {}, mode: options.mode || "login", token: options.token || "", isCurrent: () => current,
+    language: options.language || "zh-CN",
     navigate: (url) => navigations.push(url), passkey: async () => { passkeyCalls++; return options.verified; }, onAuth: (auth) => adopted.push(auth),
     copyProcessorPrompt: options.copyProcessorPrompt,
     api(url, body, method, extra) { return new Promise((resolve, reject) => requests.push({ url, body, method, extra, resolve, reject })); },
@@ -731,6 +742,110 @@ test("root profile reads explicitly name their target shop and staff never get a
   const q = fixture({ auth: { role: "staff", shop_id: "shop-one" }, mode: "profiles" }); await flush();
   assert.equal(q.requests.length, 0);
   assert.match(q.node("#account-error").textContent, /仅店主/);
+});
+
+const selectDefinition = {
+  key: "format", label: { "zh-CN": "导出格式", en: "Export format" }, type: "select", secret: false, required: true, default: "csv",
+  description: { "zh-CN": "选择下载的格式 <script>bad()</script>", en: "Choose the download format <script>bad()</script>" },
+  options: [{ value: "csv", label: { "zh-CN": "CSV 表格", en: "CSV table" } }, { value: "json", label: { "zh-CN": "JSON 数据", en: "JSON data" } }],
+};
+
+async function selectProfilePage({ definitions = [selectDefinition], configuration = null, language = "zh-CN" } = {}) {
+  const p = fixture({ auth: shopAuth, mode: "profiles", language });
+  p.requests[0].resolve([{ id: "processor", name: "Processor", description: { "zh-CN": "清理顾客表格 <img onerror=bad>", en: "Clean customer tables <img onerror=bad>" }, shop_configuration: definitions }]); await flush();
+  p.requests[1].resolve(configuration ? [{ id: "profile-one", shop_id: "shop-one", processor_id: "processor", name: "Profile", revision: 2, configuration }] : []); await flush();
+  if (configuration) await p.root.querySelectorAll("[data-profile-edit]")[0].emit("click");
+  else { p.node("#profile-processor").value = "processor"; await p.node("#profile-processor").emit("change"); }
+  return p;
+}
+
+test("processor select configuration renders code-defined choices and localized help without markup execution", async () => {
+  for (const language of ["zh-CN", "en"]) {
+    const p = await selectProfilePage({ language });
+    const markup = p.node("#profile-fields").innerHTML, select = p.node("#profile-field-0");
+    assert.equal(select.tagName, "SELECT");
+    assert.equal(select.value, "csv");
+    assert.match(select.attributes, /required/);
+    assert.match(select.attributes, /aria-describedby="profile-field-0-help"/);
+    assert.match(markup, /value="csv" selected/);
+    for (const text of language === "en" ? ["Export format", "CSV table", "Choose the download format"] : ["导出格式", "CSV 表格", "选择下载的格式"]) assert.ok(markup.includes(text));
+    assert.match(markup, language === "en" ? /Clean customer tables &lt;img onerror=bad&gt;/ : /清理顾客表格 &lt;img onerror=bad&gt;/);
+    assert.doesNotMatch(markup, /<script>|<img/);
+  }
+});
+
+test("processor select edits read the pinned public value and preserve explicit optional clearing", async () => {
+  const p = await selectProfilePage({ definitions: [{ ...selectDefinition, required: false }], configuration: { format: "json" } });
+  assert.equal(p.node("#profile-update-profile-one-0").value, "json");
+  assert.match(p.node("#profile-editor-profile-one").innerHTML, /value="json" selected/);
+  p.node("#profile-update-profile-one-0").value = "";
+  const body = await workflowWrite(p, "#profile-update-profile-one");
+  assert.deepEqual(body.configuration, { format: "" });
+});
+
+test("empty optional select never falls back to the first declared option or the default during editing", async () => {
+  const p = await selectProfilePage({ definitions: [{ ...selectDefinition, required: false }], configuration: { format: "" } });
+  assert.equal(p.node("#profile-update-profile-one-0").value, "");
+  const body = await workflowWrite(p, "#profile-update-profile-one");
+  assert.deepEqual(body.configuration, { format: "" });
+});
+
+test("secret selects keep stored values and defaults write-only and blank edits omit configuration", async () => {
+  const definitions = [{ ...selectDefinition, secret: true, default: "excluded-default", options: [{ value: "excluded-current", label: "Private choice" }, { value: "replacement", label: "Replacement" }] }];
+  const p = await selectProfilePage({ definitions, configuration: { format: "excluded-current" } });
+  const input = p.node("#profile-update-profile-one-0");
+  assert.equal(input.tagName, "INPUT");
+  assert.match(input.attributes, /type="password"/);
+  assert.doesNotMatch(input.attributes, /required/);
+  assert.equal(input.value, "");
+  assert.doesNotMatch(p.root.innerHTML + p.node("#profile-editor-profile-one").innerHTML, /excluded-/);
+  const body = await workflowWrite(p, "#profile-update-profile-one");
+  assert.equal(Object.hasOwn(body, "configuration"), false);
+  const created = await selectProfilePage({ definitions });
+  assert.equal(created.node("#profile-field-0").value, "");
+  assert.doesNotMatch(created.node("#profile-fields").innerHTML, /excluded-/);
+});
+
+test("secret select replacements are validated and cleared after capture without readback", async () => {
+  const p = await selectProfilePage({ definitions: [{ ...selectDefinition, secret: true }], configuration: { format: "json" } });
+  p.node("#profile-update-profile-one-0").value = "csv";
+  const body = await workflowWrite(p, "#profile-update-profile-one");
+  assert.deepEqual(body.configuration, { format: "csv" });
+  assert.equal(p.node("#profile-update-profile-one-0").value, "");
+});
+
+test("processor configuration blocks invalid public and secret enum values before reauthentication or writes", async () => {
+  for (const secret of [false, true]) {
+    const p = await selectProfilePage({ definitions: [{ ...selectDefinition, secret }], configuration: { format: "json" } });
+    p.node("#profile-update-profile-one-0").value = "not-a-declared-option";
+    await p.node("#profile-update-profile-one").emit("submit");
+    assert.equal(p.requests.length, 2);
+    assert.equal(p.node("#fresh-password"), undefined);
+    assert.match(p.node("#account-error").textContent, /有效选项/);
+  }
+});
+
+test("required public processor choices reject empty updates while invalid saved values require reselection", async () => {
+  for (const value of ["", "invalid-saved-choice"]) {
+    const p = await selectProfilePage({ configuration: { format: value } });
+    assert.equal(p.node("#profile-update-profile-one-0").value, value);
+    if (value) assert.match(p.node("#profile-editor-profile-one").innerHTML, /无效选项，请重新选择/);
+    await p.node("#profile-update-profile-one").emit("submit");
+    assert.equal(p.requests.length, 2);
+    assert.match(p.node("#account-error").textContent, value ? /有效选项/ : /必填选项/);
+    p.node("#profile-update-profile-one-0").value = "json";
+    const body = await workflowWrite(p, "#profile-update-profile-one");
+    assert.deepEqual(body.configuration, { format: "json" });
+  }
+});
+
+test("malformed processor choice declarations fail closed rather than exposing a freeform text control", async () => {
+  for (const options of [undefined, [], [{ value: 3 }], [{ value: "csv" }, { value: "csv" }]]) {
+    const p = await selectProfilePage({ definitions: [{ ...selectDefinition, options }] });
+    assert.equal(p.node("#profile-field-0"), undefined);
+    assert.match(p.node("#account-error").textContent, /处理器选项/);
+    assert.equal(p.requests.length, 2);
+  }
 });
 
 test("navigation exposes platform pages only to root and header context is a native home link", () => {

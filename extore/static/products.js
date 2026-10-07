@@ -795,7 +795,9 @@
       const preview = [...configurationFields.values()].filter((definition) => definition.secret === false && Object.hasOwn(visibleConfiguration, definition.key) && typeof visibleConfiguration[definition.key] === "string");
       const previewHTML = preview.length ? `<div class="form-divider processor-bound-preview"><h4>${ctx.lang === "en" ? "Plain text in the bound configuration version" : "当前绑定版本的普通文本"}</h4>${preview.map((definition, index) => {
         const label = localized(definition.label, ctx.lang), value = visibleConfiguration[definition.key];
-        return definition.type === "textarea" ? textarea("profile-preview-" + index, label, value, 'readonly autocomplete="off" spellcheck="false" rows="5"') : field("profile-preview-" + index, label, value, "text", 'readonly autocomplete="off"');
+        const option = definition.type === "select" && Array.isArray(definition.options) ? definition.options.find((option) => option?.value === value) : null;
+        const displayValue = option ? localized(option.label, ctx.lang) || value : value;
+        return definition.type === "textarea" ? textarea("profile-preview-" + index, label, value, 'readonly autocomplete="off" spellcheck="false" rows="5"') : field("profile-preview-" + index, label, displayValue, "text", 'readonly autocomplete="off"');
       }).join("")}</div>` : "";
       const workflow = boundToProduct && current.workflow && typeof current.workflow === "object" && !Array.isArray(current.workflow) ? current.workflow : null;
       const variableEntries = workflow?.variables && typeof workflow.variables === "object" && !Array.isArray(workflow.variables) ? Object.entries(workflow.variables).filter(([name, value]) => /^[A-Z][A-Z0-9_]{0,63}$/.test(name) && typeof value === "string").slice(0, 64) : [];

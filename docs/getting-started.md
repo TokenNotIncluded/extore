@@ -130,7 +130,11 @@ Passkey 需要 HTTPS 或 localhost。更换域名 / RP ID 后，旧 Passkey 无�
 - **Webhook**：普通商品用 v1 `redemption.requested` 通知，外部服务按任务 ID 去重，再签名回调。流程节点用[私有 Worker v2](private-worker.md)，签名精确约束目标、方向、店铺、任务、尝试与节点，不把敏感执行信封放入普通事件。
 - **预设处理器**：只能选择 [TokenNotIncluded/extore-processors](https://github.com/TokenNotIncluded/extore-processors) 中的白名单预设。`processors/official` 是固定到主仓库记录提交的 Git 子模块，输入、输出和店铺配置结构由代码定义；店主在本店创建加密配置档案并绑定商品，不能上传程序、指定文件名或 Git 地址。发行卡密会保存配置档案的版本，改配置并更新商品绑定只影响后续发行的卡密；撤销档案会阻止旧版本继续执行。
 
-内置预设 `resource_link` 交付配置的 HTTPS 资源链接与说明，`personalized_text` 根据姓名生成模板文本。代码可初始化空步骤计划并逐步更新；已有商家计划不会被替换。固定离线执行需要 Linux、bubblewrap 0.12 及以上和 libseccomp，限制时间、单进程地址空间、CPU 与输出，禁止联网、派生程序或创建文件；隔离不可用时拒绝运行。商品流程不会增加这些能力。审核过的处理器仍可读取授予它的秘密，隔离不能阻止它泄漏已授权数据，代码审核与独立店铺配置仍必要。复杂文档和 PPT 由外部 AI 通过商品 CLI 队列处理、上传交付，不在这个离线预设内生成。
+商品处理器包括 `resource_link` 资源链接、`personalized_text` 个性化文本，以及四个实际场景：`csv_summary` 统计实验 CSV、`json_formatter` 校验 API 配置、`text_cleanup` 清理条目名单、`document_template` 生成项目或交付说明文本。详细选项、输入限制、CLI 配置步骤与离线示例见[商品处理器场景](processor-recipes.md)。
+
+先创建本店处理器配置，再在商品中选择对应处理器并绑定配置，之后发行卡密。顾客填完表单提交，worker 自动执行，领取页面显示进度与结果。输入、输出和教程由处理器定义，配置修订在制卡时固定。
+
+代码可初始化空步骤计划并逐步更新；已有商家计划不会被替换。固定离线执行需要 Linux、bubblewrap 0.12 及以上和 libseccomp，限制时间、单进程地址空间、CPU 与输出，禁止联网、派生程序或创建文件；隔离不可用时拒绝运行。商品流程不会增加这些能力。审核过的处理器仍可读取授予它的秘密，隔离不能阻止它泄漏已授权数据，代码审核与独立店铺配置仍必要。新增处理器只交付文本、Markdown 或 JSON，不读取附件。复杂文档和 PPT 由外部 AI 通过商品 CLI 队列处理、上传交付，不在这个离线预设内生成。
 
 多站点入口使用[签名兑换路由](proxy-routing.md)。浏览器本地验签后，由顾客明确选择固定发行站；普通旧卡密不会逐站试探。商家在发行站创建公开标识，再把公开路由配置交给入口站，见[路由配置](proxy-config.md)。
 

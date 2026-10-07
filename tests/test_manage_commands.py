@@ -289,6 +289,10 @@ def test_processor_catalog_and_public_source_named_commands(manager, monkeypatch
     assert {item["id"] for item in processors} == {
         "resource_link",
         "personalized_text",
+        "csv_summary",
+        "json_formatter",
+        "text_cleanup",
+        "document_template",
     }
     detail = run(manager, "processors", "--detail")["processors"]
     assert all("parameters" in item and "configuration" in item for item in detail)

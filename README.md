@@ -50,6 +50,8 @@ Extore 接手支付之后的兑换与交付：验证卡密，将顾客带到对�
 
 顾客上传的是兑换材料，管理者上传的是交付文件。预设处理器来自审核后固定版本的[开源子模块](https://github.com/TokenNotIncluded/extore-processors)，商家在预设中选择并填写配置。浏览器 AI 需要原生 WebMCP 支持及实际授权，具体兼容性见[工具文档](https://github.com/TokenNotIncluded/extore/blob/main/docs/webmcp.md#浏览器兼容性)。
 
+[商品处理器场景](https://github.com/TokenNotIncluded/extore/blob/main/docs/processor-recipes.md)提供可以直接配置的自动商品：实验 CSV 描述统计、API 配置 JSON 校验、条目名单去重、项目与交付说明文本模板。商家绑定本店配置并发行卡密，顾客填写后由 worker 自动处理；输入、教程与输出均由代码定义。它们离线交付文本、Markdown 或 JSON，无需 AI 领取任务。资源链接与个性化文本处理器继续保留。
+
 ## 兑换流程
 
 ```text
@@ -149,7 +151,7 @@ extore admin login --origin https://extore.example.com --email owner@example.com
 
 SMTP 凭据、TOTP 密钥与店铺处理器配置加密保存。店主可以回读、编辑明确声明为普通文本的交付模板与说明；账号密钥和未声明类型的配置只返回是否已设置。配置档案还支持普通工作流变量、只写秘密与运行资源上限，网页和店主 CLI 均可管理。已有卡密冻结整份档案修订，修改变量、秘密或资源上限不改变旧卡；处理器通过只读环境取得对应版本。[配置与工作流说明](https://github.com/TokenNotIncluded/extore/blob/main/docs/shops.md#工作流变量秘密与运行限制)
 
-内置商品处理器采用固定代码的离线运行环境，需要 Linux、bubblewrap 0.12 及以上（`bwrap`）、libseccomp 和可用的内核命名空间。当前只支持 stdin/stdout 文本与资源链接预设，执行时间、进程地址空间、CPU 与输出上限；禁止联网、fork、外部程序及创建文件。隔离不可用时拒绝执行，不降级为宿主直接运行。复杂文档和 PPT 仍由外部 AI 通过 CLI 队列处理并上传文件。商家不能增加命令、挂载或联网能力；处理器可读取授予的秘密，代码仍须审核，秘密不会自动进入交付模板。付款适配和受控支付服务尚未实现，现有预设不代表已完成真实付款。
+内置商品处理器采用固定代码的离线运行环境，需要 Linux、bubblewrap 0.12 及以上（`bwrap`）、libseccomp 和可用的内核命名空间。当前通过 stdin/stdout 处理文本、JSON、CSV 与资源链接，限制执行时间、进程地址空间、CPU 与输出；禁止联网、fork、外部程序及创建文件。隔离不可用时拒绝执行，不降级为宿主直接运行。复杂文档和 PPT 仍由外部 AI 通过 CLI 队列处理并上传文件。商家不能增加命令、挂载或联网能力；处理器可读取授予的秘密，代码仍须审核，秘密不会自动进入交付模板。付款适配和受控支付服务尚未实现，现有预设不代表已完成真实付款。
 
 设备码登录要求 **0.7.0 及以上**。网页可一键复制不含凭证的商品机器人提示词：机器人申请设备码，你在 `/cli/device` 输入短码，核对商品、权限、设备指纹与期限，再明确批准。主动商品申请不要求先创建管理链接；本店流水线只给队列权限，商品管理的额外权限须单独明确申请。既有商品管理链接通过 `--existing-link` 设备码流程绑定，浏览器与 CLI 绑定次数独立。[文档里的提示词](https://github.com/TokenNotIncluded/extore/blob/main/docs/ai-prompts.md)也可直接复制，配合已授权的 CLI 使用。上传只保存材料，提交或交付需明确执行下一步；持续运行机器人由接入方安排。
 
@@ -164,6 +166,7 @@ SMTP 凭据、TOTP 密钥与店铺处理器配置加密保存。店主可以回�
 | [CLI 指南](https://github.com/TokenNotIncluded/extore/blob/main/docs/cli.md) | 商品完整管理、卡密、授权、队列与私密输出 |
 | [顾客 CLI](https://github.com/TokenNotIncluded/extore/blob/main/docs/cli-customer.md) · [店主 CLI](https://github.com/TokenNotIncluded/extore/blob/main/docs/cli-owner.md) | 批量兑换、材料与交付；Passkey 设备批准和全店操作 |
 | [多店与账号](https://github.com/TokenNotIncluded/extore/blob/main/docs/shops.md) | 平台与店主边界、邮箱邀请、TOTP、SMTP、加密处理器配置与存储额度 |
+| [商品处理器场景](https://github.com/TokenNotIncluded/extore/blob/main/docs/processor-recipes.md) | 实验 CSV 统计、JSON 校验、名单清理、文档文本模板；配置、绑定与可执行示例 |
 | [可复制 AI 提示词](https://github.com/TokenNotIncluded/extore/blob/main/docs/ai-prompts.md) | 商品处理、店主运营与顾客领取的操作模板 |
 | [任务流程](https://github.com/TokenNotIncluded/extore/blob/main/docs/task-flow.md) · [一卡一文本](https://github.com/TokenNotIncluded/extore/blob/main/docs/text-stock.md) | 冻结的分步流程、当前题目、计时与敏感输入；按规格导入交付库存 |
 | [AI 队列处理](https://github.com/TokenNotIncluded/extore/blob/main/docs/automation-cli.md) | 原子领取、等待、断线恢复与按当前节点交付 |
