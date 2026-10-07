@@ -13,6 +13,7 @@
   const signedIn = (auth) => (owner(auth) || staff(auth)) && typeof auth.session_id === "string" && !!auth.session_id && auth.channel !== "cli";
   const authority = (auth) => JSON.stringify([auth?.role, auth?.shop_id, auth?.superadmin === true, auth?.role === "staff" ? auth.link_id : null, auth?.role === "staff" ? auth.product_id : null]);
   const permissions = {
+    "queue.monitor": ["只看进度看板（不含任务内容）", "View progress board only (no task content)"],
     "queue.view": ["查看商品队列", "View product queue"],
     "queue.process": ["领取任务、更新进度与交付", "Claim tasks, update progress and deliver"],
     "queue.retry": ["允许失败任务重试", "Allow failed tasks to retry"],
@@ -21,6 +22,8 @@
     "cards.manage": ["发行、查看与撤销卡密", "Issue, inspect and revoke codes"],
     "events.manage": ["查看事件与重新投递", "Inspect and redeliver events"],
     "links.delegate": ["创建与撤销下级管理链接", "Create and revoke delegated links"],
+    "product.delete": ["删除与恢复商品（保留旧卡密和任务）", "Delete and restore products (preserve existing codes and tasks)"],
+    "product.purge": ["彻底删除商品与清空回收站（不可恢复商品）", "Permanently remove products and empty trash (products cannot be restored)"],
   };
 
   function mount({ root, api, auth = {}, isCurrent = () => true, passkey, onAuth = () => {}, navigate = (url) => { window.location.href = url; }, language = "zh-CN" } = {}) {
@@ -120,7 +123,7 @@
     const signature = (value) => JSON.stringify([value.request.request_id, normalizeCode(value.request.user_code), value.request.client_name, value.request.fingerprint, value.request.product_id, value.request.expires, scopeSignature(value.selected), value.snapshot_digest]);
     const changed = (previous, next, allowSessionDigestRefresh = false) => signature(previous) !== signature(next) || (!allowSessionDigestRefresh && previous.review_digest !== next.review_digest);
     const changedMessage = () => tr("授权信息已改变。请重新核对下面的设备与权限，再决定是否授权。", "Authorization details changed. Review the device and permissions below before deciding again.");
-    const queuePermissions = ["queue.view", "queue.process", "queue.retry"];
+    const queuePermissions = ["queue.view", "queue.process", "queue.retry", "queue.monitor"];
     const uniqueStrings = (values, valid, minimum = 1, maximum = 500) => Array.isArray(values) && values.length >= minimum && values.length <= maximum && new Set(values).size === values.length && values.every((value) => typeof value === "string" && valid(value));
     const subset = (values, allowed) => values.every((value) => allowed.includes(value));
     const sameSet = (left, right) => left.length === right.length && subset(left, right);

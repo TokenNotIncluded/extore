@@ -403,6 +403,29 @@ async function activeReview(p, value, draft = {}) {
   return reviewed;
 }
 
+test("monitor-only pipeline approval does not require or add task-content access", async () => {
+  const p = fixture({ auth: shopAuth }), value = activeOptions();
+  value.request.requested_permissions = ["queue.monitor"];
+  value.selected.permissions = ["queue.monitor"];
+  await activeReview(p, value);
+  assert.equal(p.instance.state, "review");
+  assert.match(p.root.innerHTML, /只看进度看板（不含任务内容）/);
+  assert.deepEqual(Array.from(p.requests[3].body.permissions), ["queue.monitor"]);
+  assert.equal(p.node("#device-permission-queue-view"), undefined);
+  assert.equal(p.requests.some((request) => request.url.endsWith("/approve")), false);
+});
+test("explicit single-product delete and purge permissions can be reviewed without extra rights", async () => {
+  const p = fixture({ auth: shopAuth }), value = activeOptions({ kind: "product" });
+  value.request.requested_permissions = ["product.delete", "product.purge"];
+  value.selected.permissions = ["product.delete", "product.purge"];
+  await activeReview(p, value);
+  assert.equal(p.instance.state, "review");
+  assert.match(p.root.innerHTML, /删除与恢复商品/);
+  assert.match(p.root.innerHTML, /彻底删除商品/);
+  assert.deepEqual(Array.from(p.requests[3].body.permissions), ["product.delete", "product.purge"]);
+  assert.equal(p.requests.some((request) => request.url.endsWith("/approve")), false);
+});
+
 test("active shop request freezes current products and allows explicit smaller selection", async () => {
   const p = fixture({ auth: shopAuth }), value = activeOptions();
   const reviewed = await activeReview(p, value, { product_ids: [ids.product], permissions: ["queue.view", "queue.process"] });
@@ -489,6 +512,8 @@ test("active requests reject unauthorized, dynamic, cross-shop and non-queue sco
     (value) => { value.request.kind = "owner.admin"; },
     (value) => { value.request.requested_product_ids = ["*"]; },
     (value) => { value.request.requested_permissions.push("cards.manage"); value.selected.permissions.push("cards.manage"); },
+    (value) => { value.request.requested_permissions.push("product.delete"); value.selected.permissions.push("product.delete"); },
+    (value) => { value.request.requested_permissions.push("product.purge"); value.selected.permissions.push("product.purge"); },
     (value) => { value.products[1].mode = "script"; },
     (value) => { value.products[1].id = value.products[0].id; },
     (value) => { value.shop.id = "66666666-6666-4666-8666-666666666666"; },

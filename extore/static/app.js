@@ -16,6 +16,10 @@ let lang = preferences.resolved.language,
   deviceCliApproval = null,
   pipelineAuthView = null,
   proxyConfigView = null,
+  progressBoardController = null,
+  progressBoardShopId = "",
+  progressBoardProductId = "",
+  progressBoardView = "active",
   accountView = null,
   authStatus = {},
   waitingAnimationPaused = false,
@@ -570,7 +574,7 @@ window.addEventListener("popstate", start);
 window.addEventListener("hashchange", () => {
   if (location.pathname === "/cli/owner") start();
 });
-window.addEventListener("pagehide", () => { window.ExtoreTaskFlow?.dispose(app); ownerCliApproval?.dispose(); deviceCliApproval?.dispose(); pipelineAuthView?.dispose(); });
+window.addEventListener("pagehide", () => { window.ExtoreTaskFlow?.dispose(app); ownerCliApproval?.dispose(); deviceCliApproval?.dispose(); pipelineAuthView?.dispose(); progressBoardController?.dispose(); });
 
 async function home() {
   window.ExtoreTaskFlow?.dispose(app);
@@ -1261,8 +1265,14 @@ const permissionLabels = {
   "links.delegate": "创建与撤销下级管理链接",
   "product.delete": "删除与恢复商品（保留旧卡密和任务）",
   "product.purge": "彻底删除商品与清空回收站（不可恢复商品）",
+  "queue.monitor": "只看进度看板（不含任务内容）",
 };
 function acceptAuth(auth) {
+  if (JSON.stringify([authStatus.session_id, managementAuthority(), authStatus.permissions || []]) !== JSON.stringify([auth.session_id, managementAuthority(auth), auth.permissions || []])) {
+    progressBoardController?.dispose(); progressBoardController = null;
+    if (tab === "board" && $("#workspace")) $("#workspace").innerHTML = "";
+    progressBoardShopId = ""; progressBoardProductId = ""; progressBoardView = "active";
+  }
   const sameProductSession = role === auth.role && managedProductId === (auth.product_id || null) && authStatus.session_id && authStatus.session_id === auth.session_id;
   authStatus = auth;
   role = auth.role;
@@ -1290,10 +1300,11 @@ function managementTabs() {
   const items = [
     ["products", "商品", "product.edit"],
     ["jobs", "处理队列", "queue.view"],
+    ["board", tr("进度看板", "Progress board"), "queue.monitor"],
     ["cards", "卡密", "cards.manage"],
     ["staff", "管理链接", "links.delegate"],
     ["events", "事件记录", "events.manage"],
-  ].filter(([key, , permission]) => permitted(permission) || (key === "products" && (permitted("product.delete") || permitted("product.purge"))));
+  ].filter(([key, , permission]) => permitted(permission) || (key === "board" && permitted("queue.view")) || (key === "products" && (permitted("product.delete") || permitted("product.purge"))));
   items.push(["sessions", "会话与审计"]);
   if (role === "admin") {
     items.push(["security", "账户安全"], ["profiles", "商品处理器配置"], ["proxy", "兑换路由"]);
@@ -1302,10 +1313,12 @@ function managementTabs() {
   return items;
 }
 function shell() {
+  progressBoardController?.dispose(); progressBoardController = null;
   const items = managementTabs();
   if (!items.some(([key]) => key === tab)) tab = items[0]?.[0] || "";
   app.innerHTML = `<div class="admin-top"><div><h1>${role === "staff" ? "商品管理" : "商家后台"}</h1><p id="management-identity" class="muted">${esc(managementIdentity())}</p></div><button id="logout" class="secondary">退出登录</button></div><nav class="tabs" aria-label="管理导航">${items.map(([v, label]) => `<button data-tab="${v}" class="${tab === v ? "active" : ""}">${label}</button>`).join("")}</nav><div id="workspace"></div>`;
   on("#logout", async () => {
+    progressBoardController?.dispose(); progressBoardController = null;
     await api("/auth/logout", {});
     navigate("/admin");
   });
@@ -1318,6 +1331,7 @@ function shell() {
   );
 }
 async function renderTab() {
+  progressBoardController?.dispose(); progressBoardController = null;
   proxyConfigView?.dispose();
   proxyConfigView = null;
   pipelineAuthView?.dispose();
@@ -1336,12 +1350,29 @@ async function renderTab() {
     await renderProducts();
   }
   if (tab === "jobs") await renderJobs();
+  if (tab === "board") renderProgressBoard();
   if (tab === "cards") await renderCards();
   if (tab === "staff") await renderStaff();
   if (tab === "events") await renderEvents();
   if (["security", "shops", "mail", "profiles"].includes(tab)) renderAccountTab();
   if (tab === "sessions") await renderSessions();
   if (tab === "proxy") renderProxyConfig();
+}
+function renderProgressBoard() {
+  if (!permitted("queue.monitor") && !permitted("queue.view")) return;
+  const generation = queueLoadId, pathname = location.pathname, authority = managementAuthority(), sessionId = authStatus.session_id;
+  const granted = JSON.stringify(permissions), options = managementOptions();
+  const active = () => generation === queueLoadId && tab === "board" && location.pathname === pathname && managementAuthority() === authority && authStatus.session_id === sessionId && JSON.stringify(permissions) === granted;
+  if (!window.ExtoreProgressBoard) throw new Error(tr("进度看板未加载，请刷新页面。", "The progress board did not load. Refresh the page."));
+  progressBoardController = window.ExtoreProgressBoard.mount({
+    root: $("#workspace"), auth: { ...authStatus, permissions: [...permissions] },
+    platform: authStatus.role === "admin" && authStatus.superadmin === true && authStatus.shop_id == null,
+    shopId: progressBoardShopId, productId: progressBoardProductId, view: progressBoardView,
+    language: () => lang, isCurrent: active,
+    api: (path, body, method, extra = {}) => api(path, body, method, { ...options, ...extra }),
+    onFilters: (filters) => { if (!active()) return; progressBoardShopId = filters.shopId; progressBoardProductId = filters.productId; progressBoardView = filters.view; window.ExtoreWebMCP?.refresh(); },
+    copyPrompt: (promptOptions, host, current) => copyCLIPrompt({ origin: location.origin, ...promptOptions }, host, current),
+  });
 }
 function renderProxyConfig() {
   const generation = queueLoadId, pathname = location.pathname;
@@ -1389,7 +1420,7 @@ async function copyManagementLink(url, input, isCurrent = () => true) {
   return false;
 }
 async function copyCLIPrompt(options, host, isCurrent = () => true) {
-  const buildPrompt = options.processorWorkflow ? window.ExtoreCliPrompts.buildProcessorWorkflow : options.owner ? window.ExtoreCliPrompts.buildOwner : window.ExtoreCliPrompts.build;
+  const buildPrompt = options.boardOnly ? window.ExtoreCliPrompts.buildBoard : options.processorWorkflow ? window.ExtoreCliPrompts.buildProcessorWorkflow : options.owner ? window.ExtoreCliPrompts.buildOwner : window.ExtoreCliPrompts.build;
   const prompt = buildPrompt({ language: lang, ...options, deviceCode: !options.owner });
   if (!isCurrent()) return;
   host.innerHTML = `<div class="field"><label for="cli-ai-prompt">${tr("给 AI 的 CLI 提示词", "CLI prompt for AI")}</label><textarea id="cli-ai-prompt" readonly spellcheck="false" rows="12">${esc(prompt)}</textarea></div><p class="caption">${options.owner ? tr("不含授权凭证。首次登录须由商家核对设备，再用 Passkey 明确批准全店管理权限。", "No credentials are included. The merchant must review the device and explicitly approve full shop access with a Passkey at first login.") : tr("不含授权凭证。AI 会显示设备码，请你在浏览器核对商品和权限后授权。", "No credentials are included. The AI displays a device code for you to review the product and permissions in your browser.")}</p>`;
@@ -1827,7 +1858,7 @@ async function renderStaff(requestedView = linkView) {
   const defaultDays =
     role === "staff" ? Math.min(7, Math.floor(remainingDays * 100) / 100) : 7;
   $("#workspace").innerHTML =
-    `<h2>商品管理链接</h2><p class="caption">一条链接只授权一个商品。可以分别授予队列、商品配置、卡密等权限；店长可获得该商品的完整管理权限。默认可绑定浏览器一次、CLI 一次；已登录的会话可继续使用。链接是登录凭证，请私下交给管理者。</p>${role === "staff" ? '<p class="caption">你只能创建权限比自己更小的下级链接，有效期也不能超过自己的链接。</p>' : ""}<form id="form"><div class="grid">${field("staff-name", "管理者或链接名称")}<div class="field"><label for="staff-product">授权商品</label><select id="staff-product" ${role === "staff" ? "disabled" : ""}>${productOptions()}</select></div>${field("staff-days", "有效天数", defaultDays, "number")}${field("staff-max-uses", "浏览器绑定次数", 1, "number")}${field("staff-max-cli-uses", "CLI 绑定次数", 1, "number")}</div><fieldset class="permission-fields"><legend>权限范围</legend><div class="permission-presets"><button type="button" id="preset-view" class="secondary">只看队列</button><button type="button" id="preset-process" class="secondary">处理任务</button>${role === "admin" ? '<button type="button" id="preset-manager" class="secondary">店长：完全管理商品</button>' : ""}</div><div class="permission-grid">${availablePermissions.map((key) => `<label><input type="checkbox" name="link-permission" value="${key}" ${["queue.view", "queue.process"].includes(key) ? "checked" : ""}>${permissionLabels[key]}</label>`).join("")}</div><p class="caption">“创建下级管理链接”允许继续委派。下级必须少至少一项权限，不能扩大商品范围或有效期。撤销上级链接会同时撤销全部下级。</p></fieldset><button type="submit" class="full" ${products.length ? "" : "disabled"}>创建管理链接</button><div id="error" class="error" role="alert"></div></form><div id="staff-link"></div><div class="form-divider toolbar"><div class="field"><label for="links-view">链接记录</label><select id="links-view"><option value="active" ${selectedView === "active" ? "selected" : ""}>活动链接</option><option value="history" ${selectedView === "history" ? "selected" : ""}>撤销与过期历史</option><option value="all" ${selectedView === "all" ? "selected" : ""}>全部（含已清理）</option></select></div><button id="links-cleanup-preview" class="secondary">预览清理旧链接</button></div><div id="links-cleanup"></div><div id="maintenance-confirmation"></div><div class="form-divider table-wrap"><table><thead><tr><th>管理链接</th><th>商品</th><th>权限</th><th>有效期</th><th>登录次数</th><th></th></tr></thead><tbody>${links.map((link) => `<tr><td>${esc(link.name)}${link.parent_id ? '<div class="caption">下级链接</div>' : ""}</td><td>${esc(products.find((p) => p.id === link.product_id)?.name || link.product_id)}</td><td>${(link.permissions || []).map((key) => esc(permissionLabels[key] || key)).join("<br>")}</td><td>${link.revoked ? "已撤销" : new Date(link.expires * 1000).toLocaleString()}</td><td>浏览器 ${link.uses || 0} / ${link.max_uses || 1}<p class="caption">剩余 ${link.remaining_uses ?? Math.max(0, (link.max_uses || 1) - (link.uses || 0))} 次</p>CLI ${link.cli_uses || 0} / ${link.max_cli_uses || 1}<p class="caption">剩余 ${link.remaining_cli_uses ?? Math.max(0, (link.max_cli_uses || 1) - (link.cli_uses || 0))} 次</p></td><td>${!link.revoked ? `<button data-revoke="${esc(link.id)}" class="danger">撤销</button>` : ""}</td></tr>`).join("")}</tbody></table></div>`;
+    `<h2>商品管理链接</h2><p class="caption">一条链接只授权一个商品。可以分别授予队列、商品配置、卡密等权限；店长可获得该商品的完整管理权限。默认可绑定浏览器一次、CLI 一次；已登录的会话可继续使用。链接是登录凭证，请私下交给管理者。</p>${role === "staff" ? '<p class="caption">你只能创建权限比自己更小的下级链接，有效期也不能超过自己的链接。</p>' : ""}<form id="form"><div class="grid">${field("staff-name", "管理者或链接名称")}<div class="field"><label for="staff-product">授权商品</label><select id="staff-product" ${role === "staff" ? "disabled" : ""}>${productOptions()}</select></div>${field("staff-days", "有效天数", defaultDays, "number")}${field("staff-max-uses", "浏览器绑定次数", 1, "number")}${field("staff-max-cli-uses", "CLI 绑定次数", 1, "number")}</div><fieldset class="permission-fields"><legend>权限范围</legend><div class="permission-presets">${availablePermissions.includes("queue.monitor") ? `<button type="button" id="preset-monitor" class="secondary">${tr("只看进度", "Progress only")}</button>` : ""}<button type="button" id="preset-view" class="secondary">只看队列</button><button type="button" id="preset-process" class="secondary">处理任务</button>${role === "admin" ? '<button type="button" id="preset-manager" class="secondary">店长：完全管理商品</button>' : ""}</div><div class="permission-grid">${availablePermissions.map((key) => `<label><input type="checkbox" name="link-permission" value="${key}" ${["queue.view", "queue.process"].includes(key) ? "checked" : ""}>${permissionLabels[key]}</label>`).join("")}</div><p class="caption">“创建下级管理链接”允许继续委派。下级必须少至少一项权限，不能扩大商品范围或有效期。撤销上级链接会同时撤销全部下级。</p></fieldset><button type="submit" class="full" ${products.length ? "" : "disabled"}>创建管理链接</button><div id="error" class="error" role="alert"></div></form><div id="staff-link"></div><div class="form-divider toolbar"><div class="field"><label for="links-view">链接记录</label><select id="links-view"><option value="active" ${selectedView === "active" ? "selected" : ""}>活动链接</option><option value="history" ${selectedView === "history" ? "selected" : ""}>撤销与过期历史</option><option value="all" ${selectedView === "all" ? "selected" : ""}>全部（含已清理）</option></select></div><button id="links-cleanup-preview" class="secondary">预览清理旧链接</button></div><div id="links-cleanup"></div><div id="maintenance-confirmation"></div><div class="form-divider table-wrap"><table><thead><tr><th>管理链接</th><th>商品</th><th>权限</th><th>有效期</th><th>登录次数</th><th></th></tr></thead><tbody>${links.map((link) => `<tr><td>${esc(link.name)}${link.parent_id ? '<div class="caption">下级链接</div>' : ""}</td><td>${esc(products.find((p) => p.id === link.product_id)?.name || link.product_id)}</td><td>${(link.permissions || []).map((key) => esc(permissionLabels[key] || key)).join("<br>")}</td><td>${link.revoked ? "已撤销" : new Date(link.expires * 1000).toLocaleString()}</td><td>浏览器 ${link.uses || 0} / ${link.max_uses || 1}<p class="caption">剩余 ${link.remaining_uses ?? Math.max(0, (link.max_uses || 1) - (link.uses || 0))} 次</p>CLI ${link.cli_uses || 0} / ${link.max_cli_uses || 1}<p class="caption">剩余 ${link.remaining_cli_uses ?? Math.max(0, (link.max_cli_uses || 1) - (link.cli_uses || 0))} 次</p></td><td>${!link.revoked ? `<button data-revoke="${esc(link.id)}" class="danger">撤销</button>` : ""}</td></tr>`).join("")}</tbody></table></div>`;
   on("#links-view", () => renderStaff($("#links-view").value), "change");
   on("#links-cleanup-preview", async () => {
     if (!active()) return;
@@ -1858,6 +1889,7 @@ async function renderStaff(requestedView = linkView) {
     document
       .querySelectorAll('[name="link-permission"]')
       .forEach((node) => (node.checked = selected.includes(node.value)));
+  on("#preset-monitor", () => choosePermissions(["queue.monitor"]));
   on("#preset-view", () => choosePermissions(["queue.view"]));
   on("#preset-process", () =>
     choosePermissions(["queue.view", "queue.process"]),
@@ -2066,6 +2098,7 @@ async function staff() {
   await renderTab();
 }
 async function start() {
+  progressBoardController?.dispose(); progressBoardController = null;
   proxyConfigView?.dispose();
   proxyConfigView = null;
   window.ExtoreTaskFlow?.dispose(app);
@@ -2169,6 +2202,9 @@ window.ExtoreWebMCP?.configure({
     cardProductId,
     queueProductId,
     queueView,
+    progressBoardShopId,
+    progressBoardProductId,
+    progressBoardView,
     batch: Boolean(currentBatch),
     cardId: batchSelection || "",
     queueProduct,
