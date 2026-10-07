@@ -1,0 +1,56 @@
+.cards-workspace { min-width: 0; }
+.cards-workspace button, .cards-workspace summary, .cards-workspace select { min-height: 44px; }
+.cards-workspace input, .cards-workspace select { font-size: 16px; }
+.cards-workspace [hidden] { display: none !important; }
+.cards-workspace .cards-summary { display: flex; flex-wrap: wrap; gap: 1rem 2.5rem; margin-top: 1.5rem; }
+.cards-workspace .cards-metric { display: flex; align-items: baseline; gap: .6rem; padding: 0; }
+.cards-workspace .cards-metric h2 { font-size: 1.3rem; font-variant-numeric: tabular-nums; }
+.cards-workspace .card-variant-summary { margin-block: 1rem 1.5rem; }
+.cards-workspace .card-variant-metric { padding-block: .8rem; }
+.cards-workspace .card-variant-metric h3, .cards-workspace .card-variant-metric p { margin: 0; }
+.cards-library { margin-top: 2.5rem; }
+.cards-library-heading { display: flex; align-items: start; justify-content: space-between; flex-wrap: wrap; gap: 1rem; margin-bottom: 1.5rem; }
+.cards-library-heading h3 { margin: 0 0 .35rem; overflow-wrap: anywhere; }
+.cards-library-heading p { margin: 0; max-width: 65ch; }
+.cards-library-heading .actions { margin: 0; }
+.cards-filter-grid { display: flex; align-items: end; flex-wrap: wrap; gap: .75rem 1rem; }
+.cards-filter-grid .field { flex: 1 1 150px; min-width: 0; margin-bottom: .75rem; }
+.cards-filter-grid .cards-search-field { flex: 3 1 250px; }
+.cards-folder-list { list-style: none; margin: 1.5rem 0 0; padding: 0; }
+.cards-folder-row { display: flex; align-items: center; gap: 1rem; border-bottom: 1px dashed var(--line); }
+.cards-folder-open { display: flex; align-items: center; gap: 1.25rem; flex: 1 1 auto; min-width: 0; padding: 1.4rem .65rem; text-align: start; border-radius: 0; background: transparent; color: var(--ink); font-weight: 400; }
+.cards-folder-open:hover { background: var(--warm); }
+.cards-folder-icon { display: block; flex: 0 0 40px; width: 40px; height: 32px; color: var(--green); }
+.cards-folder-copy { display: flex; flex-direction: column; gap: .2rem; min-width: 0; }
+.cards-folder-copy strong { font-size: 1.03rem; font-weight: 600; overflow-wrap: anywhere; }
+.cards-folder-counts { font-size: .9rem; font-variant-numeric: tabular-nums; overflow-wrap: anywhere; }
+.cards-folder-counts > span { margin-inline: .35rem; color: var(--muted); }
+.cards-folder-meta { color: var(--muted); font-size: .8rem; overflow-wrap: anywhere; }
+.cards-folder-arrow { margin-inline-start: auto; padding-inline: .5rem; color: var(--green); }
+.cards-folder-tools { display: flex; gap: .5rem; align-items: center; flex: 0 0 auto; }
+.cards-folder-remove { padding-inline: .65rem; background: transparent; color: var(--red); font-weight: 500; }
+.cards-folder-remove:hover { background: var(--danger-bg); }
+.cards-folder-empty { padding-block: 2.5rem; border-bottom: 1px dashed var(--line); }
+.cards-folder-empty h4 { margin: 0 0 .5rem; font-size: 1.1rem; }
+.cards-folder-empty p { margin: 0; }
+.cards-batch-review { margin-block: 1.5rem; padding-block: 1.25rem; border-block: 1px dashed var(--line); }
+.cards-batch-review h4 { margin: 0; font-size: 1.1rem; overflow-wrap: anywhere; }
+.cards-batch-review > p { max-width: 65ch; overflow-wrap: anywhere; }
+.cards-review-counts { display: flex; flex-wrap: wrap; gap: .5rem 2rem; }
+.cards-review-counts > div { display: flex; align-items: baseline; gap: .65rem; }
+.cards-review-counts dt { color: var(--muted); }
+.cards-review-counts dd { margin: 0; font-weight: 600; font-variant-numeric: tabular-nums; }
+.cards-workspace :focus-visible { outline: 2px solid var(--green); outline-offset: 3px; }
+@media (max-width: 760px) {
+  .cards-library-heading { gap: .75rem; }
+  .cards-library-heading .actions { flex-basis: 100%; }
+  .cards-workspace .cards-summary { gap: .6rem 1.5rem; }
+  .cards-filter-grid .cards-search-field { flex-basis: 100%; }
+  .cards-folder-row { flex-wrap: wrap; gap: 0; padding-block: .35rem .75rem; }
+  .cards-folder-open { flex-basis: 100%; padding-block: .85rem; gap: .85rem; }
+  .cards-folder-tools { margin-inline-start: calc(40px + 1.5rem); }
+  .cards-folder-counts > span { margin-inline: .15rem; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .cards-workspace * { animation: none !important; transition: none !important; }
+}

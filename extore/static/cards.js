@@ -94,6 +94,9 @@
     let variants = productVariants();
     let issueVariant = "";
     let inventoryVariant = "";
+    let selectedBatch = null;
+    let batchView = "active";
+    let previewGeneration = 0;
     let offset = 0;
     const limit = 50;
     const endpoint = role === "staff" ? "/manage" : "/admin";
@@ -110,6 +113,7 @@
       dispose() {
         disposed = true;
         generation++;
+        previewGeneration++;
         read?.abort();
         lifetime.abort();
         textImport?.dispose();
@@ -117,7 +121,7 @@
     };
     active = instance;
     if (!current()) return instance;
-    workspace.innerHTML = `<div class="section-head"><h2>卡密管理</h2><button id="cards-refresh" class="secondary" ${products.length ? "" : "disabled"}>刷新</button></div>
+    workspace.innerHTML = `<section class="cards-workspace"><div class="section-head"><h2>${tr("卡密管理", "Redemption codes")}</h2><button id="cards-refresh" class="secondary" ${products.length ? "" : "disabled"}>${tr("刷新", "Refresh")}</button></div>
       <div class="field"><label for="cards-product">选择商品</label><select id="cards-product" ${role === "staff" || !products.length ? "disabled" : ""}>${products.map((product) => `<option value="${escape(product.id)}" ${product.id === selected ? "selected" : ""}>${escape(product.name)}${productDeleted(product) ? tr(" · 已删除", " · Deleted") : ""}</option>`).join("")}</select></div>
       <p id="cards-product-notice" class="caption" role="status" aria-live="polite"></p>
       <div id="cards-error" class="error" role="alert"></div>
@@ -127,16 +131,16 @@
       <div id="cards-text-import"></div><details id="cards-regular-issue" class="panel"><summary>发行一批卡密</summary><p class="caption">卡密原文只在本次生成时显示。离开页面后不能找回，请立即下载保存。</p>
         <form id="cards-issue"><div class="grid"><div class="field"><label for="cards-issue-variant">${tr("制卡规格", "Variant to issue")}</label><select id="cards-issue-variant" required></select><p id="cards-issue-help" class="caption"></p></div><div class="field"><label for="cards-count">数量</label><input id="cards-count" type="number" min="1" max="1000" step="1" value="10" required></div><div class="field"><label for="cards-label">批次标签（可选）</label><input id="cards-label" maxlength="100" placeholder="例如：十月活动"></div><div class="field"><label for="cards-expires">兑换截止时间（可选，本地时间）</label><input id="cards-expires" type="datetime-local"></div></div><button id="cards-issue-submit" type="submit" class="full">生成卡密</button></form>
       </details><div id="cards-codes" class="secret-output"></div>
-      <div class="form-divider"><h3>卡密库存与使用情况</h3><form id="cards-filter"><div class="grid"><div class="field"><label for="cards-variant">${tr("查看规格", "Filter by variant")}</label><select id="cards-variant"></select></div><div class="field"><label for="cards-status">状态</label><select id="cards-status"><option value="">全部状态</option>${Object.entries(
+      <div class="cards-library"><div class="cards-library-heading"><div><h3 id="cards-library-title">${tr("卡密批次", "Code batches")}</h3><p id="cards-library-note" class="caption">${tr("按发行批次整理，打开文件夹查看卡密。", "Organized by issue batch. Open a folder to view its codes.")}</p></div><div class="actions"><button id="cards-back" class="secondary" hidden>${tr("返回批次", "Back to batches")}</button><button id="cards-folder-action" class="danger" hidden>${tr("删除批次", "Delete batch")}</button></div></div><form id="cards-filter"><div class="cards-filter-grid"><div class="field"><label for="cards-view">${tr("批次视图", "Batch view")}</label><select id="cards-view"><option value="active">${tr("有效批次", "Active batches")}</option><option value="deleted">${tr("回收站", "Trash")}</option></select></div><div class="field"><label for="cards-variant">${tr("查看规格", "Filter by variant")}</label><select id="cards-variant"></select></div><div id="cards-status-field" class="field" hidden><label for="cards-status">${tr("状态", "Status")}</label><select id="cards-status"><option value="">${tr("全部状态", "All statuses")}</option>${Object.entries(
         labels,
       )
         .map(([value, label]) => `<option value="${value}">${label}</option>`)
         .join(
           "",
-        )}</select></div><div class="field"><label for="cards-batch">批次 ID</label><input id="cards-batch" maxlength="100" placeholder="留空查看全部批次"></div><div class="field"><label for="cards-search">卡密 ID 或尾号</label><input id="cards-search" maxlength="128" autocomplete="off" placeholder="不需要输入完整卡密"></div></div><div class="actions"><button type="submit" class="secondary">筛选</button><button id="cards-reset" type="button" class="secondary">清空筛选</button></div></form>
-      <div id="cards-inventory" aria-live="polite"></div><div class="toolbar"><button id="cards-previous" class="secondary" disabled>上一页</button><span id="cards-page" class="caption"></span><button id="cards-next" class="secondary" disabled>下一页</button></div></div><div id="cards-history"></div>`
+        )}</select></div><div class="field cards-search-field"><label id="cards-search-label" for="cards-search">${tr("批次标签、卡密 ID 或尾号", "Batch label, code ID or suffix")}</label><input id="cards-search" maxlength="128" autocomplete="off" placeholder="${tr("搜索此商品的批次", "Search this product's batches")}"></div></div><div class="actions"><button type="submit" class="secondary">${tr("筛选", "Filter")}</button><button id="cards-reset" type="button" class="secondary">${tr("清空筛选", "Clear filters")}</button></div></form>
+      <div id="cards-batch-review" class="cards-batch-review" role="region" aria-label="${tr("批次操作确认", "Review batch action")}" hidden></div><div id="cards-inventory" aria-live="polite"></div><div class="toolbar"><button id="cards-previous" class="secondary" disabled>${tr("上一页", "Previous")}</button><span id="cards-page" class="caption"></span><button id="cards-next" class="secondary" disabled>${tr("下一页", "Next")}</button></div></div><div id="cards-history"></div>`
           : '<div class="empty">先创建商品，再发行卡密。</div>'
-      }`;
+      }</section>`;
     if (!products.length) return instance;
     onContextChange(selected);
 
@@ -231,7 +235,13 @@
       }
       textImport = window.ExtoreTextCards.mount({
         root: node("#cards-text-import"), api, endpoint, product, variants,
-        isCurrent: current, onBusy: setBusy, onIssued: () => load(),
+        isCurrent: current, onBusy: setBusy, onIssued: () => {
+          selectedBatch = null;
+          batchView = "active";
+          node("#cards-view").value = batchView;
+          offset = 0;
+          return load();
+        },
       });
     };
     const perform = async (callback, mutation = false) => {
@@ -262,13 +272,16 @@
       });
       for (const [key, selector] of [
         ["variant_id", "#cards-variant"],
-        ["status", "#cards-status"],
-        ["batch_id", "#cards-batch"],
         ["search", "#cards-search"],
       ]) {
         const value = node(selector).value.trim();
         if (value) params.set(key, value);
       }
+      if (selectedBatch) {
+        params.set("batch_id", selectedBatch.id);
+        const state = node("#cards-status").value;
+        if (state) params.set("status", state);
+      } else params.set("view", batchView);
       return params;
     };
     const overview = (stats) => {
@@ -280,8 +293,9 @@
         ["正在处理", "in_progress"],
       ];
       node("#cards-stats").innerHTML =
-        `<div class="grid cards-summary">${metrics.map(([label, key]) => `<div class="panel cards-metric"><p class="caption">${label}</p><h2>${count(summary[key])}</h2></div>`).join("")}</div>
+        `<div class="cards-summary">${metrics.map(([label, key]) => `<div class="cards-metric"><p class="caption">${label}</p><h2>${count(summary[key])}</h2></div>`).join("")}</div>
         <p class="caption">剩余未兑换包含未提交及需要重试的有效卡密（${count(summary.states?.needs_input)} 张），已退回的卡密不计入已使用。处理失败、可重试的卡密 ${count(summary.states?.failed_retryable)} 张另行统计，不计入未兑换数量。</p>
+        <p class="caption">${tr("商品统计包含已归档的任务卡密；下方文件夹只列当前视图。", "Product totals include archived task codes; folders below show the current view.")}</p>
         <p class="caption">已验码 ${count(summary.verified)} · 已领取 ${count(summary.viewed)} · 已完成 ${count(summary.completed)} · 失败 ${count(summary.failed)} · 已拒绝 ${count(summary.rejected)} · 已撤销 ${count(summary.states?.revoked)} · 已过期 ${count(summary.states?.expired)}</p>`;
       if (Array.isArray(stats.variants) && stats.variants.length) {
         const total = stats.variants.reduce(
@@ -293,7 +307,7 @@
           0,
         );
         node("#cards-stats").innerHTML +=
-          `<details class="card-variant-summary" open><summary>${tr("各规格卡密统计", "Codes by variant")}</summary><div class="card-variant-grid">${stats.variants.map((variant) => `<article class="panel card-variant-metric"><h3>${escape(variant.name)}</h3><p class="caption">${escape(variantPrice(variant))}${variant.enabled === false ? tr(" · 已停用", " · Disabled") : ""}</p><dl class="card-variant-counts"><div><dt>${tr("总发行", "Issued")}</dt><dd>${count(variant.summary?.total)}</dd></div><div><dt>${tr("未兑换卡密", "Unredeemed")}</dt><dd>${count(variant.summary?.remaining)}</dd></div></dl></article>`).join("")}</div><p class="caption">${tr(`规格合计：总发行 ${count(total)} 张，未兑换 ${count(remaining)} 张；均计入上方商品总量。`, `Variant totals: ${count(total)} issued, ${count(remaining)} unredeemed; included in the product totals above.`)}</p></details>`;
+          `<details class="card-variant-summary"><summary>${tr("各规格卡密统计", "Codes by variant")}</summary><div class="card-variant-grid">${stats.variants.map((variant) => `<article class="card-variant-metric"><h3>${escape(variant.name)}</h3><p class="caption">${escape(variantPrice(variant))}${variant.enabled === false ? tr(" · 已停用", " · Disabled") : ""}</p><dl class="card-variant-counts"><div><dt>${tr("总发行", "Issued")}</dt><dd>${count(variant.summary?.total)}</dd></div><div><dt>${tr("未兑换卡密", "Unredeemed")}</dt><dd>${count(variant.summary?.remaining)}</dd></div></dl></article>`).join("")}</div><p class="caption">${tr(`规格合计：总发行 ${count(total)} 张，未兑换 ${count(remaining)} 张；均计入上方商品总量。`, `Variant totals: ${count(total)} issued, ${count(remaining)} unredeemed; included in the product totals above.`)}</p></details>`;
       }
     };
     const showInventory = (inventory) => {
@@ -338,7 +352,109 @@
         );
       if (busy) setBusy(true);
     };
+    const clearReview = () => {
+      previewGeneration++;
+      node("#cards-batch-review").innerHTML = "";
+      node("#cards-batch-review").hidden = true;
+    };
+    const batchUrl = (id, suffix = "") =>
+      `${endpoint}/card-batches/${encodeURIComponent(id)}${suffix}?product_id=${encodeURIComponent(selected)}`;
+    const updateLibrary = () => {
+      const inside = Boolean(selectedBatch);
+      node("#cards-back").hidden = !inside;
+      node("#cards-folder-action").hidden = !inside;
+      node("#cards-status-field").hidden = !inside;
+      node("#cards-library-title").textContent = inside
+        ? selectedBatch.label || tr("未命名批次", "Untitled batch")
+        : batchView === "deleted" ? tr("批次回收站", "Batch trash") : tr("卡密批次", "Code batches");
+      node("#cards-library-note").textContent = inside
+        ? tr("此文件夹只显示卡密使用情况，不包含原文或交付内容。", "This folder shows code usage, without original codes or delivery content.")
+        : batchView === "deleted"
+          ? tr("已删除批次可恢复，或预览后永久清理。", "Restore deleted batches, or review them before permanent cleanup.")
+          : tr("按发行批次整理，打开文件夹查看卡密。", "Organized by issue batch. Open a folder to view its codes.");
+      node("#cards-folder-action").textContent = batchView === "deleted"
+        ? tr("永久清理批次", "Permanently clean batch") : tr("删除批次", "Delete batch");
+      node("#cards-search-label").textContent = inside
+        ? tr("卡密 ID 或尾号", "Code ID or suffix") : tr("批次标签、卡密 ID 或尾号", "Batch label, code ID or suffix");
+      node("#cards-search").placeholder = inside
+        ? tr("不需要输入完整卡密", "No complete code needed") : tr("搜索此商品的批次", "Search this product's batches");
+    };
+    const openBatch = async (batch) => {
+      selectedBatch = { ...batch, label: batch.label || (batch.legacy ? tr("历史卡密", "Legacy codes") : tr("未命名批次", "Untitled batch")) };
+      offset = 0;
+      node("#cards-search").value = "";
+      node("#cards-status").value = "";
+      node("#cards-history").innerHTML = "";
+      updateLibrary();
+      await load();
+    };
+    const restoreBatch = async (batch) => {
+      await api(batchUrl(batch.id, "/restore"), {}, "POST", { signal: lifetime.signal });
+      if (!current()) return;
+      selectedBatch = null;
+      node("#cards-history").innerHTML = "";
+      offset = 0;
+      await load();
+    };
+    const reviewBatch = async (batch) => {
+      clearReview();
+      const scope = selected;
+      const view = batchView;
+      const requestGeneration = generation;
+      const reviewGeneration = previewGeneration;
+      const purge = view === "deleted";
+      const preview = await api(batchUrl(batch.id, purge ? "/purge-preview" : "/delete-preview"), {}, "POST", { signal: lifetime.signal });
+      if (!current() || scope !== selected || view !== batchView || requestGeneration !== generation || reviewGeneration !== previewGeneration) return;
+      if (typeof preview.revision !== "string" || !preview.revision)
+        throw new Error(tr("没有收到批次修订，请刷新后重试。", "No batch revision received. Refresh and try again."));
+      const label = preview.batch?.label || batch.label || tr("未命名批次", "Untitled batch");
+      const review = node("#cards-batch-review");
+      review.hidden = false;
+      review.innerHTML = `<h4>${purge ? tr("永久清理", "Permanent cleanup") : tr("移入回收站", "Move to trash")} · ${escape(label)}</h4><dl class="cards-review-counts">${purge
+        ? `<div><dt>${tr("永久删除", "Permanently delete")}</dt><dd>${count(preview.delete_count)}</dd></div>`
+        : `<div><dt>${tr("停止兑换", "Stop redemption")}</dt><dd>${count(preview.revocable_count)}</dd></div>`}<div><dt>${tr("保留记录", "Retain records")}</dt><dd>${count(preview.retain_count)}</dd></div>${!purge ? `<div><dt>${tr("正在处理", "In progress")}</dt><dd>${count(preview.in_progress)}</dd></div>` : ""}</dl><p>${escape(preview.explanation || (purge
+        ? tr("清理没有任务记录的卡密。已有任务与交付继续保留，此操作无法撤回。", "Remove codes without task history. Existing tasks and deliveries stay available. This cannot be undone.")
+        : tr("批次从有效列表移除。未开始或可重试卡密停止兑换，正在处理的任务与交付保留，可在回收站恢复批次。", "Remove the batch from the active list and stop unused or retryable codes. Keep running tasks and deliveries. Restore the batch from trash.")))}</p><div class="actions"><button id="cards-batch-confirm" class="danger">${purge ? tr("确认永久清理", "Confirm permanent cleanup") : tr("确认删除批次", "Confirm batch deletion")}</button><button id="cards-batch-cancel" class="secondary">${tr("取消", "Cancel")}</button></div>`;
+      listen("#cards-batch-cancel", "click", clearReview);
+      listen("#cards-batch-confirm", "click", async () => {
+        if (scope !== selected || view !== batchView || requestGeneration !== generation || reviewGeneration !== previewGeneration) return;
+        clearReview();
+        await api(batchUrl(batch.id, purge ? "/purge" : ""), { revision: preview.revision, confirmed: true }, purge ? "POST" : "DELETE", { signal: lifetime.signal });
+        if (!current() || scope !== selected) return;
+        selectedBatch = null;
+        clearCodes();
+        node("#cards-history").innerHTML = "";
+        offset = 0;
+        await load();
+      }, true);
+      review.scrollIntoView?.({ behavior: "smooth", block: "nearest" });
+      if (busy) setBusy(true);
+    };
+    const showBatches = (result) => {
+      const batches = (Array.isArray(result.items) ? result.items : []).filter((batch) => typeof batch.id === "string" && batch.id);
+      const total = Number(result.total || 0);
+      const folder = '<svg class="cards-folder-icon" viewBox="0 0 40 32" aria-hidden="true" focusable="false"><path d="M2 7V4h13l5 5h18v21H2V7Z" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round"/><path d="M2 12h36" fill="none" stroke="currentColor" stroke-width="1.6"/></svg>';
+      node("#cards-inventory").innerHTML = batches.length
+        ? `<ul class="cards-folder-list">${batches.map((batch) => `<li class="cards-folder-row"><button class="cards-folder-open" data-card-batch="${escape(batch.id)}">${folder}<span class="cards-folder-copy"><strong>${escape(batch.label || (batch.legacy ? tr("历史卡密", "Legacy codes") : tr("未命名批次", "Untitled batch")))}</strong><span class="cards-folder-counts">${tr("总数", "Total")} ${count(batch.total)} <span>·</span> ${tr("未兑换", "Unredeemed")} ${count(batch.remaining)} <span>·</span> ${tr("已使用", "Used")} ${count(batch.used)}</span><span class="cards-folder-meta">${escape(date(batch.created))}${batch.variant_id ? ` · ${escape(variants.find((variant) => variant.id === batch.variant_id)?.name || batch.variant_id)}` : ""}${Number(batch.in_progress) ? ` · ${tr("处理中", "Processing")} ${count(batch.in_progress)}` : ""}</span></span><span class="cards-folder-arrow" aria-hidden="true">→</span></button><div class="cards-folder-tools">${batchView === "deleted" ? `<button class="secondary" data-card-batch-restore="${escape(batch.id)}">${tr("恢复", "Restore")}</button>` : ""}<button class="cards-folder-remove" data-card-batch-review="${escape(batch.id)}">${batchView === "deleted" ? tr("永久清理", "Permanent cleanup") : tr("删除批次", "Delete batch")}</button></div></li>`).join("")}</ul>`
+        : `<div class="cards-folder-empty"><h4>${batchView === "deleted" ? tr("回收站为空", "Trash is empty") : tr("暂无符合条件的批次", "No matching batches")}</h4><p class="caption">${batchView === "deleted" ? tr("删除的批次会放在这里。", "Deleted batches appear here.") : tr("发行卡密或导入文本后，会自动整理成批次文件夹。", "Issuing codes or importing text creates a batch folder.")}</p></div>`;
+      node("#cards-page").textContent = total
+        ? `${offset + 1}–${Math.min(offset + batches.length, total)} / ${count(total)} ${tr("个批次", "batches")}` : tr("0 个批次", "0 batches");
+      disable(node("#cards-previous"), offset === 0);
+      disable(node("#cards-next"), offset + limit >= total);
+      for (const [attribute, callback, mutation] of [
+        ["cardBatch", openBatch, false], ["cardBatchReview", reviewBatch, true], ["cardBatchRestore", restoreBatch, true],
+      ]) {
+        const selector = attribute.replace(/[A-Z]/g, (letter) => `-${letter.toLowerCase()}`);
+        node("#cards-inventory").querySelectorAll(`[data-${selector}]`).forEach((button) => {
+          const batch = batches.find((item) => item.id === button.dataset[attribute]);
+          button.addEventListener("click", () => void perform(() => callback(batch), mutation));
+        });
+      }
+      if (busy) setBusy(true);
+    };
     const load = async () => {
+      clearReview();
+      updateLibrary();
       const requestGeneration = ++generation;
       read?.abort();
       read = new AbortController();
@@ -350,7 +466,7 @@
           api(`${endpoint}/card-stats?product_id=${scope}`, undefined, "GET", {
             signal,
           }),
-          api(`${endpoint}/card-inventory?${query()}`, undefined, "GET", {
+          api(`${endpoint}/${selectedBatch ? "card-inventory" : "card-batches"}?${query()}`, undefined, "GET", {
             signal,
           }),
         ]);
@@ -371,7 +487,8 @@
         variantControls();
       }
       overview(stats);
-      showInventory(inventory);
+      if (selectedBatch) showInventory(inventory);
+      else showBatches(inventory);
     };
     const history = async (id) => {
       const requestGeneration = generation;
@@ -422,16 +539,18 @@
       variants = productVariants();
       issueVariant = "";
       inventoryVariant = "";
+      selectedBatch = null;
+      batchView = "active";
+      node("#cards-view").value = batchView;
       variantControls();
       drawTextImport();
       offset = 0;
       node("#cards-status").value = "";
-      node("#cards-batch").value = "";
       node("#cards-search").value = "";
       node("#cards-history").innerHTML = "";
       node("#cards-stats").innerHTML = "";
       node("#cards-inventory").innerHTML =
-        '<div class="loading">正在读取这个商品的卡密…</div>';
+        `<div class="loading">${tr("正在读取这个商品的批次…", "Loading this product's batches…")}</div>`;
       node("#cards-page").textContent = "";
       disable(node("#cards-previous"), true);
       disable(node("#cards-next"), true);
@@ -439,6 +558,26 @@
       await load();
     });
     listen("#cards-refresh", "click", load);
+    listen("#cards-back", "click", async () => {
+      selectedBatch = null;
+      offset = 0;
+      node("#cards-search").value = "";
+      node("#cards-status").value = "";
+      node("#cards-history").innerHTML = "";
+      await load();
+    });
+    listen("#cards-view", "change", async () => {
+      const value = node("#cards-view").value;
+      if (!["active", "deleted"].includes(value)) return;
+      batchView = value;
+      selectedBatch = null;
+      offset = 0;
+      node("#cards-search").value = "";
+      node("#cards-status").value = "";
+      node("#cards-history").innerHTML = "";
+      await load();
+    });
+    listen("#cards-folder-action", "click", () => selectedBatch && reviewBatch(selectedBatch), true);
     listen("#cards-issue-variant", "change", () => {
       const value = node("#cards-issue-variant").value;
       if (
@@ -472,7 +611,6 @@
       for (const selector of [
         "#cards-variant",
         "#cards-status",
-        "#cards-batch",
         "#cards-search",
       ])
         node(selector).value = "";
@@ -616,7 +754,9 @@
         if (result.batch_id)
           listen("#cards-issued-batch", "click", async () => {
             if (!codesCurrent()) return;
-            node("#cards-batch").value = result.batch_id;
+            selectedBatch = { id: result.batch_id, label: node("#cards-label").value.trim() || tr("本次发行", "Newly issued batch") };
+            batchView = "active";
+            node("#cards-view").value = batchView;
             inventoryVariant = requestedVariant;
             node("#cards-variant").value = requestedVariant;
             node("#cards-status").value = "";

@@ -21,7 +21,7 @@ const deferred = () => {
   return { promise, resolve, reject };
 };
 
-function fixture(handler, { language = "zh-CN" } = {}) {
+function fixture(handler, { language = "zh-CN", batches = [{ id: "fixture-batch", label: "十月发行", total: 12, remaining: 8, used: 4 }] } = {}) {
   const nodes = new Map();
   const requests = [];
   const copied = [];
@@ -32,10 +32,11 @@ function fixture(handler, { language = "zh-CN" } = {}) {
     },
   };
   let confirmation = true;
+  const decodeAttribute = (value) => value.replace(/&(amp|lt|gt|quot|#39);/g, (_all, entity) => ({ amp: "&", lt: "<", gt: ">", quot: '"', "#39": "'" })[entity]);
   class Node {
     constructor(tag = "div", attributes = "") {
       this.tagName = tag;
-      this.value = attributes.match(/\bvalue="([^"]*)"/)?.[1] || "";
+      this.value = decodeAttribute(attributes.match(/\bvalue="([^"]*)"/)?.[1] || "");
       this.disabled = /\bdisabled(?:\s|$)/.test(attributes);
       this.isConnected = true;
       this.dataset = {};
@@ -47,7 +48,7 @@ function fixture(handler, { language = "zh-CN" } = {}) {
       ))
         this.dataset[
           key.replace(/-([a-z])/g, (_all, char) => char.toUpperCase())
-        ] = value;
+        ] = decodeAttribute(value);
     }
     set innerHTML(value) {
       this.html = value;
@@ -122,6 +123,8 @@ function fixture(handler, { language = "zh-CN" } = {}) {
   const api = (url, body, method, options) => {
     const request = { url, body, method, options };
     requests.push(request);
+    if (/\/card-batches\?/.test(url))
+      return Promise.resolve(typeof batches === "function" ? batches(request) : { items: batches, total: batches.length });
     if (handler) return handler(request);
     if (url.includes("card-stats"))
       return Promise.resolve({
@@ -166,6 +169,11 @@ function fixture(handler, { language = "zh-CN" } = {}) {
       context.window.ExtoreTextCards = helper;
     },
   };
+}
+
+async function openFirstBatch(page) {
+  page.nodes.get("#cards-inventory").querySelectorAll("[data-card-batch]")[0].click();
+  await settle();
 }
 
 test("商品统计使用固定商品 scope，商品名称正确转义", async () => {
@@ -223,7 +231,7 @@ test("purged 商品仍可查看旧卡密，但不能发行或补充库存", asyn
   page.nodes.get("#cards-issue").fire("submit");
   await settle();
   assert.equal(page.requests.filter((request) => request.method === "POST").length, 0);
-  assert.ok(page.requests.some((request) => request.url.includes("card-inventory")));
+  assert.ok(page.requests.some((request) => request.url.includes("card-batches")));
 });
 
 test("显式选择已删除商品仍可查卡密和历史，禁止发行并阻止手动提交", async () => {
@@ -247,6 +255,7 @@ test("显式选择已删除商品仍可查卡密和历史，禁止发行并阻�
   assert.equal(page.requests.filter((request) => request.method === "POST").length, 0);
   assert.match(page.nodes.get("#cards-error").textContent, /已删除商品不能生成卡密/);
   assert.equal(page.nodes.get("#cards-issue-submit").disabled, true);
+  await openFirstBatch(page);
   page.nodes.get("#cards-inventory").querySelectorAll("[data-card-history]")[0].click();
   await settle();
   assert.match(page.nodes.get("#cards-history").innerHTML, /历史商品/);
@@ -398,6 +407,7 @@ test("库存与历史忽略 digest、完整卡密、用户输入和交付内容"
     });
   });
   await page.module.render(page.options);
+  await openFirstBatch(page);
   page.nodes
     .get("#cards-inventory")
     .querySelectorAll("[data-card-history]")[0]
@@ -412,10 +422,10 @@ test("库存与历史忽略 digest、完整卡密、用户输入和交付内容"
 });
 
 test("筛选 URL 转义批次与尾号，分页始终保留商品 scope", async () => {
-  const page = fixture();
+  const page = fixture(undefined, { batches: [{ id: "批次 & one", label: "带符号的批次", total: 1 }] });
   await page.module.render(page.options);
+  await openFirstBatch(page);
   page.nodes.get("#cards-status").value = "failed_retryable";
-  page.nodes.get("#cards-batch").value = "批次 & one";
   page.nodes.get("#cards-search").value = "ABC123";
   page.nodes.get("#cards-filter").fire("submit");
   await settle();
@@ -468,6 +478,7 @@ test("撤销必须确认，取消时不发送请求", async () => {
     ),
   );
   await page.module.render(page.options);
+  await openFirstBatch(page);
   page.setConfirmation(false);
   page.nodes
     .get("#cards-inventory")
@@ -727,6 +738,7 @@ test("全规格停用时禁止制卡，仍可筛选旧卡密并读取规格历�
     page.requests.filter((request) => request.method === "POST").length,
     0,
   );
+  await openFirstBatch(page);
   page.nodes.get("#cards-variant").value = "annual-pro";
   page.nodes.get("#cards-filter").fire("submit");
   await settle();
@@ -792,6 +804,7 @@ test("规格概览保留商品总数，安全呈现各规格剩余与发行量�
   assert.match(text, /\b8\b/);
   assert.match(text, /\b4\b/);
   assert.match(text, /\b1\b/);
+  await openFirstBatch(page);
   const inventory = page.nodes.get("#cards-inventory").innerHTML;
   assert.ok(inventory.includes(escapedName));
   assert.doesNotMatch(inventory + overview, /<标准/);
@@ -814,6 +827,7 @@ test("库存规格筛选跨分页保留，清空后回到所有规格且不影�
   page.options.products = [variantProduct([standardVariant, premiumVariant])];
   await page.module.render(page.options);
   assert.equal(page.nodes.get("#cards-variant").value, "");
+  await openFirstBatch(page);
   assert.equal(latestInventoryQuery(page).has("variant_id"), false);
   page.nodes.get("#cards-variant").value = "annual-pro";
   page.nodes.get("#cards-filter").fire("submit");
@@ -876,4 +890,166 @@ test("切制卡规格清除上次原文，迟到复制结果不能覆盖下一�
     "annual-pro",
   );
   assert.match(page.nodes.get("#cards-codes").innerHTML, /年卡 Deluxe/);
+});
+
+test("首屏是批次文件夹，不请求或平铺全部卡密", async () => {
+  const page = fixture(undefined, { batches: [{
+    id: "batch-a", label: '<五月 & "特别"批次>', total: 20, remaining: 12,
+    used: 8, in_progress: 2, digest: "NEVER-SHOW-DIGEST", code: "NEVER-SHOW-CODE",
+    content: "NEVER-SHOW-DELIVERY", params: { secret: "NEVER-SHOW-INPUT" },
+  }] });
+  await page.module.render(page.options);
+  assert.equal(page.requests.length, 2);
+  assert.equal(page.requests.filter((request) => request.url.includes("card-inventory")).length, 0);
+  const folders = page.nodes.get("#cards-inventory").innerHTML;
+  assert.match(folders, /cards-folder-list/);
+  assert.match(folders, /&lt;五月 &amp; &quot;特别&quot;批次&gt;/);
+  assert.match(folders, /总数 20/);
+  assert.match(folders, /未兑换 12/);
+  assert.match(folders, /已使用 8/);
+  assert.doesNotMatch(folders, /NEVER-SHOW/);
+  assert.equal(page.nodes.get("#cards-back").hidden, true);
+  assert.match(page.nodes.get("#cards-page").textContent, /个批次/);
+});
+
+test("打开批次后才读取该文件夹，返回批次不读取全量卡密", async () => {
+  const page = fixture();
+  await page.module.render(page.options);
+  await openFirstBatch(page);
+  assert.equal(latestInventoryQuery(page).get("batch_id"), "fixture-batch");
+  assert.equal(latestInventoryQuery(page).get("product_id"), "product-a");
+  assert.equal(page.nodes.get("#cards-back").hidden, false);
+  assert.equal(page.nodes.get("#cards-library-title").textContent, "十月发行");
+  page.nodes.get("#cards-back").click();
+  await settle();
+  assert.equal(page.nodes.get("#cards-back").hidden, true);
+  assert.match(page.requests.at(-1).url, /\/card-batches\?/);
+  assert.equal(page.requests.filter((request) => request.url.includes("card-inventory")).length, 1);
+});
+
+test("批次删除先预览，取消不删除，确认绑定服务器修订", async () => {
+  const page = fixture(({ url, method }) => {
+    if (url.includes("delete-preview")) return Promise.resolve({
+      batch: { id: "fixture-batch", label: "十月发行", total: 12 }, revision: "revision-1",
+      delete_count: 0, retain_count: 12, revocable_count: 7, in_progress: 2,
+      explanation: '<保留交付 & 当前任务>',
+    });
+    if (method === "DELETE") return Promise.resolve({ ok: true, deleted: true });
+    return Promise.resolve({ summary: {} });
+  });
+  await page.module.render(page.options);
+  page.nodes.get("#cards-inventory").querySelectorAll("[data-card-batch-review]")[0].click();
+  await settle();
+  assert.equal(page.requests.filter((request) => request.method === "DELETE").length, 0);
+  assert.equal(page.nodes.get("#cards-batch-review").hidden, false);
+  assert.match(page.nodes.get("#cards-batch-review").innerHTML, /停止兑换/);
+  assert.match(page.nodes.get("#cards-batch-review").innerHTML, /&lt;保留交付 &amp; 当前任务&gt;/);
+  page.nodes.get("#cards-batch-cancel").click();
+  await settle();
+  assert.equal(page.nodes.get("#cards-batch-review").hidden, true);
+  assert.equal(page.requests.filter((request) => request.method === "DELETE").length, 0);
+  page.nodes.get("#cards-inventory").querySelectorAll("[data-card-batch-review]")[0].click();
+  await settle();
+  page.nodes.get("#cards-batch-confirm").click();
+  await settle();
+  const deletion = page.requests.find((request) => request.method === "DELETE");
+  assert.equal(deletion.url, "/admin/card-batches/fixture-batch?product_id=product-a");
+  assert.equal(deletion.body.revision, "revision-1");
+  assert.equal(deletion.body.confirmed, true);
+  assert.equal(page.nodes.get("#cards-batch-review").hidden, true);
+});
+
+test("批次视图分页和规格搜索不读取卡密，商品切换重置文件夹与回收站", async () => {
+  const page = fixture(undefined, { batches: () => ({ items: [{ id: "batch-page", label: "发行批次", total: 80 }], total: 120 }) });
+  page.options.products[0].variants = [standardVariant, premiumVariant];
+  await page.module.render(page.options);
+  page.nodes.get("#cards-variant").value = "annual-pro";
+  page.nodes.get("#cards-search").value = "十月 & one";
+  page.nodes.get("#cards-filter").fire("submit");
+  await settle();
+  page.nodes.get("#cards-next").click();
+  await settle();
+  const query = new URL("https://example.test" + page.requests.at(-1).url).searchParams;
+  assert.equal(query.get("offset"), "50");
+  assert.equal(query.get("variant_id"), "annual-pro");
+  assert.equal(query.get("search"), "十月 & one");
+  assert.equal(query.get("view"), "active");
+  assert.equal(page.requests.filter((request) => request.url.includes("card-inventory")).length, 0);
+  page.nodes.get("#cards-view").value = "deleted";
+  page.nodes.get("#cards-view").fire("change");
+  await settle();
+  await openFirstBatch(page);
+  page.nodes.get("#cards-product").value = "product-b";
+  page.nodes.get("#cards-product").fire("change");
+  await settle();
+  assert.equal(page.nodes.get("#cards-back").hidden, true);
+  assert.equal(page.nodes.get("#cards-view").value, "active");
+  assert.match(page.requests.at(-1).url, /product_id=product-b/);
+  assert.match(page.requests.at(-1).url, /view=active/);
+});
+
+test("回收站可恢复，永久清理只在预览确认后执行", async () => {
+  const page = fixture(({ url }) => {
+    if (url.includes("purge-preview")) return Promise.resolve({
+      batch: { id: "fixture-batch", label: "已删批次", deleted: true }, revision: "purge-revision",
+      delete_count: 5, retain_count: 7, explanation: "删除未引用卡密，保留任务与交付。",
+    });
+    return Promise.resolve({ summary: {} });
+  }, { language: "en" });
+  await page.module.render(page.options);
+  page.nodes.get("#cards-view").value = "deleted";
+  page.nodes.get("#cards-view").fire("change");
+  await settle();
+  assert.match(page.requests.at(-1).url, /view=deleted/);
+  page.nodes.get("#cards-inventory").querySelectorAll("[data-card-batch-restore]")[0].click();
+  await settle();
+  assert.ok(page.requests.some((request) => request.url === "/admin/card-batches/fixture-batch/restore?product_id=product-a" && request.method === "POST"));
+  page.nodes.get("#cards-inventory").querySelectorAll("[data-card-batch-review]")[0].click();
+  await settle();
+  assert.match(page.nodes.get("#cards-batch-review").innerHTML, /Confirm permanent cleanup/);
+  assert.equal(page.requests.filter((request) => request.url.includes("/purge?")).length, 0);
+  page.nodes.get("#cards-batch-confirm").click();
+  await settle();
+  const purge = page.requests.find((request) => request.url.includes("/purge?"));
+  assert.equal(purge.method, "POST");
+  assert.equal(purge.body.revision, "purge-revision");
+  assert.equal(purge.body.confirmed, true);
+});
+
+test("刷新或切换后失效的确认按钮不能使用旧删除修订", async () => {
+  const page = fixture(({ url }) => Promise.resolve(url.includes("delete-preview")
+    ? { revision: "old-revision", retain_count: 1, revocable_count: 1 } : { summary: {} }));
+  await page.module.render(page.options);
+  page.nodes.get("#cards-inventory").querySelectorAll("[data-card-batch-review]")[0].click();
+  await settle();
+  const confirm = page.nodes.get("#cards-batch-confirm");
+  page.nodes.get("#cards-refresh").click();
+  await settle();
+  confirm.click();
+  await settle();
+  assert.equal(page.requests.filter((request) => request.method === "DELETE").length, 0);
+});
+
+test("删除预览迟到不会改写离开的页面，失效修订不能确认", async () => {
+  const pending = deferred();
+  const page = fixture(({ url }) => url.includes("delete-preview") ? pending.promise : Promise.resolve({ summary: {} }));
+  let current = true;
+  await page.module.render({ ...page.options, isCurrent: () => current });
+  page.nodes.get("#cards-inventory").querySelectorAll("[data-card-batch-review]")[0].click();
+  current = false;
+  page.workspace.innerHTML = "另一个页面";
+  pending.resolve({ revision: "late-revision", retain_count: 1 });
+  await settle();
+  assert.equal(page.workspace.innerHTML, "另一个页面");
+  assert.equal(page.nodes.get("#cards-batch-review").innerHTML, "");
+  assert.equal(page.requests.filter((request) => request.method === "DELETE").length, 0);
+});
+
+test("没有修订的删除预览只显示错误，不提供确认按钮", async () => {
+  const page = fixture(({ url }) => Promise.resolve(url.includes("delete-preview") ? { retain_count: 1 } : { summary: {} }));
+  await page.module.render(page.options);
+  page.nodes.get("#cards-inventory").querySelectorAll("[data-card-batch-review]")[0].click();
+  await settle();
+  assert.match(page.nodes.get("#cards-error").textContent, /没有收到批次修订/);
+  assert.equal(page.nodes.get("#cards-batch-review").hidden, true);
 });
