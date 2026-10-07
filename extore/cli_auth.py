@@ -5,7 +5,6 @@ import hashlib
 import json
 import re
 import time
-import unicodedata
 import uuid
 from urllib.parse import urlsplit
 
@@ -73,12 +72,17 @@ def init_schema(c):
     c.execute("CREATE INDEX IF NOT EXISTS cli_device_link ON cli_devices(staff_id)")
     c.execute("CREATE INDEX IF NOT EXISTS cli_session_device ON sessions(device_id)")
 
+    from .agent_identity import add_type_column
+
+    add_type_column(c, "cli_devices")
+
 
 class BindInput(BaseModel):
     model_config = ConfigDict(extra="forbid")
     token: str = Field(min_length=1, max_length=2048)
     public_key: str = Field(min_length=43, max_length=43)
     client_name: str = Field(min_length=1, max_length=100)
+    agent_type: str | None = Field(default=None, min_length=1, max_length=64)
     signature: str = Field(min_length=86, max_length=86)
 
 
@@ -195,6 +199,7 @@ def _bind_view(device, staff, already):
         "product_id": staff["product_id"],
         "shop_id": staff["shop_id"],
         "client_name": device["client_name"],
+        "agent_type": device["agent_type"],
         "fingerprint": device["fingerprint"],
         "already_authorized": already,
         "expires": staff["expires"],
@@ -212,13 +217,21 @@ async def authorize_cli(request: Request):
     _handshake(request)
     rate_limit(request, "cli-bind", 20, 60)
     body = await _body(request, BindInput)
-    name = body.client_name.strip()
-    if not name or any(unicodedata.category(x).startswith("C") for x in name):
-        fail("设备名称无效", 400)
+    from .agent_identity import normalize_identity
+
+    try:
+        name, agent_type = normalize_identity(body.client_name, body.agent_type)
+    except ValueError:
+        fail("处理端名称或类型无效", 400)
+    if agent_type is not None and (
+        name != body.client_name or agent_type != body.agent_type
+    ):
+        fail("处理端名称或类型须去除首尾空格", 400)
     public_raw = _verify(
         body.public_key,
         body.signature,
-        f"extore-cli-bind-v1\n{ORIGIN}\n{body.token}\n{body.public_key}",
+        f"extore-cli-bind-v1\n{ORIGIN}\n{body.token}\n{body.public_key}"
+        + (f"\n{name}\n{agent_type}" if agent_type is not None else ""),
     )
     value, ticket_only = _link_token(body.token)
     with db() as c:
@@ -252,6 +265,10 @@ async def authorize_cli(request: Request):
             if existing["revoked"]:
                 fail("CLI 设备授权已撤销，请申请新的管理链接", 401)
             existing, staff = _device(c, existing["id"])
+            if agent_type is not None and (
+                existing["client_name"] != name or existing["agent_type"] != agent_type
+            ):
+                fail("更改已绑定处理端身份须重新申请设备码并由商家批准", 409)
             if ticket and not ticket["consumed"]:
                 c.execute(
                     "UPDATE cli_bind_tickets SET consumed=1,bound_device_id=? WHERE digest=?",
@@ -262,9 +279,18 @@ async def authorize_cli(request: Request):
         did, now = str(uuid.uuid4()), time.time()
         fingerprint = hashlib.sha256(public_raw).hexdigest()
         c.execute(
-            "INSERT INTO cli_devices(id,staff_id,public_key,fingerprint,client_name,created,last_seen) "
-            "VALUES (?,?,?,?,?,?,?)",
-            (did, staff["id"], body.public_key, fingerprint, name, now, now),
+            "INSERT INTO cli_devices(id,staff_id,public_key,fingerprint,client_name,created,last_seen,agent_type) "
+            "VALUES (?,?,?,?,?,?,?,?)",
+            (
+                did,
+                staff["id"],
+                body.public_key,
+                fingerprint,
+                name,
+                now,
+                now,
+                agent_type,
+            ),
         )
         if ticket:
             c.execute(
@@ -358,6 +384,8 @@ async def cli_session(request: Request):
             "expires_in": max(0, int(expires - now)),
             "device_id": device["id"],
             "session_id": sid,
+            "client_name": device["client_name"],
+            "agent_type": device["agent_type"],
             "product_id": staff["product_id"],
             "shop_id": staff["shop_id"],
             "permissions": staff["permissions"],
@@ -386,6 +414,7 @@ def cli_status(request: Request):
             "link_expires": s["link_expires"],
             "device_id": s["device_id"],
             "client_name": s["client_name"],
+            "agent_type": s.get("agent_type"),
             "session_id": s["id"],
             "expires": s["expires"],
         }
@@ -535,6 +564,7 @@ def _devices(request, roles):
                         else None
                     ),
                     "client_name": row["client_name"],
+                    "agent_type": row["agent_type"],
                     "fingerprint": row["fingerprint"],
                     "created": row["created"],
                     "last_seen": row["last_seen"],

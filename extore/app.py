@@ -1298,6 +1298,14 @@ def batch(body: BatchUpdate, request: Request):
                     from .service import finalize_task_flow
 
                     finalize_task_flow(c, task_flow.claim(c, r, actor, epoch))
+                    from .agent_identity import record_claim
+
+                    claimed = job(c, jid)
+                    if (
+                        claimed["state"] == "processing"
+                        and claimed["claimed_by"] == actor
+                    ):
+                        record_claim(c, claimed, actor, session=s)
                     audit(c, actor, "job.claim", jid)
                     continue
                 if r["state"] != "queued":
@@ -1314,6 +1322,9 @@ def batch(body: BatchUpdate, request: Request):
                         message=body.message or "正在处理",
                     ),
                 )
+                from .agent_identity import record_claim
+
+                record_claim(c, job(c, jid), actor, session=s)
             elif body.action in ("progress", "succeed", "fail"):
                 if r["state"] != "processing" or r["claimed_by"] != actor:
                     fail("请先领取任务，且只能处理自己领取的任务", 409)

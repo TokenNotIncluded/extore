@@ -23,6 +23,7 @@ def clean():
             "proxy_identities",
             "automation_requests",
             "private_worker_receipts",
+            "job_worker_identities",
             "private_worker_nonces",
             "task_flow_dispatches",
             "task_flow_files",

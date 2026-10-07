@@ -27,6 +27,11 @@ PHASES = {"await_start", "input", "display", "queued", "processing", "ended"}
 MODES = {"manual", "script", "webhook", "stock"}
 MAX_PRODUCTS = 500
 MAX_WORKERS = 500
+IDENTITY_JOIN = (
+    " LEFT JOIN job_worker_identities wi ON wi.job_id=j.id AND wi.attempt=j.attempt "
+    "AND wi.actor=j.claimed_by "
+)
+WORKER_KEY = "CASE WHEN wi.channel='cli' AND wi.device_ref IS NOT NULL THEN 'cli:'||wi.device_ref ELSE j.claimed_by END"
 
 
 def _counts():
@@ -198,11 +203,15 @@ def progress_board(
         )
         rows = c.execute(
             "SELECT j.id,j.product_id,j.state,j.progress,j.attempt,j.created,j.updated,j.claimed_by,"
+            + WORKER_KEY
+            + " worker_key,"
             "t.phase flow_phase,t.flow_epoch,CASE WHEN j.state='queued' THEN (SELECT COUNT(*) "
             "FROM jobs q WHERE q.product_id=j.product_id AND q.state='queued' AND "
             "(q.created<j.created OR (q.created=j.created AND q.id<=j.id))) END queue_position "
             "FROM jobs j JOIN products p ON p.id=j.product_id LEFT JOIN task_flow_runs t "
-            "ON t.job_id=j.id AND t.attempt=j.attempt WHERE "
+            "ON t.job_id=j.id AND t.attempt=j.attempt "
+            + IDENTITY_JOIN
+            + " WHERE "
             + clause
             + " AND j.state IN ("
             + state_slots
@@ -210,60 +219,90 @@ def progress_board(
             "ORDER BY " + order + " LIMIT ? OFFSET ?",
             (*args, *selected_states, limit, offset),
         ).fetchall()
-        actors = {r["claimed_by"] for r in rows if r["claimed_by"]}
-        actors.update(
-            r["claimed_by"]
+        keys = {r["worker_key"] for r in rows if r["worker_key"]}
+        keys.update(
+            r["worker_key"]
             for r in c.execute(
-                "SELECT DISTINCT j.claimed_by FROM jobs j JOIN products p ON p.id=j.product_id "
-                "WHERE "
+                "SELECT DISTINCT "
+                + WORKER_KEY
+                + " worker_key FROM jobs j JOIN products p "
+                "ON p.id=j.product_id "
+                + IDENTITY_JOIN
+                + " WHERE "
                 + clause
-                + " AND j.state='processing' AND j.claimed_by IS NOT NULL "
-                "AND j.claimed_by<>'' LIMIT 501",
+                + " AND j.state='processing' AND j.claimed_by IS NOT NULL AND j.claimed_by<>'' LIMIT 501",
                 args,
             )
         )
-        if len(actors) > MAX_WORKERS:
+        if len(keys) > MAX_WORKERS:
             fail("处理人员数量超过看板范围，请按商品查看", 409)
         workers = {}
-        if actors:
-            slots = ",".join("?" for _ in actors)
-            # A configured staff label must belong to this exact scoped product.
+        if keys:
+            slots = ",".join("?" for _ in keys)
             names = {
                 r["id"]: r["name"]
                 for r in c.execute(
-                    "SELECT s.id,s.name FROM staff s JOIN products p ON p.id=s.product_id "
-                    "WHERE " + clause + " AND s.id IN (" + slots + ")",
-                    (*args, *sorted(actors)),
+                    "SELECT s.id,s.name FROM staff s JOIN products p ON p.id=s.product_id WHERE "
+                    + clause
+                    + " AND s.id IN ("
+                    + slots
+                    + ")",
+                    (*args, *sorted(keys)),
                 )
             }
-            for actor in sorted(actors):
-                name, kind = (
-                    ("商品处理器", "automatic")
+            identity_times = {}
+            for aggregate in c.execute(
+                "SELECT "
+                + WORKER_KEY
+                + " worker_key,j.claimed_by,j.state,wi.client_name,wi.agent_type,"
+                "wi.channel,MAX(wi.claimed_at) identity_time,COUNT(*) n,MAX(j.updated) last_update "
+                "FROM jobs j JOIN products p ON p.id=j.product_id "
+                + IDENTITY_JOIN
+                + " WHERE "
+                + clause
+                + " AND ("
+                + WORKER_KEY
+                + ") IN ("
+                + slots
+                + ") "
+                "GROUP BY worker_key,j.claimed_by,j.state,wi.client_name,wi.agent_type,wi.channel",
+                (*args, *sorted(keys)),
+            ):
+                key, actor = aggregate["worker_key"], aggregate["claimed_by"]
+                name, kind, agent_type = (
+                    ("商品处理器", "automatic", "processor")
                     if actor == "worker"
                     else (
-                        ("店主", "merchant")
+                        ("店主", "merchant", "human")
                         if actor in {"owner", "shop:" + sid}
-                        else (_name(names.get(actor), "处理人员"), "unknown")
+                        else (_name(names.get(actor), "处理人员"), "unknown", None)
                     )
                 )
-                workers[actor] = {
-                    "id": _worker_id(sid, actor),
-                    "name": name,
-                    "kind": kind,
-                    "active_jobs": 0,
-                    "completed_jobs": 0,
-                    "last_update": None,
-                }
-            for aggregate in c.execute(
-                "SELECT j.claimed_by,j.state,COUNT(*) n,MAX(j.updated) last_update "
-                "FROM jobs j JOIN products p ON p.id=j.product_id WHERE "
-                + clause
-                + " AND j.claimed_by IN ("
-                + slots
-                + ") GROUP BY j.claimed_by,j.state",
-                (*args, *sorted(actors)),
-            ):
-                worker = workers[aggregate["claimed_by"]]
+                if key not in workers:
+                    workers[key] = {
+                        "id": _worker_id(sid, key),
+                        "name": name,
+                        "kind": kind,
+                        "agent_type": agent_type,
+                        "active_jobs": 0,
+                        "completed_jobs": 0,
+                        "last_update": None,
+                    }
+                worker = workers[key]
+                identity_time = _timestamp(aggregate["identity_time"], nullable=True)
+                if identity_time is not None and identity_time >= identity_times.get(
+                    key, 0
+                ):
+                    identity_times[key] = identity_time
+                    worker.update(
+                        name=_name(aggregate["client_name"], name),
+                        kind={
+                            "cli": "cli",
+                            "browser": "human",
+                            "automatic": "automatic",
+                        }.get(aggregate["channel"], "unknown"),
+                        agent_type=aggregate["agent_type"],
+                    )
                 if aggregate["state"] == "processing":
                     worker["active_jobs"] += aggregate["n"]
                 if aggregate["state"] in PROCESSED:
@@ -275,7 +314,7 @@ def progress_board(
                     )
         for row in rows:
             steps = _steps(c, row)
-            actor = row["claimed_by"]
+            actor = row["worker_key"]
             done = sum(step["state"] == "done" for step in steps)
             progress = row["progress"] if type(row["progress"]) is int else 0
             if row["flow_phase"] is not None or not steps:

@@ -313,11 +313,11 @@ def test_additive_schema15_preserves_all_old54_tables(owner, setup_product):
                 "SELECT name,sql FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'"
             )
         }
-        assert len(before) == 54
+        assert len(before) == 55
     init()
     init()
     with db() as c:
-        assert c.execute("PRAGMA user_version").fetchone()[0] == 16
+        assert c.execute("PRAGMA user_version").fetchone()[0] == 17
         after = {
             r["name"]: r["sql"]
             for r in c.execute(

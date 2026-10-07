@@ -65,11 +65,16 @@ def init_schema(c):
         "CREATE INDEX IF NOT EXISTS cli_scope_request_shop ON cli_scope_requests(shop_id,state)"
     )
 
+    from .agent_identity import add_type_column
+
+    add_type_column(c, "cli_scope_requests")
+
 
 class ScopeRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
     public_key: str = Field(min_length=43, max_length=43)
     client_name: str = Field(min_length=1, max_length=100)
+    agent_type: str | None = Field(default=None, min_length=1, max_length=64)
     nonce: str = Field(min_length=43, max_length=43)
     kind: Literal["product", "shop.pipeline"]
     shop_id: str | None = None
@@ -296,6 +301,8 @@ def _snapshot(c, row, draft):
             },
             "bindings": [],
         }
+        if raw["agent_type"] is not None:
+            history["scope"]["agent_type"] = raw["agent_type"]
         for binding in c.execute(
             "SELECT b.product_id,b.staff_id,b.device_id,s.permissions,s.expires,"
             "s.revoked,s.parent_id,d.public_key,d.fingerprint,d.revoked AS device_revoked "
@@ -326,7 +333,12 @@ def _snapshot(c, row, draft):
                     "current_revision",
                     "expires",
                 )
-            },
+            }
+            | (
+                {"agent_type": row["agent_type"]}
+                if row["agent_type"] is not None
+                else {}
+            ),
             "shop": {
                 "id": shop["id"],
                 "name": shop["name"],
@@ -359,6 +371,8 @@ async def create_request(request: Request):
     rate_limit(request, "scope-request", 10, 60)
     body = await _body(request, ScopeRequest)
     unsigned = body.model_dump(exclude={"signature"})
+    if body.agent_type is None:
+        unsigned.pop("agent_type")
     canonical = _canonical(unsigned)
     raw = _verify(
         body.public_key,
@@ -366,10 +380,14 @@ async def create_request(request: Request):
         f"extore-cli-scope-request-v1\n{ORIGIN}\n{canonical}",
     )
     issued = int.from_bytes(_decode(body.nonce, 32)[:8], "big")
-    if body.client_name != body.client_name.strip() or any(
-        unicodedata.category(char).startswith("C") for char in body.client_name
-    ):
-        fail("设备名称无效", 400)
+    from .agent_identity import normalize_identity
+
+    try:
+        name, agent_type = normalize_identity(body.client_name, body.agent_type)
+    except ValueError:
+        fail("处理端名称或类型无效", 400)
+    if name != body.client_name or agent_type != body.agent_type:
+        fail("处理端名称或类型须去除首尾空格", 400)
     if any(
         unicodedata.category(char).startswith("C") and char not in "\n\t"
         for char in body.reason
@@ -489,7 +507,7 @@ async def create_request(request: Request):
                     "INSERT INTO cli_scope_requests(id,public_key,client_name,fingerprint,nonce,"
                     "user_code,challenge,request_json,kind,shop_id,requested_product_ids,"
                     "requested_permissions,grant_expires,current_authorization_id,current_revision,"
-                    "expires,created) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                    "expires,created,agent_type) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                     (
                         rid,
                         body.public_key,
@@ -508,6 +526,7 @@ async def create_request(request: Request):
                         current["revision"] if current else None,
                         min(now + REQUEST_TTL, issued + REQUEST_TTL),
                         now,
+                        body.agent_type,
                     ),
                 )
                 break
@@ -576,6 +595,7 @@ async def approval_options(request: Request):
                     "request_id": row["id"],
                     "user_code": row["user_code"],
                     "client_name": row["client_name"],
+                    "agent_type": row["agent_type"],
                     "fingerprint": row["fingerprint"],
                     "expires": row["expires"],
                     "kind": row["kind"],
@@ -720,6 +740,7 @@ async def claim_request(request: Request):
             expected_revision=row["current_revision"],
             issuer_role="shop" if actor.get("shop_id") else "root",
             issuer_shop_id=actor.get("shop_id"),
+            agent_type=row["agent_type"],
         )
         c.execute(
             "UPDATE cli_scope_requests SET state='claimed',authorization_id=?,claimed_revision=? WHERE id=?",

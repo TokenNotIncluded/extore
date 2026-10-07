@@ -59,6 +59,10 @@ def init_schema(c):
         "ON pipeline_authorizations(shop_id,revoked,expires)"
     )
 
+    from .agent_identity import add_type_column
+
+    add_type_column(c, "pipeline_authorizations")
+
 
 def _permissions(value, kind):
     allowed = (
@@ -131,6 +135,7 @@ def _view(c, row):
             "created",
             "last_seen",
             "client_name",
+            "agent_type",
             "fingerprint",
             "approved_actor",
             "issuer_role",
@@ -370,6 +375,7 @@ def _bindings(c, authorization_id):
                 "permissions": staff["permissions"],
                 "expires": staff["expires"],
                 "client_name": device["client_name"],
+                "agent_type": device["agent_type"],
                 "fingerprint": device["fingerprint"],
                 "authorization_id": authorization_id,
                 "authorization_revision": authorization(c, authorization_id)[
@@ -395,6 +401,7 @@ def materialize(
     expected_revision=None,
     issuer_role="shop",
     issuer_shop_id=None,
+    agent_type=None,
 ):
     """Atomically bind a signed claim to its explicitly approved snapshot.
 
@@ -407,6 +414,12 @@ def materialize(
     if not c.in_transaction:
         raise RuntimeError("Pipeline claims require an active write transaction")
     client_name = _identity(public_key, fingerprint, client_name)
+    from .agent_identity import normalize_identity
+
+    try:
+        client_name, agent_type = normalize_identity(client_name, agent_type)
+    except ValueError:
+        fail("处理端名称或类型无效", 400)
     if issuer_role not in ("root", "shop"):
         fail("流水线授权批准者无效", 403)
     if issuer_role == "shop":
@@ -433,6 +446,8 @@ def materialize(
         _bindings(c, existing["id"])
     elif expected_revision is not None:
         fail("追加授权版本无效", 400)
+    if existing and agent_type is None:
+        agent_type = existing["agent_type"]
     shop_id, kind, product_ids, permissions, expires = _draft(c, draft, existing)
     now = time.time()
     if existing is None:
@@ -476,12 +491,14 @@ def materialize(
         or set(product_ids) != old_products
         or issuer_role != existing["issuer_role"]
         or issuer_shop_id != existing["issuer_shop_id"]
+        or client_name != existing["client_name"]
+        or agent_type != existing["agent_type"]
     )
     if existing:
         if changed:
             c.execute(
                 "UPDATE pipeline_authorizations SET permissions=?,revision=revision+1,"
-                "last_seen=?,approved_actor=?,issuer_role=?,issuer_shop_id=? "
+                "last_seen=?,approved_actor=?,issuer_role=?,issuer_shop_id=?,client_name=?,agent_type=? "
                 "WHERE id=? AND revision=? AND revoked=0",
                 (
                     encoded_permissions,
@@ -489,6 +506,8 @@ def materialize(
                     actor,
                     issuer_role,
                     issuer_shop_id,
+                    client_name,
+                    agent_type,
                     authorization_id,
                     expected_revision,
                 ),
@@ -497,6 +516,11 @@ def materialize(
                 "UPDATE staff SET permissions=? WHERE id IN (SELECT staff_id "
                 "FROM pipeline_bindings WHERE authorization_id=?)",
                 (encoded_permissions, authorization_id),
+            )
+            c.execute(
+                "UPDATE cli_devices SET client_name=?,agent_type=? WHERE id IN ("
+                "SELECT device_id FROM pipeline_bindings WHERE authorization_id=?)",
+                (client_name, agent_type, authorization_id),
             )
             if issuer_role != existing["issuer_role"]:
                 audit(
@@ -509,7 +533,7 @@ def materialize(
         c.execute(
             "INSERT INTO pipeline_authorizations(id,shop_id,public_key,fingerprint,"
             "client_name,kind,permissions,expires,created,last_seen,approved_actor,"
-            "issuer_role,issuer_shop_id) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            "issuer_role,issuer_shop_id,agent_type) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
             (
                 authorization_id,
                 shop_id,
@@ -524,6 +548,7 @@ def materialize(
                 actor,
                 issuer_role,
                 issuer_shop_id,
+                agent_type,
             ),
         )
     current_products = old_products
@@ -548,8 +573,17 @@ def materialize(
         consume_link(c, staff, channel="cli")
         c.execute(
             "INSERT INTO cli_devices(id,staff_id,public_key,fingerprint,client_name,"
-            "created,last_seen) VALUES (?,?,?,?,?,?,?)",
-            (device_id, staff_id, public_key, fingerprint, client_name, now, now),
+            "created,last_seen,agent_type) VALUES (?,?,?,?,?,?,?,?)",
+            (
+                device_id,
+                staff_id,
+                public_key,
+                fingerprint,
+                client_name,
+                now,
+                now,
+                agent_type,
+            ),
         )
         c.execute(
             "INSERT INTO pipeline_bindings VALUES (?,?,?,?,?)",

@@ -282,14 +282,36 @@ def progress_board(
     pids, jobs, worker_ids = set(), set(), set()
     sums = dict.fromkeys(BOARD_STATES, 0)
     for worker in value["workers"]:
+        if isinstance(worker, dict) and "agent_type" not in worker:
+            worker["agent_type"] = None
         fields(
             worker,
-            ("id", "name", "kind", "active_jobs", "completed_jobs", "last_update"),
+            (
+                "id",
+                "name",
+                "kind",
+                "agent_type",
+                "active_jobs",
+                "completed_jobs",
+                "last_update",
+            ),
         )
         identifier(worker["id"])
         if not re.fullmatch(r"[0-9a-f]{64}", worker["id"]):
             invalid()
         name(worker["name"])
+        if worker["agent_type"] is not None:
+            import unicodedata
+
+            if (
+                not isinstance(worker["agent_type"], str)
+                or not 1 <= len(worker["agent_type"]) <= 64
+                or any(
+                    unicodedata.category(char).startswith("C") or not char.isprintable()
+                    for char in worker["agent_type"]
+                )
+            ):
+                invalid()
         if worker["id"] in worker_ids or worker["kind"] not in (
             "human",
             "cli",

@@ -241,6 +241,9 @@ def _claim(c, row, binding):
     current = job(c, row["id"])
     if current["state"] != "processing" or current["claimed_by"] != binding["actor"]:
         return None
+    from .agent_identity import record_claim
+
+    record_claim(c, current, binding["actor"], device_id=binding["device_id"])
     item = _work_item(c, current, binding)
     if item is None:
         return None

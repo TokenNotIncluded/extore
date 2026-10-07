@@ -11,7 +11,6 @@ import re
 import secrets
 import sqlite3
 import time
-import unicodedata
 import uuid
 
 from fastapi import APIRouter, HTTPException, Request
@@ -68,12 +67,17 @@ def init_schema(c):
         "ON cli_device_requests(approved_staff_id)"
     )
 
+    from .agent_identity import add_type_column
+
+    add_type_column(c, "cli_device_requests")
+
 
 class DeviceRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
     public_key: str = Field(min_length=43, max_length=43)
     signature: str = Field(min_length=86, max_length=86)
     client_name: str = Field(min_length=1, max_length=100)
+    agent_type: str | None = Field(default=None, min_length=1, max_length=64)
     nonce: str = Field(min_length=43, max_length=43)
     product_id: str | None = Field(default=None, min_length=1, max_length=100)
 
@@ -259,7 +263,12 @@ def _snapshot(c, row, staff):
                     "requested_product_id",
                     "expires",
                 )
-            },
+            }
+            | (
+                {"agent_type": row["agent_type"]}
+                if row["agent_type"] is not None
+                else {}
+            ),
             "scope": scope,
             "chain": chain,
         },
@@ -273,6 +282,7 @@ def _public_request(row):
         "request_id": row["id"],
         "user_code": row["user_code"],
         "client_name": row["client_name"],
+        "agent_type": row["agent_type"],
         "fingerprint": row["fingerprint"],
         "product_id": row["requested_product_id"],
         "expires": row["expires"],
@@ -309,16 +319,21 @@ async def create_request(request: Request):
     _handshake(request)
     rate_limit(request, "device-request", 10, 60)
     body = await _body(request, DeviceRequest)
-    if body.client_name != body.client_name.strip() or any(
-        unicodedata.category(char).startswith("C") for char in body.client_name
-    ):
-        fail("设备名称无效", 400)
+    from .agent_identity import normalize_identity
+
+    try:
+        name, agent_type = normalize_identity(body.client_name, body.agent_type)
+    except ValueError:
+        fail("处理端名称或类型无效", 400)
+    if name != body.client_name or agent_type != body.agent_type:
+        fail("处理端名称或类型须去除首尾空格", 400)
     nonce_issued = int.from_bytes(_decode(body.nonce, 32)[:8], "big")
     raw = _verify(
         body.public_key,
         body.signature,
         f"extore-cli-device-request-v1\n{ORIGIN}\n{body.public_key}\n"
-        f"{body.client_name}\n{body.nonce}\n{body.product_id or ''}",
+        f"{body.client_name}\n{body.nonce}\n{body.product_id or ''}"
+        + ("\n" + body.agent_type if body.agent_type is not None else ""),
     )
     with db() as c:
         row = c.execute(
@@ -328,6 +343,7 @@ async def create_request(request: Request):
         if row is not None:
             if (
                 row["client_name"] != body.client_name
+                or row["agent_type"] != body.agent_type
                 or row["requested_product_id"] != body.product_id
             ):
                 fail("设备授权申请不匹配", 401)
@@ -360,7 +376,7 @@ async def create_request(request: Request):
                 c.execute(
                     "INSERT INTO cli_device_requests(id,public_key,client_name,"
                     "fingerprint,nonce,user_code,challenge,requested_product_id,"
-                    "expires,created) VALUES (?,?,?,?,?,?,?,?,?,?)",
+                    "expires,created,agent_type) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
                     (
                         rid,
                         body.public_key,
@@ -372,6 +388,7 @@ async def create_request(request: Request):
                         body.product_id,
                         min(now + REQUEST_TTL, nonce_issued + REQUEST_TTL),
                         now,
+                        body.agent_type,
                     ),
                 )
                 break
@@ -619,7 +636,15 @@ async def claim_request(request: Request):
         if already:
             # Binding survives a subsequent normal browser logout. A lost claim
             # response is recoverable only with the same key and recorded device.
-            if existing is None or existing["id"] != row["device_id"]:
+            if (
+                existing is None
+                or existing["id"] != row["device_id"]
+                or existing["client_name"] != row["client_name"]
+                or (
+                    row["agent_type"] is not None
+                    and existing["agent_type"] != row["agent_type"]
+                )
+            ):
                 fail("CLI 设备授权已失效", 401)
         else:
             actor = _approval_actor(c, row)
@@ -629,7 +654,7 @@ async def claim_request(request: Request):
                 did, now = str(uuid.uuid4()), time.time()
                 c.execute(
                     "INSERT INTO cli_devices(id,staff_id,public_key,fingerprint,"
-                    "client_name,created,last_seen) VALUES (?,?,?,?,?,?,?)",
+                    "client_name,created,last_seen,agent_type) VALUES (?,?,?,?,?,?,?,?)",
                     (
                         did,
                         staff["id"],
@@ -638,12 +663,30 @@ async def claim_request(request: Request):
                         row["client_name"],
                         now,
                         now,
+                        row["agent_type"],
                     ),
                 )
                 existing = c.execute(
                     "SELECT * FROM cli_devices WHERE id=?", (did,)
                 ).fetchone()
                 audit(c, staff["id"], "cli.device.create", did)
+            elif (
+                row["agent_type"] is not None
+                or existing["client_name"] != row["client_name"]
+            ):
+                c.execute(
+                    "UPDATE cli_devices SET client_name=?,agent_type=? WHERE id=?",
+                    (
+                        row["client_name"],
+                        row["agent_type"]
+                        if row["agent_type"] is not None
+                        else existing["agent_type"],
+                        existing["id"],
+                    ),
+                )
+                existing = c.execute(
+                    "SELECT * FROM cli_devices WHERE id=?", (existing["id"],)
+                ).fetchone()
             c.execute(
                 "UPDATE cli_device_requests SET state='claimed',device_id=? WHERE id=?",
                 (existing["id"], row["id"]),

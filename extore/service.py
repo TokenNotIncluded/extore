@@ -442,6 +442,9 @@ def job_view(c, row, staff=False):
     if staff:
         result["params"] = json.loads(row["params"])
         result["claimed_by"] = row["claimed_by"]
+        from .agent_identity import processing_worker
+
+        result["processing_worker"] = processing_worker(c, row)
         result["mode"] = p["mode"]
         result["parameters"] = p["parameters"]
         result["outputs"] = p["outputs"]

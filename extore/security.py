@@ -355,6 +355,9 @@ def authorize_management(c, s, permission=None):
         else:
             fail("CLI 登录凭证无效", 401)
         s["client_name"] = device["client_name"]
+        s["agent_type"] = (
+            device["agent_type"] if "agent_type" in device.keys() else None
+        )
         if time.time() - device["last_seen"] >= 30:
             c.execute(
                 f"UPDATE {device_table} SET last_seen=? WHERE id=?",

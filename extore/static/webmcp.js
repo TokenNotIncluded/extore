@@ -98,8 +98,9 @@
     }, ["id", "name", "mode", "counts", "jobs"]) },
     workers: { type: "array", maxItems: 500, items: object({
       id: boardWorkerId, name: string(120), kind: choice(["human", "cli", "automatic", "merchant", "unknown"]),
+      agent_type: { type: ["string", "null"], minLength: 1, maxLength: 64 },
       active_jobs: boardCount, completed_jobs: boardCount, last_update: { ...boardTime, type: ["number", "null"] },
-    }, ["id", "name", "kind", "active_jobs", "completed_jobs", "last_update"]) },
+    }, ["id", "name", "kind", "agent_type", "active_jobs", "completed_jobs", "last_update"]) },
     pagination: object({ limit: integer(1, 200), offset: integer(0, 1000000), total: boardCount, has_more: boolean }, ["limit", "offset", "total", "has_more"]),
     scope: object({ product_ids: { type: "array", maxItems: 500, uniqueItems: true, items: id } }, ["product_ids"]),
   }, ["schema", "generated_at", "shop", "totals", "products", "workers", "pagination", "scope"]);
