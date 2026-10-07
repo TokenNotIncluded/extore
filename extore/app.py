@@ -509,7 +509,12 @@ def reveal(body: TokenInput):
         row = c.execute("SELECT * FROM jobs WHERE card_id=?", (card["id"],)).fetchone()
         if not row:
             fail("尚无可领取内容", 409)
-        from .card_entitlements import delivery_row, mark_revealed, select_delivery
+        from .card_entitlements import (
+            delivery_row,
+            frozen_policy,
+            mark_revealed,
+            select_delivery,
+        )
 
         delivery = select_delivery(c, row, body.revision)
         selected = delivery_row(row, delivery)
@@ -546,7 +551,11 @@ def reveal(body: TokenInput):
             task_flow.destroy(c, row)
             discard_assignment(c, card["id"])
         return {
-            "revision": delivery["revision"],
+            **(
+                {"revision": delivery["revision"]}
+                if frozen_policy(c, card["id"]) is not None
+                else {}
+            ),
             "content": content,
             "output": output,
             **({"files": files} if files else {}),
