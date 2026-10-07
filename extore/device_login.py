@@ -322,7 +322,9 @@ async def create_request(request: Request):
     from .agent_identity import normalize_identity
 
     try:
-        name, agent_type = normalize_identity(body.client_name, body.agent_type)
+        name, agent_type = normalize_identity(
+            body.client_name, body.agent_type, legacy=body.agent_type is None
+        )
     except ValueError:
         fail("处理端名称或类型无效", 400)
     if name != body.client_name or agent_type != body.agent_type:

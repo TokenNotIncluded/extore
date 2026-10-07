@@ -220,7 +220,11 @@ async def authorize_cli(request: Request):
     from .agent_identity import normalize_identity
 
     try:
-        name, agent_type = normalize_identity(body.client_name, body.agent_type)
+        name, agent_type = normalize_identity(
+            body.client_name.strip() if body.agent_type is None else body.client_name,
+            body.agent_type,
+            legacy=body.agent_type is None,
+        )
     except ValueError:
         fail("处理端名称或类型无效", 400)
     if agent_type is not None and (

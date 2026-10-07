@@ -6,10 +6,11 @@ import unicodedata
 from .security import fail
 
 
-def normalize_identity(client_name, agent_type=None):
-    def clean(value, maximum):
+def normalize_identity(client_name, agent_type=None, *, legacy=False):
+    def clean(value, maximum, *, historical=False):
         if not isinstance(value, str) or any(
-            unicodedata.category(char).startswith("C") or not char.isprintable()
+            unicodedata.category(char).startswith("C")
+            or (not historical and not char.isprintable())
             for char in value
         ):
             raise ValueError("处理端名称或类型无效")

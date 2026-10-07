@@ -417,7 +417,9 @@ def materialize(
     from .agent_identity import normalize_identity
 
     try:
-        client_name, agent_type = normalize_identity(client_name, agent_type)
+        client_name, agent_type = normalize_identity(
+            client_name, agent_type, legacy=agent_type is None
+        )
     except ValueError:
         fail("处理端名称或类型无效", 400)
     if issuer_role not in ("root", "shop"):
