@@ -27,7 +27,7 @@ extore manage login --device-code --origin https://extore.lmm.best --product PRO
 
 CLI 显示公开授权地址、短设备码和设备指纹，最多等待 10 分钟。本人在浏览器登录店主账号、输入设备码，核对名称、类型、指纹、商品和权限后批准。不需要预先创建管理链接，也不用将访问密钥交给 AI；审批后用本机保存的设备密钥续签。
 
-0.9.0 起，商品管理 CLI 登录需声明 `--client-name` 和 `--agent-type`。类型可用 `dots`、`grok_bot`、`other`，也可自定义；它只用于审批、审计和工人形象展示，不证明程序来自哪个厂商。旧设备授权继续有效，未申报类型的历史设备显示为未知，不自动补造身份。
+0.9.0 起，商品管理 CLI 的新登录需声明 `--client-name` 和 `--agent-type`，也可通过 `EXTORE_AGENT_NAME`、`EXTORE_AGENT_TYPE` 配置。类型可用 `dots`、`grok_bot`、`other`，也可自定义；它只用于审批、审计和工人形象展示，不证明程序来自哪个厂商。已有申请可沿用保存的身份继续领取，旧设备授权继续有效，未申报类型的历史设备显示为未知，不自动补造身份。
 
 单商品默认申请 `queue.view,queue.process,queue.retry`，可用 `--permissions` 显式请求该商品所需的其他权限，店主看到完整范围后批准。需要某店的全部队列商品可执行：
 
