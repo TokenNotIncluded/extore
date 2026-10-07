@@ -65,6 +65,9 @@ def public_product(p):
             "deleted",
             "deleted_at",
             "deleted_by",
+            "purged",
+            "purged_at",
+            "purged_by",
         )
     }
     if p.get("task_flow"):

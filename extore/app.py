@@ -53,7 +53,7 @@ from .private_worker import is_upload_path as private_worker_upload_path
 from .private_worker import router as private_worker_router
 from .processor_profiles import router as processor_profiles_router
 from .processors import processor_catalog
-from .product_lifecycle import DeleteProduct
+from .product_lifecycle import DeleteProduct, EmptyTrash
 from .proxy_routes import router as proxy_routes_router
 from .scope_auth import router as scope_auth_router
 from .security import (
@@ -543,7 +543,7 @@ def admin_products(
     request: Request,
     compact: bool = False,
     shop_id: str = "",
-    view: Literal["active", "deleted", "all"] = "active",
+    view: Literal["active", "deleted", "all", "history"] = "active",
 ):
     s = session(request)
     with db() as c:
@@ -581,6 +581,7 @@ def product_summary(p):
         **(
             {"deleted": True, "deleted_at": p["deleted_at"]} if p.get("deleted") else {}
         ),
+        **({"purged": True, "purged_at": p["purged_at"]} if p.get("purged") else {}),
         "parameters_count": len(p["parameters"]),
         "outputs_count": len(p["outputs"]),
         **({"shop_id": p["shop_id"]} if "shop_id" in p else {}),
@@ -737,6 +738,56 @@ def restore_managed_product(request: Request, product_id: str = ""):
     with db() as c:
         pid = management_scope(c, s, product_id, "product.delete")
         return product_lifecycle.set_deleted(c, pid, management_actor(s), False)
+
+
+@app.post("/api/admin/products/{pid}/purge")
+def purge_product(pid: str, body: DeleteProduct, request: Request):
+    s = session(request)
+    with db() as c:
+        authorize_management(c, s, "product.purge")
+        shops.authorize_product(c, s, pid)
+        return product_lifecycle.purge_product(c, pid, management_actor(s))
+
+
+@app.post("/api/manage/product/purge")
+def purge_managed_product(body: DeleteProduct, request: Request, product_id: str = ""):
+    s = session(request, ("admin", "staff"))
+    with db() as c:
+        pid = management_scope(c, s, product_id, "product.purge")
+        return product_lifecycle.purge_product(c, pid, management_actor(s))
+
+
+def _empty_product_trash(c, s, body, *, product_id="", shop_id=""):
+    authorize_management(c, s, "product.purge")
+    scope = selected_shop_scope(c, s, shop_id)
+    if s["role"] == "staff" or product_id:
+        pid = queue_product_id(s, product_id)
+        if any(candidate != pid for candidate in body.product_ids):
+            fail("只能清空当前授权商品的回收站", 403)
+    target_shop = scope
+    for pid in body.product_ids:
+        row = shops.authorize_product(c, s, pid)
+        if target_shop is None:
+            target_shop = row["shop_id"]
+        if row["shop_id"] != target_shop:
+            fail("一次清空只能操作同一店铺的商品", 403)
+    return product_lifecycle.purge_products(c, body.product_ids, management_actor(s))
+
+
+@app.post("/api/admin/products/empty-trash")
+def empty_product_trash(body: EmptyTrash, request: Request, shop_id: str = ""):
+    s = session(request)
+    with db() as c:
+        return _empty_product_trash(c, s, body, shop_id=shop_id)
+
+
+@app.post("/api/manage/products/empty-trash")
+def empty_managed_product_trash(
+    body: EmptyTrash, request: Request, product_id: str = "", shop_id: str = ""
+):
+    s = session(request, ("admin", "staff"))
+    with db() as c:
+        return _empty_product_trash(c, s, body, product_id=product_id, shop_id=shop_id)
 
 
 @app.put("/api/admin/products/{pid}")
@@ -1046,7 +1097,7 @@ def managed_products(
     request: Request,
     compact: bool = False,
     shop_id: str = "",
-    view: Literal["active", "deleted", "all"] = "active",
+    view: Literal["active", "deleted", "all", "history"] = "active",
 ):
     s = session(request, ("admin", "staff"))
     with db() as c:

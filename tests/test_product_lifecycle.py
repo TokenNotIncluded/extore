@@ -136,7 +136,7 @@ def test_explicit_delete_permission_and_previous_grants_not_extended(
     assert owner.get("/api/manage/product").status_code == 403
     assert owner.post("/api/manage/product/restore").status_code == 200
     assert LINK_PERMISSIONS[:3] == ("queue.view", "queue.process", "queue.retry")
-    assert LINK_PERMISSIONS[-1] == "product.delete"
+    assert LINK_PERMISSIONS[8] == "product.delete"
 
 
 def test_cross_shop_delete_restore_are_forbidden(owner):
@@ -301,6 +301,7 @@ def test_old_webhook_callback_continues_after_delete(owner, setup_product):
 def test_additive_schema15_preserves_all_old54_tables(owner, setup_product):
     setup_product()
     with db() as c:
+        c.execute("DROP TABLE product_purges")
         c.execute("DROP TABLE product_lifecycle")
         c.execute("PRAGMA user_version=14")
         before = {
@@ -316,14 +317,14 @@ def test_additive_schema15_preserves_all_old54_tables(owner, setup_product):
     init()
     init()
     with db() as c:
-        assert c.execute("PRAGMA user_version").fetchone()[0] == 15
+        assert c.execute("PRAGMA user_version").fetchone()[0] == 16
         after = {
             r["name"]: r["sql"]
             for r in c.execute(
                 "SELECT name,sql FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'"
             )
         }
-        assert set(after) - set(before) == {"product_lifecycle"}
+        assert set(after) - set(before) == {"product_lifecycle", "product_purges"}
         for name, (ddl, rows) in before.items():
             assert after[name] == ddl
             assert [tuple(v) for v in c.execute('SELECT * FROM "' + name + '"')] == rows

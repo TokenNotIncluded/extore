@@ -441,6 +441,7 @@ def test_schema13_additive_migration_preserves_old39_tables(owner):
             "task_flow_runs",
             "card_task_flows",
             "text_card_payloads",
+            "product_purges",
             "product_lifecycle",
             "cli_scope_requests",
             "pipeline_bindings",
@@ -462,7 +463,7 @@ def test_schema13_additive_migration_preserves_old39_tables(owner):
         }
     init()
     with db() as c:
-        assert c.execute("PRAGMA user_version").fetchone()[0] == 15
+        assert c.execute("PRAGMA user_version").fetchone()[0] == 16
         for name, (ddl, rows) in before.items():
             assert (
                 c.execute(

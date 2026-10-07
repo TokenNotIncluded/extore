@@ -133,8 +133,8 @@ def init():
             product_lifecycle,
         ):
             module.init_schema(c)
-        if c.execute("PRAGMA user_version").fetchone()[0] < 15:
-            c.execute("PRAGMA user_version=15")
+        if c.execute("PRAGMA user_version").fetchone()[0] < 16:
+            c.execute("PRAGMA user_version=16")
     # WAL is set outside a transaction.
     with sqlite3.connect(DATA / "extore.sqlite3") as c:
         c.execute("PRAGMA journal_mode=WAL")
