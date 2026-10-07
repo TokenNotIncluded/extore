@@ -12,6 +12,11 @@
       throw new Error("CLI 授权仅支持 HTTPS，开发环境可使用本机 HTTP。");
     return url.origin;
   }
+  function connectionAdvice(en) {
+    return en
+      ? "If this environment needs a network proxy, add --proxy-env to CLI commands to use its existing proxy settings, or configure EXTORE_PROXY privately. Keep proxy credentials out of prompts and logs; TLS verification remains enabled."
+      : "若当前环境需要网络代理，给 CLI 命令加 --proxy-env 使用已有环境代理，或私密配置 EXTORE_PROXY。代理凭据不要放进提示词或日志，TLS 证书校验保持开启。";
+  }
   function build(options = {}) {
     const en = options.language === "en";
     const base = origin(options.origin);
@@ -105,7 +110,7 @@
       : "授权变更是可选操作，必须由商家本人在浏览器核对批准。AUTHORIZATION_ID 或 DEVICE_ID 使用完成登录结果中的公开 ID，不导出私有配置。DESIRED_PERMISSIONS_CSV 是逗号分隔的完整期望权限集合，须包含全部已有权限，不是只填新增权限；省略 --permissions 则保留当前权限。把新的公开确认网址、设备码、指纹、申请范围与原因交给商家，然后在同一设备和配置重复原命令，去掉 --no-wait 恢复申请；不要代替商家批准。申请被拒绝或过期，原授权保持不变，仅使用当前已批准的权限。任务不需要扩权时，不执行下面的变更示例。"}`;
     const upgradeBase = !options.deviceCode ? "" : `extore manage authorize --origin ${quotedOrigin} ${options.existingLink ? "--grant DEVICE_ID" : "--authorization AUTHORIZATION_ID"}${pipelineScope ? " --pipelines-all" : " --permissions DESIRED_PERMISSIONS_CSV"} --reason "${en ? "Why these additions are needed" : "实际需要增加权限或商品的原因"}"`;
     const upgradeCommands = !options.deviceCode || options.boardOnly ? "" : `\n\n${upgrade}\n\n\`\`\`text\n${upgradeBase} --no-wait\n# ${en ? "After the merchant personally approves, resume on the same device and profile:" : "商家本人批准后，在同一设备和配置恢复："}\n${upgradeBase}\n\`\`\``;
-    return `${goal}\n\n${login}${scope ? "\n\n" + scope : ""}\n\n${workflow}\n\n${plans}\n\n${en ? "CLI commands (replace IDs and filenames with the actual values):" : "CLI 命令（把 ID、文件名替换为实际值）："}\n\n\`\`\`text
+    return `${goal}\n\n${connectionAdvice(en)}\n\n${login}${scope ? "\n\n" + scope : ""}\n\n${workflow}\n\n${plans}\n\n${en ? "CLI commands (replace IDs and filenames with the actual values):" : "CLI 命令（把 ID、文件名替换为实际值）："}\n\n\`\`\`text
 uv tool install --upgrade 'extore>=0.9.0'
 ${loginCommands}${canProcess ? `extore manage next ${pipelineScope ? "--all" : "--product PRODUCT_ID"} --origin ${quotedOrigin} --watch --limit 1
 # ${en ? "Replace ATTEMPT with job.attempt; include epoch/action flags only for flow tasks. Omit --file for outputs without attachments." : "ATTEMPT 使用 job.attempt；仅流程任务带步骤 epoch/action 参数，无附件输出时去掉 --file。"}
@@ -151,7 +156,7 @@ extore manage job JOB_ID --product PRODUCT_ID`}
     const customer = en
       ? "Customer commands are available for authorized end-to-end checks, using only test codes or customer credentials explicitly supplied for that purpose. Pass private codes through exchange --codes-stdin and receipt links through import-receipt --link-stdin. Use the saved local receipt ID thereafter. Read each batch card's schema before redeem/retry; --card selects one card, --items-file submits per-card parameters, and repeated --file FIELD=PATH uploads input attachments. reveal/download write a new private file and may consume one-time delivery; destroy --confirm is irreversible. Do not run these against a real pending task merely to test the CLI."
       : "顾客命令可用于已授权的完整流程检查，只使用专用测试卡密或明确提供给此用途的顾客凭证。卡密通过 exchange --codes-stdin 输入，领取链接通过 import-receipt --link-stdin 输入，之后使用本地领取记录 ID。批量卡密逐卡读取定义；--card 选择单卡，--items-file 提交逐卡参数，可重复 --file FIELD=PATH 上传顾客附件。reveal/download 写入新的私有文件，领取可能消耗一次性内容；destroy --confirm 不可恢复。不要为了测试 CLI 操作真实的待处理任务。";
-    return `${goal}\n\n${login}\n\n${workflow}\n\n${jobs}\n\n${customer}\n\n${en ? "Commands (replace IDs and filenames; these are examples, not an instruction to run all writes):" : "命令（替换 ID 和文件名；以下是操作示例，不是要求执行全部写操作）："}\n\n\`\`\`text
+    return `${goal}\n\n${connectionAdvice(en)}\n\n${login}\n\n${workflow}\n\n${jobs}\n\n${customer}\n\n${en ? "Commands (replace IDs and filenames; these are examples, not an instruction to run all writes):" : "命令（替换 ID 和文件名；以下是操作示例，不是要求执行全部写操作）："}\n\n\`\`\`text
 uv tool install --upgrade 'extore>=0.9.0'
 extore admin login --origin ${quotedOrigin} --client-name "AI CLI"
 extore admin login-status --origin ${quotedOrigin}

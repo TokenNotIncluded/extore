@@ -3707,7 +3707,7 @@ function progressBoardFixture({ shop = "shop-a", productId = "p1", view = "activ
       queue_position: null, worker_id: "a".repeat(64), step_count: 2, completed_step_count: 1,
       steps: [{ position: 1, state: "done" }, { position: 2, state: "current" }], flow_phase: null,
     }] }],
-    workers: [{ id: "a".repeat(64), name: "Worker", kind: "unknown", active_jobs: view === "active" ? 1 : 0, completed_jobs: view === "processed" ? 1 : 0, last_update: 1700000001 }],
+    workers: [{ id: "a".repeat(64), name: "Worker", kind: "unknown", agent_type: null, active_jobs: view === "active" ? 1 : 0, completed_jobs: view === "processed" ? 1 : 0, last_update: 1700000001 }],
     pagination: { limit, offset, total: 1, has_more: false }, scope: { product_ids: [productId] },
   };
 }

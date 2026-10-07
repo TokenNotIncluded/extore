@@ -212,13 +212,13 @@ test("approval and QR modules load before app startup with revised assets", () =
   assert.ok(owner >= 0 && account > owner && app > account);
   assert.match(scripts[owner][1], /\bdefer\b/);
   assert.match(scripts[owner][2], /\?v=20261007-shops$/);
-  assert.match(scripts[app][2], /\?v=20261007-workflows$/);
+  assert.match(scripts[app][2], /\?v=20261007-queue-refinement$/);
   const device = scripts.findIndex((script) => script[2].startsWith("/static/device-login.js"));
   const encoder = scripts.findIndex((script) => script[2].startsWith("/static/vendor/qrcodegen.js"));
   const qr = scripts.findIndex((script) => script[2].startsWith("/static/totp-qr.js"));
   assert.ok(encoder >= 0 && qr > encoder && account > qr && device > account && app > device);
   assert.match(scripts[account][2], /\?v=20261007-workflows$/);
-  assert.match(scripts[device][2], /\?v=20261007-scoped-pipelines$/);
+  assert.match(scripts[device][2], /\?v=20261007-queue-design$/);
 });
 
 test("merchant dashboard displays escaped shop name and email and refreshes without replacing the form", () => {
