@@ -34,15 +34,51 @@ def add_commands(subcommands):
         "proxy", help="shop-isolated signed card destinations; no private-key exports"
     )
     proxy_groups = proxy.add_subparsers(dest="proxy_command", required=True)
-    identities = _operations(proxy_groups.add_parser("identities"), ("list", "create"))
-    identities["create"].add_argument("--name", required=True)
+    identities = _operations(
+        proxy_groups.add_parser("identities"),
+        ("list", "replace", "create", "cleanup-preview", "delete"),
+    )
+    identities["list"].add_argument(
+        "--history", action="store_true", help="include superseded issuer identities"
+    )
+    for operation in ("replace", "create"):
+        identities[operation].add_argument("--name", required=True)
+        identities[operation].description = (
+            "Replace the current shop issuer. New cards use the new local route; "
+            "previously issued cards keep their existing route."
+        )
     routes = _operations(
         proxy_groups.add_parser("routes"),
-        ("list", "create", "import", "export", "enable", "disable", "default"),
+        (
+            "list",
+            "create",
+            "import",
+            "export",
+            "enable",
+            "disable",
+            "default",
+            "cleanup-preview",
+            "delete",
+        ),
     )
-    for parser in (*identities.values(), *routes.values()):
+    cleanup = proxy_groups.add_parser(
+        "cleanup", help="remove unused historical identities and disabled routes"
+    )
+    business._scope(cleanup, product=False)
+    cleanup.set_defaults(operation="cleanup")
+    cleanup.add_argument("--yes", action="store_true", required=True)
+    for parser in (*identities.values(), *routes.values(), cleanup):
         parser.add_argument(
             "--shop", help="explicit shop UUID; required for platform-root devices"
+        )
+    for parsers in (identities, routes):
+        for operation in ("cleanup-preview", "delete"):
+            parsers[operation].add_argument("id", help="immutable identity or route ID")
+        parsers["delete"].add_argument(
+            "--yes",
+            action="store_true",
+            required=True,
+            help="delete this unused historical identity or disabled route",
         )
     routes["create"].add_argument("--name", required=True)
     routes["create"].add_argument(
@@ -499,6 +535,7 @@ def proxy_metadata(value, *, public=False):
             "created",
             "updated",
             "kind",
+            "current",
         )
     )
     return {key: value[key] for key in keys if key in value}
@@ -553,6 +590,100 @@ def _public_proxy_route(value, *, input=False):
     return route
 
 
+def _proxy_cleanup_metadata(value, *, shop, target=None, identity=False, preview=False):
+    """Cleanup responses contain identifiers and counts, never signing material."""
+    if not isinstance(value, dict) or value.get("shop_id") != shop:
+        raise ManageError(
+            "Cleanup response belongs to a different shop", code="invalid_response"
+        )
+    keys = (
+        "ok",
+        "shop_id",
+        "id",
+        "identity_id",
+        "route_id",
+        "eligible",
+        "current",
+        "enabled",
+        "default_issuer",
+        "route_count",
+        "issued_card_count",
+        "reason",
+        "deleted",
+        "deleted_identity_ids",
+        "deleted_route_ids",
+        "deleted_identity_count",
+        "deleted_route_count",
+    )
+    result = {key: value[key] for key in keys if key in value}
+    if target is not None:
+        actual = (
+            value.get("id", value.get("identity_id"))
+            if identity
+            else value.get("route_id")
+        )
+        if actual != target:
+            raise ManageError(
+                "Cleanup response does not match the selected identity or route",
+                code="invalid_response",
+            )
+    if preview and type(value.get("eligible")) is not bool:
+        raise ManageError("Invalid cleanup preview", code="invalid_response")
+    if not preview and value.get("ok") is not True:
+        raise ManageError("Invalid cleanup result", code="invalid_response")
+    for key in (
+        "ok",
+        "eligible",
+        "current",
+        "enabled",
+        "default_issuer",
+        "deleted",
+    ):
+        if key in result and type(result[key]) is not bool:
+            raise ManageError("Invalid cleanup status", code="invalid_response")
+    for key in (
+        "route_count",
+        "issued_card_count",
+        "deleted_identity_count",
+        "deleted_route_count",
+    ):
+        if key in result and (type(result[key]) is not int or result[key] < 0):
+            raise ManageError("Invalid cleanup count", code="invalid_response")
+    for key in ("deleted_identity_ids", "deleted_route_ids"):
+        if key in result and (
+            not isinstance(result[key], list)
+            or any(
+                not isinstance(item, str) or not re.fullmatch(r"[0-9a-f]{32}", item)
+                for item in result[key]
+            )
+        ):
+            raise ManageError("Invalid cleanup identifiers", code="invalid_response")
+    for key in ("id", "identity_id", "route_id"):
+        if key in result and (
+            not isinstance(result[key], str)
+            or not re.fullmatch(r"[0-9a-f]{32}", result[key])
+        ):
+            raise ManageError("Invalid cleanup identifier", code="invalid_response")
+    if "reason" in result and not isinstance(result["reason"], str):
+        raise ManageError("Invalid cleanup reason", code="invalid_response")
+    for count, ids in (
+        ("deleted_identity_count", "deleted_identity_ids"),
+        ("deleted_route_count", "deleted_route_ids"),
+    ):
+        if (
+            count in result
+            and ids in result
+            and (
+                result[count] != len(set(result[ids]))
+                or len(result[ids]) != len(set(result[ids]))
+            )
+        ):
+            raise ManageError(
+                "Cleanup counts do not match identifiers", code="invalid_response"
+            )
+    return result
+
+
 def _proxy_dispatch(client, owner, args):
     if "shop_id" not in owner:
         raise ManageError("Refresh the pinned owner identity", code="invalid_response")
@@ -562,8 +693,10 @@ def _proxy_dispatch(client, owner, args):
     _profile_shop(owner, shop)
     query = {"shop_id": shop}
     group, operation = args.proxy_command, args.operation
+    if operation in ("delete", "cleanup") and not getattr(args, "yes", False):
+        raise ManageError("Confirm cleanup explicitly with --yes", code="invalid_input")
     path = PROXY_PREFIX + "/" + group
-    if group == "identities" and operation == "create":
+    if group == "identities" and operation in ("replace", "create"):
         value = client.request(
             owner, "POST", path, json={"name": args.name, "shop_id": shop}
         )
@@ -572,6 +705,39 @@ def _proxy_dispatch(client, owner, args):
                 "Issuer response belongs to a different shop", code="invalid_response"
             )
         return business._finish(args, {"ok": True, "result": proxy_metadata(value)})
+    if group == "cleanup":
+        value = client.request(
+            owner, "POST", PROXY_PREFIX + "/cleanup", json={"shop_id": shop}
+        )
+        return business._finish(
+            args, {"ok": True, "result": _proxy_cleanup_metadata(value, shop=shop)}
+        )
+    if operation in ("cleanup-preview", "delete"):
+        if not isinstance(args.id, str) or not re.fullmatch(r"[0-9a-f]{32}", args.id):
+            raise ManageError(
+                "Provide a valid issuer or route ID", code="invalid_input"
+            )
+        path += "/" + args.id
+        preview = operation == "cleanup-preview"
+        value = client.request(
+            owner,
+            "GET" if preview else "DELETE",
+            path + ("/cleanup-preview" if preview else ""),
+            params=query,
+        )
+        return business._finish(
+            args,
+            {
+                "ok": True,
+                "result": _proxy_cleanup_metadata(
+                    value,
+                    shop=shop,
+                    target=args.id,
+                    identity=group == "identities",
+                    preview=preview,
+                ),
+            },
+        )
     if group == "routes" and operation in ("create", "import"):
         if operation == "create":
             body = {
@@ -593,6 +759,8 @@ def _proxy_dispatch(client, owner, args):
                 "Route response belongs to a different shop", code="invalid_response"
             )
         return business._finish(args, {"ok": True, "result": proxy_metadata(value)})
+    if group == "identities" and operation == "list" and args.history:
+        query["history"] = "true"
     rows = client.request(owner, "GET", path, params=query)
     if not isinstance(rows, list) or any(
         not isinstance(row, dict) or row.get("shop_id") != shop for row in rows
