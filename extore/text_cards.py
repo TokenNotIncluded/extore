@@ -130,6 +130,9 @@ def issue_text_cards(c, pid, text, *, variant_id="default", label="", expires=No
     from .shops import require_enabled_product
 
     source = require_enabled_product(c, pid)
+    from .product_lifecycle import require_active
+
+    require_active(c, pid)
     p = product(c, pid)
     if p["mode"] != "stock":
         fail("请先将商品处理方式设为一卡一文本", 409)

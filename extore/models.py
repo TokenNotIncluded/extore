@@ -22,6 +22,7 @@ LINK_PERMISSIONS = (
     "cards.manage",
     "events.manage",
     "links.delegate",
+    "product.delete",
 )
 DEFAULT_LINK_PERMISSIONS = ("queue.view", "queue.process")
 

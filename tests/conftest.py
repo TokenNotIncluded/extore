@@ -66,6 +66,7 @@ def clean():
             "processor_profiles",
             "jobs",
             "cards",
+            "product_lifecycle",
             "products",
             "shops",
             "settings",

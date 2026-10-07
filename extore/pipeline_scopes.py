@@ -334,8 +334,13 @@ def _draft(c, draft, existing):
             product_ids
         ):
             fail("追加授权不能缩减或替换原来的商品及权限", 403)
+    from .product_lifecycle import require_active
+
+    retained = old_products if existing else set()
     for product_id in product_ids:
         _product(c, product_id, shop_id, kind)
+        if product_id not in retained:
+            require_active(c, product_id)
     return shop_id, kind, sorted(product_ids), permissions, expires
 
 

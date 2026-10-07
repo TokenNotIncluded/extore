@@ -543,6 +543,9 @@ def bind_profile(product_id: str, body: ProfileBinding, request: Request):
     owner = session(request)
     with db() as c:
         product_row = authorize_product(c, owner, product_id)
+        from .product_lifecycle import require_active
+
+        require_active(c, product_id)
         profile = _profile(c, body.profile_id, owner)
         values = json.loads(product_row["config"])
         if (
@@ -566,6 +569,9 @@ def unbind_profile(product_id: str, request: Request):
     owner = session(request)
     with db() as c:
         authorize_product(c, owner, product_id)
+        from .product_lifecycle import require_active
+
+        require_active(c, product_id)
         c.execute(
             "DELETE FROM processor_product_bindings WHERE product_id=?", (product_id,)
         )

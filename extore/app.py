@@ -11,7 +11,7 @@ from fastapi import FastAPI, HTTPException, Request, Response
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
-from . import auth, shops
+from . import auth, product_lifecycle, shops
 from .account_auth import router as account_auth_router
 from .automation import router as automation_router
 from .batch_redemption import router as batch_redemption_router
@@ -53,6 +53,7 @@ from .private_worker import is_upload_path as private_worker_upload_path
 from .private_worker import router as private_worker_router
 from .processor_profiles import router as processor_profiles_router
 from .processors import processor_catalog
+from .product_lifecycle import DeleteProduct
 from .proxy_routes import router as proxy_routes_router
 from .scope_auth import router as scope_auth_router
 from .security import (
@@ -254,7 +255,7 @@ def public_products(shop_id: str = ""):
             public_product(product(c, r["id"]))
             for r in c.execute(
                 "SELECT products.id FROM products JOIN shops ON shops.id=products.shop_id "
-                "WHERE shops.enabled=1 AND (?='' OR products.shop_id=?) ORDER BY products.created",
+                "WHERE shops.enabled=1 AND NOT EXISTS (SELECT 1 FROM product_lifecycle l WHERE l.product_id=products.id AND l.deleted_at IS NOT NULL) AND (?='' OR products.shop_id=?) ORDER BY products.created",
                 (shop_id, shop_id),
             )
         ]
@@ -538,7 +539,12 @@ def destroy(body: TokenInput):
 
 
 @app.get("/api/admin/products")
-def admin_products(request: Request, compact: bool = False, shop_id: str = ""):
+def admin_products(
+    request: Request,
+    compact: bool = False,
+    shop_id: str = "",
+    view: Literal["active", "deleted", "all"] = "active",
+):
     s = session(request)
     with db() as c:
         authorize_management(c, s)
@@ -551,6 +557,7 @@ def admin_products(request: Request, compact: bool = False, shop_id: str = ""):
                 "SELECT id FROM products WHERE (? IS NULL OR shop_id=?) ORDER BY created",
                 (scope, scope),
             )
+            if product_lifecycle.matches(c, r["id"], view)
         ]
 
 
@@ -565,12 +572,15 @@ def owner_product_view(c, pid, owner_session=None):
         from .processor_profiles import product_configuration_view
 
         values.update(product_configuration_view(c, pid, owner_session))
-    return values
+    return product_lifecycle.decorate(c, values)
 
 
 def product_summary(p):
     return {
         **{key: p[key] for key in ("id", "name", "mode", "delivery", "view_policy")},
+        **(
+            {"deleted": True, "deleted_at": p["deleted_at"]} if p.get("deleted") else {}
+        ),
         "parameters_count": len(p["parameters"]),
         "outputs_count": len(p["outputs"]),
         **({"shop_id": p["shop_id"]} if "shop_id" in p else {}),
@@ -662,6 +672,7 @@ def quick_product(body: QuickProductInput, request: Request, shop_id: str = ""):
             source_row = shops.authorize_product(c, s, body.from_product_id)
             if source_row["shop_id"] != shop_id:
                 fail("商品模板只能复制到同一店铺", 403)
+            product_lifecycle.require_active(c, body.from_product_id)
             source = product(c, body.from_product_id)
             values = {key: value for key, value in source.items() if key != "id"}
             # A new configuration link must never inherit the source product's
@@ -694,6 +705,40 @@ def quick_product(body: QuickProductInput, request: Request, shop_id: str = ""):
         return {"product": owner_product_view(c, pid, s), "management_link": link}
 
 
+@app.delete("/api/admin/products/{pid}")
+def delete_product(pid: str, body: DeleteProduct, request: Request):
+    s = session(request)
+    with db() as c:
+        authorize_management(c, s)
+        shops.authorize_product(c, s, pid)
+        return product_lifecycle.set_deleted(c, pid, management_actor(s), True)
+
+
+@app.post("/api/admin/products/{pid}/restore")
+def restore_product(pid: str, request: Request):
+    s = session(request)
+    with db() as c:
+        authorize_management(c, s)
+        shops.authorize_product(c, s, pid)
+        return product_lifecycle.set_deleted(c, pid, management_actor(s), False)
+
+
+@app.delete("/api/manage/product")
+def delete_managed_product(body: DeleteProduct, request: Request, product_id: str = ""):
+    s = session(request, ("admin", "staff"))
+    with db() as c:
+        pid = management_scope(c, s, product_id, "product.delete")
+        return product_lifecycle.set_deleted(c, pid, management_actor(s), True)
+
+
+@app.post("/api/manage/product/restore")
+def restore_managed_product(request: Request, product_id: str = ""):
+    s = session(request, ("admin", "staff"))
+    with db() as c:
+        pid = management_scope(c, s, product_id, "product.delete")
+        return product_lifecycle.set_deleted(c, pid, management_actor(s), False)
+
+
 @app.put("/api/admin/products/{pid}")
 def edit_product(pid: str, body: Product, request: Request):
     s = session(request)
@@ -705,6 +750,7 @@ def edit_product(pid: str, body: Product, request: Request):
 
 
 def save_product(c, pid, body, actor, actor_session=None):
+    product_lifecycle.require_active(c, pid)
     old = product(c, pid)
     freeze_product_plans(c, pid, old["progress_steps"])
     freeze_product_schemas(c, pid, old)
@@ -852,6 +898,7 @@ def create_product_link(c, body, s):
     pid = queue_product_id(s, body.product_id)
     authorize_management(c, s)
     shops.authorize_product(c, s, pid)
+    product_lifecycle.require_active(c, pid)
     now = time.time()
     parent_id = s["staff_id"] if s["role"] == "staff" else None
     if parent_id:
@@ -995,7 +1042,12 @@ def staff_login(body: TokenInput, request: Request, response: Response):
 
 
 @app.get("/api/manage/products")
-def managed_products(request: Request, compact: bool = False, shop_id: str = ""):
+def managed_products(
+    request: Request,
+    compact: bool = False,
+    shop_id: str = "",
+    view: Literal["active", "deleted", "all"] = "active",
+):
     s = session(request, ("admin", "staff"))
     with db() as c:
         queue_staff_authorization(c, s)
@@ -1008,25 +1060,30 @@ def managed_products(request: Request, compact: bool = False, shop_id: str = "")
         ).fetchall()
         result = []
         for r in rows:
-            p = product(c, r["id"])
+            if not product_lifecycle.matches(c, r["id"], view):
+                continue
+            p = product_lifecycle.decorate(c, product(c, r["id"]))
             if compact:
                 result.append(product_summary(p))
                 continue
             result.append(
                 {
-                    key: p[key]
-                    for key in (
-                        "id",
-                        "name",
-                        "mode",
-                        "delivery",
-                        "view_policy",
-                        "parameters",
-                        "outputs",
-                        "variants",
-                        "progress_steps",
-                        "support_email",
-                    )
+                    **{
+                        key: p[key]
+                        for key in (
+                            "id",
+                            "name",
+                            "mode",
+                            "delivery",
+                            "view_policy",
+                            "parameters",
+                            "outputs",
+                            "variants",
+                            "progress_steps",
+                            "support_email",
+                        )
+                    },
+                    **product_lifecycle.metadata(c, r["id"]),
                 }
             )
         return result
@@ -1281,7 +1338,11 @@ def managed_product(request: Request, product_id: str = ""):
     s = session(request, ("admin", "staff"))
     with db() as c:
         pid = management_scope(c, s, product_id, "product.edit")
-        p = owner_product_view(c, pid, s) if s["role"] == "admin" else product(c, pid)
+        p = (
+            owner_product_view(c, pid, s)
+            if s["role"] == "admin"
+            else product_lifecycle.decorate(c, product(c, pid))
+        )
         return managed_product_view(p, s)
 
 

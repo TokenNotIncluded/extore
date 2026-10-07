@@ -74,7 +74,9 @@ class ScopeRequest(BaseModel):
     kind: Literal["product", "shop.pipeline"]
     shop_id: str | None = None
     product_ids: list[str] = Field(max_length=scopes.MAX_PRODUCTS)
-    permissions: list[str] = Field(min_length=1, max_length=8)
+    permissions: list[str] = Field(
+        min_length=1, max_length=len(scopes.LINK_PERMISSIONS)
+    )
     authorization_id: str | None = None
     expected_revision: int | None = Field(default=None, ge=1, strict=True)
     reason: str = Field(default="", max_length=1000)
@@ -85,13 +87,17 @@ class ScopeOptions(BaseModel):
     model_config = ConfigDict(extra="forbid")
     user_code: str = Field(min_length=1, max_length=64)
     product_ids: list[str] | None = Field(default=None, max_length=scopes.MAX_PRODUCTS)
-    permissions: list[str] | None = Field(default=None, max_length=8)
+    permissions: list[str] | None = Field(
+        default=None, max_length=len(scopes.LINK_PERMISSIONS)
+    )
     expires: float | None = None
 
 
 class ScopeApproval(ScopeOptions):
     product_ids: list[str] = Field(min_length=1, max_length=scopes.MAX_PRODUCTS)
-    permissions: list[str] = Field(min_length=1, max_length=8)
+    permissions: list[str] = Field(
+        min_length=1, max_length=len(scopes.LINK_PERMISSIONS)
+    )
     expires: float
     review_digest: str = Field(pattern=r"^[0-9a-f]{64}$")
 
@@ -419,7 +425,8 @@ async def create_request(request: Request):
         shop_row(c, sid)
         if body.kind == "shop.pipeline" and not pids:
             rows = c.execute(
-                "SELECT id,config FROM products WHERE shop_id=? ORDER BY id", (sid,)
+                "SELECT id,config FROM products WHERE shop_id=? AND NOT EXISTS (SELECT 1 FROM product_lifecycle l WHERE l.product_id=products.id AND l.deleted_at IS NOT NULL) ORDER BY id",
+                (sid,),
             ).fetchall()
             pids = [
                 r["id"] for r in rows if json.loads(r["config"]).get("mode") == "manual"
@@ -447,6 +454,8 @@ async def create_request(request: Request):
             current = scopes.find_recovery(
                 c, sid, body.kind, body.public_key, sorted(pids), permissions
             )
+        if current and body.kind == "shop.pipeline":
+            pids = sorted(set(pids) | set(current["product_ids"]))
         grant_expires = (
             current["expires"] if current else now + scopes.DEFAULT_DAYS * 86400
         )

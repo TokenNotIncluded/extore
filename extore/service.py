@@ -62,6 +62,9 @@ def public_product(p):
             "processor_binding",
             "configured_fields",
             "task_flow",
+            "deleted",
+            "deleted_at",
+            "deleted_by",
         )
     }
     if p.get("task_flow"):
@@ -98,6 +101,9 @@ def issue_cards(
     from .shops import require_enabled_product
 
     owner = require_enabled_product(c, pid)
+    from .product_lifecycle import require_active
+
+    require_active(c, pid)
     route = default_issuer_route(c, owner["shop_id"], routed)
     p = product(c, pid)
     if p["mode"] == "stock":

@@ -116,6 +116,7 @@ def init():
             flow_adapter,
             flow_worker,
             private_worker,
+            product_lifecycle,
             proxy_routes,
             task_flow,
             text_cards,
@@ -129,10 +130,11 @@ def init():
             private_worker,
             proxy_routes,
             automation,
+            product_lifecycle,
         ):
             module.init_schema(c)
-        if c.execute("PRAGMA user_version").fetchone()[0] < 14:
-            c.execute("PRAGMA user_version=14")
+        if c.execute("PRAGMA user_version").fetchone()[0] < 15:
+            c.execute("PRAGMA user_version=15")
     # WAL is set outside a transaction.
     with sqlite3.connect(DATA / "extore.sqlite3") as c:
         c.execute("PRAGMA journal_mode=WAL")
