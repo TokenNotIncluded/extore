@@ -823,9 +823,69 @@ async function readReceipt(options = {}) {
   }
   return result;
 }
+function deliveryTextControls(generation, index, label) {
+  const id = `delivery-text-${generation}-${index}`;
+  return `<div class="delivery-text-actions"><button id="${id}-copy" class="secondary" type="button" aria-label="${esc(tr("复制原文：", "Copy original text: ") + label)}">${tr("复制文本", "Copy text")}</button><button id="${id}-download" class="secondary" type="button" aria-label="${esc(tr("下载原文：", "Download original text: ") + label)}">${tr("下载文本", "Download text")}</button><span id="${id}-status" class="caption" role="status" aria-live="polite"></span></div><div id="${id}-manual" class="delivery-text-manual" hidden><label for="${id}-raw">${tr("原文，可手动复制", "Original text, available to copy manually")}</label><textarea id="${id}-raw" readonly rows="3" spellcheck="false"></textarea></div>`;
+}
+function deliveryTextDownload(key, text) {
+  const safeKey = String(key).toLowerCase().replace(/[^a-z0-9_-]/g, "-").replace(/-+/g, "-").replace(/^-+|-+$/g, "").slice(0, 60) || "content";
+  let extension = "txt";
+  if (/(?:^|_)json$/.test(String(key)) || key === "summary" || /^\s*[\[{]/.test(text)) {
+    try { JSON.parse(text); extension = "json"; } catch { /* Ordinary text remains a text download. */ }
+  }
+  return { filename: `extore-${safeKey}.${extension}`, type: extension === "json" ? "application/json;charset=utf-8" : "text/plain;charset=utf-8" };
+}
+function bindDeliveryText(content, entries, context, generation, jobScope) {
+  for (const { index, key, text } of entries) {
+    const id = `delivery-text-${generation}-${index}`;
+    const copy = $("#" + id + "-copy"), download = $("#" + id + "-download"), status = $("#" + id + "-status");
+    const active = (button) => context.active() && generation === deliveryRevealGeneration && currentJob?.id === jobScope.id && currentJob?.revision?.current === jobScope.revision && currentJob?.state !== "destroyed" && $("#content") === content && button?.isConnected && content.contains(button);
+    copy?.addEventListener("click", async () => {
+      if (!active(copy) || copy.disabled) return;
+      copy.disabled = true;
+      const copied = await writeClipboard(text);
+      if (!active(copy)) return;
+      copy.disabled = false;
+      status.textContent = copied ? tr("文本已复制", "Text copied") : tr("复制失败，请手动复制下方原文。", "Could not copy. Select the original text below.");
+      if (!copied) {
+        const manual = $("#" + id + "-manual"), field = $("#" + id + "-raw");
+        if (manual && field) { manual.hidden = false; field.value = text; field.focus(); field.select(); }
+      }
+    });
+    download?.addEventListener("click", () => {
+      if (!active(download)) return;
+      const definition = deliveryTextDownload(key, text);
+      let url;
+      try { url = URL.createObjectURL(new Blob([text], { type: definition.type })); }
+      catch { status.textContent = tr("下载失败，请复制文本保存。", "Could not download. Copy the text to save it."); return; }
+      const blobKey = "text:" + url;
+      const entry = { context: { active: () => active(download) }, url };
+      deliveryBlobs.set(blobKey, entry);
+      const revoke = () => {
+        if (deliveryBlobs.get(blobKey) !== entry) return;
+        URL.revokeObjectURL(url);
+        deliveryBlobs.delete(blobKey);
+      };
+      try {
+        if (!active(download)) { revoke(); return; }
+        const anchor = document.createElement("a");
+        anchor.href = url;
+        anchor.download = definition.filename;
+        anchor.click();
+        status.textContent = tr("已开始下载", "Download started");
+      } catch {
+        revoke();
+        if (active(download)) status.textContent = tr("下载失败，请复制文本保存。", "Could not download. Copy the text to save it.");
+      } finally {
+        setTimeout(revoke, 30000);
+      }
+    });
+  }
+}
 async function revealReceipt(options = {}) {
   const context = receiptRequestContext(options);
   const revealGeneration = ++deliveryRevealGeneration;
+  const jobScope = { id: currentJob?.id, revision: currentJob?.revision?.current };
   const viewPolicy = currentProduct?.view_policy;
   const fields = currentProduct?.outputs || [];
   const result = await api(
@@ -838,8 +898,9 @@ async function revealReceipt(options = {}) {
     const content = $("#content");
     if (content) {
       const output = result.output || { content: result.content };
+      const textEntries = [];
       content.innerHTML = Object.entries(output)
-        .map(([key, value]) => {
+        .map(([key, value], index) => {
           const definition = fields.find((field) => field.key === key);
           const attachmentField = isAttachmentField(definition || {}) ? definition : { type: "file" };
           const ids = fieldAttachmentIds(attachmentField, value);
@@ -848,10 +909,15 @@ async function revealReceipt(options = {}) {
           const display = definition?.type === "boolean" && ["true", "false"].includes(value)
             ? value === "true" ? tr("是", "Yes") : tr("否", "No")
             : definition?.type === "select" ? localized((definition.options || []).find((option) => option.value === value)?.label) || value : value;
-          const contents = files.length ? files.map((file) => `<div>${images ? `<button class="secondary" data-delivery-image="${esc(file.id)}">${tr("查看图片", "View image")} · ${esc(file.filename)}</button><div data-delivery-preview="${esc(file.id)}"></div>` : ""}<button class="secondary" data-delivery-file="${esc(file.id)}">${tr("下载文件", "Download")} · ${esc(file.filename)}</button><p class="caption">${Math.ceil(file.size / 1024)} KiB</p></div>`).join("") : `<pre class="result">${esc(display)}</pre>`;
-          return `<div class="delivery-field"><h3>${esc(localized(definition?.label) || key)}</h3>${contents}</div>`;
+          const text = typeof value === "string" ? value : ["number", "boolean"].includes(typeof value) ? String(value) : null;
+          const label = localized(definition?.label) || key;
+          const textControls = !files.length && !isAttachmentField(definition || {}) && text !== null
+            ? (textEntries.push({ index, key, text }), deliveryTextControls(revealGeneration, index, label)) : "";
+          const contents = files.length ? files.map((file) => `<div>${images ? `<button class="secondary" data-delivery-image="${esc(file.id)}">${tr("查看图片", "View image")} · ${esc(file.filename)}</button><div data-delivery-preview="${esc(file.id)}"></div>` : ""}<button class="secondary" data-delivery-file="${esc(file.id)}">${tr("下载文件", "Download")} · ${esc(file.filename)}</button><p class="caption">${Math.ceil(file.size / 1024)} KiB</p></div>`).join("") : `<pre class="result">${esc(display)}</pre>${textControls}`;
+          return `<div class="delivery-field"><h3>${esc(label)}</h3>${contents}</div>`;
         })
         .join("");
+      bindDeliveryText(content, textEntries, context, revealGeneration, jobScope);
     }
     for (const file of result.files || []) {
       on('[data-delivery-file="' + file.id + '"]', () => downloadDeliveryFile(file));

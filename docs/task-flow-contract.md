@@ -5,6 +5,52 @@ processor profile's `workflow` (variables, secrets and execution limits).
 Ordinary cards have no `card_task_flows` binding and keep the existing behavior.
 Adding a graph to a product never changes cards already issued without a graph.
 
+## Versioned public development contract
+
+Definition version 1, private-worker transport version 2, profile configuration
+revisions and customer-visible `progress_steps` are separate contracts. This
+iteration standardizes authoring and validation without replacing the graph
+version or adding process callback states. Ordinary redemptions still use
+`task_flow: null`.
+
+`GET /api/task-flows/schema` exposes a JSON Schema Draft 2020-12 for structural
+tooling. Schema validation alone does not establish unique IDs, compatible
+references, attachment authority or successful execution along every path.
+`extore workflow validate --definition FILE --product FILE` and the public SDK's
+`FlowDefinition` use `validate_definition` for canonical semantic validation.
+The offline CLI neither initializes the database nor executes a processor.
+
+Authenticated draft validation is available at
+`POST /api/admin/task-flows/validate` for admin sessions and
+`POST /api/manage/task-flows/validate` for admin/staff sessions with
+`fulfillment.configure`. The strict body is
+`{definition, product: {mode, parameters, outputs}}`; extra keys, stored resource
+IDs and saved configuration credentials are not accepted. It returns
+`{ok: true, definition: canonical_or_null, summary}` without issuing cards,
+creating jobs or business events, or loading saved profiles/secrets. Normal
+authentication may still update session access metadata.
+
+The public schema endpoint uses `application/schema+json`; authenticated
+validation uses JSON. Its summary contains version, entry, node count, counts
+by kind and the 256 activation limit. Clients must discard obsolete draft
+responses rather than replacing a graph the user has since edited.
+
+`FlowDefinition.from_dict(..., product=...)` / `from_nodes(...)` return an
+immutable canonical definition; `as_dict()` returns a fresh copy and `to_json()`
+returns compact JSON text. Its reference and branch helpers construct data,
+never evaluate expressions. Invalid graphs raise `ValueError`. See the
+[development guide](workflow-development.md) and
+[validated examples](../examples/workflows/README.md) for authoring.
+
+`PrivateWorkerClient.execution(scope)` binds the convenience `FlowExecution`
+interface to one server-issued, verified scope. `started`, `progress`, `succeed`,
+`fail` and `upload` require explicit result IDs; they do not persist replay
+records, rerun business work, retry transport or extend deadlines. Existing
+low-level v2 methods retain their wire format. Process callbacks remain
+`processing`, `succeeded`, or `failed`; an application decision to reject is
+represented as a declared output and a branch to a `rejected` end. For queue
+management, existing authenticated retry/reject operations remain distinct.
+
 ## Definition and issuance
 
 `task_flow_definition.validate_definition(value, product)` returns a canonical

@@ -1,0 +1,185 @@
+{
+  "version": 1,
+  "entry": "request",
+  "nodes": [
+    {
+      "id": "request",
+      "kind": "input",
+      "label": {
+        "zh-CN": "选择类型并填写需求",
+        "en": "Choose a type and describe the request"
+      },
+      "fields": [
+        {
+          "key": "request_kind",
+          "label": {
+            "zh-CN": "请求类型",
+            "en": "request_kind"
+          },
+          "type": "select",
+          "required": true,
+          "options": [
+            {
+              "value": "general",
+              "label": {
+                "zh-CN": "通用资料整理",
+                "en": "General material organization"
+              }
+            },
+            {
+              "value": "unsupported",
+              "label": {
+                "zh-CN": "当前服务不支持的类型",
+                "en": "Unsupported request type"
+              }
+            }
+          ]
+        },
+        {
+          "key": "requirements",
+          "label": {
+            "zh-CN": "需求",
+            "en": "requirements"
+          },
+          "type": "textarea",
+          "required": true
+        }
+      ],
+      "question": {
+        "zh-CN": "选择请求类型，填写具体需求。",
+        "en": "Choose a request type and enter your requirements."
+      },
+      "next": {
+        "cases": [
+          {
+            "when": {
+              "source": {
+                "node": "request",
+                "field": "request_kind"
+              },
+              "op": "eq",
+              "value": "unsupported"
+            },
+            "to": "rejected"
+          }
+        ],
+        "default": "review"
+      },
+      "timeout_seconds": 600,
+      "timeout_next": "expired"
+    },
+    {
+      "id": "review",
+      "kind": "process",
+      "label": {
+        "zh-CN": "判断范围并处理",
+        "en": "Review scope and process"
+      },
+      "inputs": {
+        "request_kind": {
+          "node": "request",
+          "field": "request_kind"
+        },
+        "requirements": {
+          "node": "request",
+          "field": "requirements"
+        }
+      },
+      "outputs": [
+        {
+          "key": "decision",
+          "label": {
+            "zh-CN": "处理判断",
+            "en": "decision"
+          },
+          "type": "select",
+          "required": true,
+          "options": [
+            {
+              "value": "accepted",
+              "label": {
+                "zh-CN": "可处理",
+                "en": "Accepted"
+              }
+            },
+            {
+              "value": "rejected",
+              "label": {
+                "zh-CN": "拒绝处理",
+                "en": "Rejected"
+              }
+            }
+          ]
+        },
+        {
+          "key": "response",
+          "label": {
+            "zh-CN": "答复",
+            "en": "response"
+          },
+          "type": "textarea",
+          "required": true
+        }
+      ],
+      "next": {
+        "cases": [
+          {
+            "when": {
+              "source": {
+                "node": "review",
+                "field": "decision"
+              },
+              "op": "eq",
+              "value": "rejected"
+            },
+            "to": "rejected"
+          }
+        ],
+        "default": "finished"
+      },
+      "timeout_seconds": 1800,
+      "timeout_next": "failed",
+      "failure_next": "failed"
+    },
+    {
+      "id": "finished",
+      "kind": "end",
+      "state": "succeeded",
+      "result": {
+        "content": {
+          "node": "review",
+          "field": "response"
+        }
+      }
+    },
+    {
+      "id": "rejected",
+      "kind": "end",
+      "state": "rejected",
+      "message": {
+        "zh-CN": "本次请求超出服务范围，已拒绝处理。请联系商家确认。",
+        "en": "This request is outside the service scope and was rejected. Contact the merchant."
+      }
+    },
+    {
+      "id": "expired",
+      "kind": "end",
+      "state": "failed",
+      "message": {
+        "zh-CN": "本次输入超时，可重新开始。",
+        "en": "Your input timed out. You can retry."
+      },
+      "retryable": true
+    },
+    {
+      "id": "failed",
+      "kind": "end",
+      "state": "failed",
+      "message": {
+        "zh-CN": "本次处理未完成，可重新开始。",
+        "en": "This attempt could not be completed. You can retry."
+      },
+      "retryable": true
+    }
+  ]
+}

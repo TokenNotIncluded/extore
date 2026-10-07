@@ -1,6 +1,15 @@
 # Python SDK
 
-本页保留固定预设处理器和 Webhook v1 的用法。0.8.0 流程私有 Worker 使用独立的 [`FlowScope`、`PrivateWorkerClient`、`verify_flow_event`](python-sdk-v2.md)，不能拿旧 v1 签名更新某个流程节点。图定义和当前节点身份见[任务流程](task-flow.md)。
+本页介绍商品处理器和 Webhook v1 的用法。多步流程使用 `FlowDefinition` 定义和校验图，私有 Worker 用 [`FlowScope`、`PrivateWorkerClient`、`FlowExecution`、`verify_flow_event`](python-sdk-v2.md) 执行当前节点，不能拿旧 v1 签名更新流程节点。开发顺序、可验证示例和离线 CLI 见 [处理流程开发](workflow-development.md)。
+
+| 需求 | 接口 |
+| --- | --- |
+| 本地处理器读取一次任务、报告进度、返回结果 | `Task`、`Result`、`run` |
+| 普通 Webhook 商品接收事件、回调状态 | `verify_event`、`Client`，协议 v1 |
+| 设计带再次输入或分支的任务图 | `FlowDefinition`，定义 v1 |
+| 私有 Worker 接收并完成一个流程节点 | `verify_flow_event`、`FlowScope`、`PrivateWorkerClient.execution`，协议 v2 |
+
+图、配置档案的运行环境和顾客进度计划各有职责：`task_flow` 决定节点转换，配置 `workflow` 决定变量、密钥与资源，`progress_steps` 只描述工作进度。它们不能互相替代。
 
 SDK 位于 `extore/sdk/`，任务和回调模块只使用 Python 标准库。二次开发服务可以使用项目包中的 `extore.sdk`；单独分发时需保留包层级及 `extore/variants.py` 默认规格辅助模块。安装 SDK 不会向主网站添加处理器。
 

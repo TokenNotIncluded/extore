@@ -1,0 +1,237 @@
+{
+  "version": 1,
+  "entry": "question_1",
+  "nodes": [
+    {
+      "id": "question_1",
+      "kind": "input",
+      "label": {
+        "zh-CN": "第1个问题",
+        "en": "Question 1"
+      },
+      "prompt": {
+        "zh-CN": "准备好后，开始提问。",
+        "en": "Start when you are ready."
+      },
+      "question": {
+        "zh-CN": "请输入第1个问题。",
+        "en": "Enter question 1."
+      },
+      "fields": [
+        {
+          "key": "question",
+          "label": {
+            "zh-CN": "问题",
+            "en": "question"
+          },
+          "type": "textarea",
+          "required": true
+        }
+      ],
+      "start_policy": "confirm",
+      "timeout_seconds": 180,
+      "timeout_next": "expired",
+      "next": "answer_1"
+    },
+    {
+      "id": "answer_1",
+      "kind": "process",
+      "label": {
+        "zh-CN": "回答第1个问题",
+        "en": "Answer question 1"
+      },
+      "inputs": {
+        "question": {
+          "node": "question_1",
+          "field": "question"
+        }
+      },
+      "outputs": [
+        {
+          "key": "answer",
+          "label": {
+            "zh-CN": "答案",
+            "en": "answer"
+          },
+          "type": "textarea",
+          "required": true
+        }
+      ],
+      "timeout_seconds": 600,
+      "timeout_next": "failed",
+      "failure_next": "failed",
+      "next": "question_2"
+    },
+    {
+      "id": "question_2",
+      "kind": "input",
+      "label": {
+        "zh-CN": "第2个问题",
+        "en": "Question 2"
+      },
+      "prompt": {
+        "zh-CN": "准备好后，开始提问。",
+        "en": "Start when you are ready."
+      },
+      "question": {
+        "zh-CN": "请输入第2个问题。",
+        "en": "Enter question 2."
+      },
+      "fields": [
+        {
+          "key": "question",
+          "label": {
+            "zh-CN": "问题",
+            "en": "question"
+          },
+          "type": "textarea",
+          "required": true
+        }
+      ],
+      "start_policy": "automatic",
+      "timeout_seconds": 180,
+      "timeout_next": "expired",
+      "next": "answer_2",
+      "show_from": {
+        "previous_answer": {
+          "node": "answer_1",
+          "field": "answer"
+        }
+      }
+    },
+    {
+      "id": "answer_2",
+      "kind": "process",
+      "label": {
+        "zh-CN": "回答第2个问题",
+        "en": "Answer question 2"
+      },
+      "inputs": {
+        "question": {
+          "node": "question_2",
+          "field": "question"
+        }
+      },
+      "outputs": [
+        {
+          "key": "answer",
+          "label": {
+            "zh-CN": "答案",
+            "en": "answer"
+          },
+          "type": "textarea",
+          "required": true
+        }
+      ],
+      "timeout_seconds": 600,
+      "timeout_next": "failed",
+      "failure_next": "failed",
+      "next": "question_3"
+    },
+    {
+      "id": "question_3",
+      "kind": "input",
+      "label": {
+        "zh-CN": "第3个问题",
+        "en": "Question 3"
+      },
+      "prompt": {
+        "zh-CN": "准备好后，开始提问。",
+        "en": "Start when you are ready."
+      },
+      "question": {
+        "zh-CN": "请输入第3个问题。",
+        "en": "Enter question 3."
+      },
+      "fields": [
+        {
+          "key": "question",
+          "label": {
+            "zh-CN": "问题",
+            "en": "question"
+          },
+          "type": "textarea",
+          "required": true
+        }
+      ],
+      "start_policy": "automatic",
+      "timeout_seconds": 180,
+      "timeout_next": "expired",
+      "next": "answer_3",
+      "show_from": {
+        "previous_answer": {
+          "node": "answer_2",
+          "field": "answer"
+        }
+      }
+    },
+    {
+      "id": "answer_3",
+      "kind": "process",
+      "label": {
+        "zh-CN": "回答第3个问题",
+        "en": "Answer question 3"
+      },
+      "inputs": {
+        "question": {
+          "node": "question_3",
+          "field": "question"
+        }
+      },
+      "outputs": [
+        {
+          "key": "answer",
+          "label": {
+            "zh-CN": "答案",
+            "en": "answer"
+          },
+          "type": "textarea",
+          "required": true
+        }
+      ],
+      "timeout_seconds": 600,
+      "timeout_next": "failed",
+      "failure_next": "failed",
+      "next": "finished"
+    },
+    {
+      "id": "finished",
+      "kind": "end",
+      "state": "succeeded",
+      "result": {
+        "answer_1": {
+          "node": "answer_1",
+          "field": "answer"
+        },
+        "answer_2": {
+          "node": "answer_2",
+          "field": "answer"
+        },
+        "answer_3": {
+          "node": "answer_3",
+          "field": "answer"
+        }
+      }
+    },
+    {
+      "id": "expired",
+      "kind": "end",
+      "state": "failed",
+      "message": {
+        "zh-CN": "本次输入超时，可重新开始。",
+        "en": "Your input timed out. You can retry."
+      },
+      "retryable": true
+    },
+    {
+      "id": "failed",
+      "kind": "end",
+      "state": "failed",
+      "message": {
+        "zh-CN": "本次处理未完成，可重新开始。",
+        "en": "This attempt could not be completed. You can retry."
+      },
+      "retryable": true
+    }
+  ]
+}

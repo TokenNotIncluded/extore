@@ -6,6 +6,14 @@
 
 商品处理方式仍决定执行者：`manual` 由获授权的人或 AI 领取当前处理节点；`script` 使用审核过的固定处理器和店铺配置；`webhook` 向固定的 HTTPS 公网 Worker 派发当前节点。一卡一文本 `stock` 不使用流程。系统提供编排、权限和交付接口，不内置持续运行的通用 AI 模型。
 
+开发入口见 [处理流程开发](workflow-development.md)：包含可校验的三问、文件交付、选择和拒绝示例，以及 `FlowDefinition` SDK 和离线 `extore workflow` 命令。定义 v1、私有 Worker 传输 v2 与配置档案版本互相独立。
+
+## 配置与校验
+
+商品配置中的处理流程编辑器用于查看节点与路径、编辑当前节点的输入输出和转换规则。普通商品保留简单流程；复杂定义也可通过高级 JSON 或商品 CLI 导入。编辑和校验不会替顾客开始任务，也不会改变已经发行卡密的流程快照。
+
+`GET /api/task-flows/schema` 提供 JSON Schema Draft 2020-12，适合编辑器提示。结构 Schema 不能代替整图引用与商品兼容校验；`FlowDefinition` 和 `extore workflow validate --definition FLOW.json --product PRODUCT.json` 调用与服务端相同的规范校验器。离线命令不登录、不联网、不创建数据库、不执行处理器。详细示例见 [开发入口](workflow-development.md#从可验证的示例开始)。
+
 ## 发行快照与开始
 
 图、处理目标、字段结构和对应配置在发行卡密时冻结。编辑商品只改变之后发行的卡密。缺少流程快照的旧卡继续使用旧兑换路径，不能在读取时套上后来创建的图。
@@ -100,7 +108,7 @@ input、process 的 next 可以是目标节点代码，或 `{cases:[{when:{sourc
 
 预览通常是 epoch=0、revision=0；准备任务后取得真实值。每次操作先读状态，按 actions 选择 start / answer / continue，并提交准确 flow_epoch 和 expected_revision；answer 另带字符串对象 values。冲突或超时返回 409，应重新读取，不能猜测新编号重发。第一次 start 允许从零值预览准备并明确开始该卡。
 
-HTTP 请求均为同源 POST JSON，领取 token 放请求体；批量链接必须传目标 card_id。CLI 的真实用法见[顾客 CLI](cli-customer.md)，浏览器原生工具见[WebMCP](webmcp.md)。取消、重试或重启会使旧尝试／epoch 失效，不能把旧答案或旧结果覆盖到新节点。
+HTTP 请求均为同源 POST JSON，领取 token 放请求体；批量链接必须传目标 card_id。CLI 的真实用法见[顾客多步兑换 CLI](customer-task-flow-cli.md)，浏览器原生工具见[WebMCP](webmcp.md)。取消、重试或重启会使旧尝试／epoch 失效，不能把旧答案或旧结果覆盖到新节点。
 
 处理者在商品队列领取时取得当前节点需求、输入输出定义、attempt、flow_epoch、action_id。进度、附件和结果必须带这个执行身份；成功完成处理节点只推进图，成功 end 才按商品查看与交付规则形成成品；取消、拒绝、处理超时或不可安全重试的失败也可直接终止。原子领取和断线恢复见[AI 队列处理](automation-cli.md)。
 

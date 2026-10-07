@@ -74,6 +74,64 @@ def _json_result(result):
     return json.loads(result.stdout)
 
 
+def test_native_complete_script_and_flow_sdk_imports_without_private_modules(tmp_path):
+    source = """
+import errno, json, os
+from extore.sdk import FlowDefinition, FlowScope, PrivateWorkerClient, Result, Task, run
+
+field = {"key": "answer", "label": {"en": "Answer"}, "type": "text"}
+nodes = [
+    {"id": "question", "kind": "input", "fields": [field], "next": "done"},
+    {"id": "done", "kind": "end", "state": "succeeded",
+     "result": {"answer": FlowDefinition.reference("question", "answer")}},
+]
+definition = FlowDefinition.from_nodes(
+    "question", nodes, product={"mode": "manual", "outputs": [field]}
+)
+assert definition.as_dict()["version"] == 1
+assert json.loads(definition.to_json())["nodes"][0]["start_policy"] == "confirm"
+schema = definition.schema()
+assert schema["$schema"] == "https://json-schema.org/draft/2020-12/schema"
+assert any(option.get("type") == "object" for option in schema["oneOf"])
+scope = FlowScope("shop", "product", "job", 1, "process", 1, "action")
+assert PrivateWorkerClient("https://extore.example", "fixture-secret").execution(scope).scope == scope
+
+for name in ("task_flow_definition", "task_flow_schema"):
+    try:
+        os.open("/code/extore/" + name + ".py", os.O_WRONLY)
+        raise AssertionError("trusted SDK dependency is writable")
+    except OSError as error:
+        assert error.errno in (errno.EPERM, errno.EROFS, errno.EACCES)
+for name in ("db", "config", "secret_store"):
+    assert not os.path.exists("/code/extore/" + name + ".py")
+
+def handler(task):
+    assert isinstance(task, Task) and task.params == {"request": "fixture input"}
+    task.define_steps([{"id": "validate", "label": {"en": "Validate"}}])
+    task.progress(50, "SDK imports validated", completed_steps=["validate"])
+    return Result.success("fixture delivery", completed_steps=["validate"])
+
+run(handler)
+"""
+    result = _run(
+        tmp_path,
+        source,
+        payload={
+            "id": "job",
+            "product_id": "product",
+            "attempt": 1,
+            "params": {"request": "fixture input"},
+        },
+    )
+    assert result.returncode == 0, result.stderr.decode(errors="replace")
+    assert not result.stderr
+    events = [json.loads(line) for line in result.stdout.splitlines()]
+    assert [event["kind"] for event in events] == ["progress", "progress", "result"]
+    assert events[1]["progress"] == 50
+    assert events[2]["state"] == "succeeded"
+    assert events[2]["content"] == "fixture delivery"
+
+
 def test_native_caps_namespace_host_canary_and_readonly_mounts(tmp_path):
     host_canary = tmp_path / "host-only-canary"
     host_canary.write_text("synthetic-host-only", encoding="utf-8")

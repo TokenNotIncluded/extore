@@ -1,6 +1,6 @@
 [project]
 name = "extore"
-version = "0.10.1"
+version = "0.11.0"
 description = "Single-merchant redemption and fulfillment with product queues, Passkeys, and native WebMCP"
 readme = "README.md"
 license = "MIT"
@@ -40,6 +40,7 @@ Funding = "https://donate.lmm.best/?project=extore"
 
 [dependency-groups]
 dev = [
+    "jsonschema>=4.26.0",
     "pytest>=9.1.1",
     "ruff>=0.16.10",
 ]

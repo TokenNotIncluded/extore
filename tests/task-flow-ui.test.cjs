@@ -10,10 +10,12 @@ function fixture() {
   const decode = (value) => String(value).replaceAll("&quot;", '"').replaceAll("&#39;", "'").replaceAll("&lt;", "<").replaceAll("&gt;", ">").replaceAll("&amp;", "&");
   const create = (id) => ({ id, value: "", textContent: "", isConnected: true, disabled: false, hidden: false, checked: false, files: [], style: {}, dataset: {}, listeners: new Map(),
     addEventListener(event, fn) { this.listeners.set(event, fn); },
-    emit(event) { return this.listeners.get(event)?.({ preventDefault() {}, target: this }); },
+    emit(event, values = {}) { return this.listeners.get(event)?.({ preventDefault() {}, target: this, ...values }); },
+    focus() { this.focused = true; },
     getAttribute(name) { return this.attributes?.[name]; },
   });
   const app = { isConnected: true, querySelector(selector) { return nodes.get(selector.slice(1)) || null; }, querySelectorAll(selector) {
+    if (selector === "input,textarea,select") return [...nodes.values()].filter((node) => ["input", "textarea", "select"].includes(node.kind));
     const match = selector.match(/^\[data-([\w-]+)\]$/);
     return match ? [...nodes.values()].filter((node) => Object.hasOwn(node.dataset, match[1].replace(/-([a-z])/g, (_, char) => char.toUpperCase()))) : [];
   } };
@@ -27,6 +29,7 @@ function fixture() {
       const explicit = attrs.match(/\bid="([^"]+)"/);
       if (!explicit && !attrs.includes("data-tf-")) continue;
       const node = create(explicit?.[1] || "generated-" + ++id);
+      node.kind = kind;
       node.attributes = Object.fromEntries([...attrs.matchAll(/([\w-]+)="([^"]*)"/g)].map((match) => [match[1], decode(match[2])]));
       node.checked = /\schecked(?:\s|$)/.test(attrs);
       node.disabled = /\sdisabled(?:\s|$)/.test(attrs);
@@ -248,4 +251,219 @@ test("a delayed answer response cannot replace a newer revision of the same disp
   await flush();
   assert.equal(page.results.length, 0);
   assert.equal(page.node("task-flow-field-question").value, "Question");
+});
+
+test("the flow diagram represents branch defaults, failure paths and review-only processing timeouts", () => {
+  const page = fixture(), module = page.context.window.ExtoreTaskFlowEditor;
+  const definition = module.presets.confirmation();
+  definition.nodes[0].next = { cases: [{ when: { source: { node: "details", field: "requirements" }, op: "exists" }, to: "process" }], default: "not_completed" };
+  const model = module.graphModel(definition);
+  assert.deepEqual(JSON.parse(JSON.stringify(model.edges.map((edge) => edge.kind))), ["case", "default", "next", "failure", "review"]);
+  const positions = model.nodes.map(({ x, y }) => `${x},${y}`);
+  assert.equal(new Set(positions).size, definition.nodes.length);
+  module.mount(page.app, { value: definition });
+  assert.match(page.app.innerHTML, /<svg/);
+  assert.match(page.app.innerHTML, /超时 · 核实/);
+  assert.match(page.app.innerHTML, /id="tf-case-0-source"/);
+  assert.doesNotMatch(page.app.innerHTML, /条件分支.*高级定义编辑/);
+});
+
+test("branch controls save ordered cases, exact values and a default without writing JSON", () => {
+  const page = fixture(), module = page.context.window.ExtoreTaskFlowEditor;
+  const editor = module.mount(page.app, { value: module.presets.confirmation() });
+  page.node("tf-label").value = "第一步";
+  page.node("tf-route-mode").value = "branch";
+  page.node("tf-route-mode").emit("change");
+  page.node("tf-case-0-op").value = "in";
+  page.node("tf-case-0-op").emit("change");
+  page.node("tf-case-0-value").value = "exact\n false \n";
+  page.node("tf-case-0-to").value = "process";
+  page.node("tf-branch-default").value = "not_completed";
+  const value = editor.getValue();
+  assert.equal(value.nodes[0].label["zh-CN"], "第一步");
+  assert.deepEqual(JSON.parse(JSON.stringify(value.nodes[0].next.cases[0].when)), { source: { node: "details", field: "requirements" }, op: "in", value: ["exact", " false ", ""] });
+  assert.equal(value.nodes[0].next.default, "not_completed");
+});
+
+test("mapping controls preserve source identity and typed unsaved fields when another step is selected", () => {
+  const page = fixture(), module = page.context.window.ExtoreTaskFlowEditor;
+  const editor = module.mount(page.app, { value: module.presets.confirmation() });
+  page.node("tf-node-process").emit("click");
+  page.node("tf-label").value = "Run edited task";
+  page.node("tf-map-inputs-0-key").value = "renamed_input";
+  page.node("tf-map-inputs-0-source").value = "details.requirements";
+  page.node("tf-node-finished").emit("click");
+  assert.equal(page.node("tf-map-result-0-source").value, "process.content");
+  const value = editor.getValue();
+  assert.equal(value.nodes[1].label["zh-CN"], "Run edited task");
+  assert.deepEqual(JSON.parse(JSON.stringify(value.nodes[1].inputs)), { renamed_input: { node: "details", field: "requirements" } });
+});
+
+test("node and field deletion cannot break branches, aliases or mappings", () => {
+  const page = fixture(), module = page.context.window.ExtoreTaskFlowEditor;
+  const definition = module.presets.confirmation();
+  definition.nodes[0].next = { cases: [{ when: { source: { node: "details", field: "requirements" }, op: "exists" }, to: "process" }], default: "not_completed" };
+  const editor = module.mount(page.app, { value: definition });
+  page.app.querySelectorAll("[data-tf-remove-field]")[0].emit("click");
+  assert.match(page.node("task-flow-editor-error").textContent, /映射或条件/);
+  page.node("tf-node-process").emit("click");
+  page.node("tf-remove").emit("click");
+  assert.match(page.node("task-flow-editor-error").textContent, /路径与字段引用/);
+  assert.equal(editor.getValue().nodes.length, 4);
+});
+
+test("sensitive sources are available only to process inputs, and the UI does not generate alias chains", () => {
+  const page = fixture(), module = page.context.window.ExtoreTaskFlowEditor;
+  const definition = module.presets.confirmation();
+  definition.nodes[0].fields.push({ key: "otp", label: { "zh-CN": "验证码" }, type: "text", required: true, sensitive: true, sensitive_ttl_seconds: 120 });
+  definition.nodes.push({ id: "review", kind: "display", show_from: { copied: { node: "process", field: "content" } }, next: "finished" });
+  assert.equal(module.sources(definition, "inputs").some((source) => source.reference.field === "otp"), true);
+  for (const purpose of ["show_from", "result", "branch"]) assert.equal(module.sources(definition, purpose).some((source) => source.reference.field === "otp"), false);
+  assert.equal(module.sources(definition, "inputs").some((source) => source.reference.node === "review"), false);
+  definition.nodes[2].result.content = { node: "details", field: "otp" };
+  assert.throws(() => module.validate(definition), /敏感字段/);
+});
+
+test("readonly step navigation does not rewrite values and stale editor controls cannot mutate a replacement page", () => {
+  const page = fixture(), module = page.context.window.ExtoreTaskFlowEditor;
+  const definition = module.presets.confirmation();
+  const editor = module.mount(page.app, { value: definition, disabled: true });
+  page.node("tf-label").value = "cannot mutate";
+  page.node("tf-node-process").emit("click");
+  assert.equal(editor.getValue().nodes[0].label["zh-CN"], "提交需求");
+  const oldNode = page.node("tf-node-finished"), oldAdd = page.node("tf-add");
+  editor.dispose();
+  page.app.innerHTML = "Replacement page";
+  oldNode.emit("click"); oldAdd.emit("click");
+  assert.equal(page.app.innerHTML, "Replacement page");
+  assert.throws(() => editor.getValue(), /已失效/);
+});
+
+test("server configuration validation uses current product fields and cannot overwrite edits made while waiting", async () => {
+  const page = fixture(), module = page.context.window.ExtoreTaskFlowEditor;
+  let resolve, received;
+  const editor = module.mount(page.app, { value: module.presets.confirmation(), product: () => ({ mode: "manual", parameters: [], outputs: [{ key: "content", type: "textarea" }] }), validate: (definition, product) => { received = { definition, product }; return new Promise((done) => { resolve = done; }); } });
+  page.node("tf-label").value = "Submitted label";
+  const pending = page.node("tf-check").emit("click");
+  assert.equal(received.definition.nodes[0].label["zh-CN"], "Submitted label");
+  assert.equal(received.product.outputs[0].key, "content");
+  assert.equal(page.node("tf-check").disabled, true);
+  page.node("tf-label").value = "A newer edit";
+  page.node("tf-label").emit("input");
+  resolve({ ok: true, definition: module.presets.aladdin() }); await pending;
+  assert.equal(page.node("tf-validation-status").textContent, "");
+  assert.equal(editor.getValue().nodes[0].label["zh-CN"], "A newer edit");
+  assert.equal(editor.getValue().nodes.length, 4);
+});
+
+test("validation failures keep the form, report product-capture errors and ignore responses after step switching", async () => {
+  for (const captureError of [true, false]) {
+    const page = fixture(), module = page.context.window.ExtoreTaskFlowEditor;
+    let reject;
+    module.mount(page.app, { value: module.presets.confirmation(), product: () => { if (captureError) throw new Error("Bad current product schema"); return {}; }, validate: () => new Promise((_, fail) => { reject = fail; }) });
+    page.node("tf-label").value = "Preserve me";
+    const pending = page.node("tf-check").emit("click");
+    if (!captureError) { page.node("tf-node-process").emit("click"); reject(new Error("Old response")); }
+    await pending;
+    if (captureError) { assert.equal(page.node("tf-label").value, "Preserve me"); assert.match(page.node("task-flow-editor-error").textContent, /Bad current product/); }
+    else assert.equal(page.node("task-flow-editor-error").textContent, "");
+  }
+});
+
+test("JSON export preserves the draft and English configuration labels remain accessible", () => {
+  const page = fixture(), module = page.context.window.ExtoreTaskFlowEditor;
+  let exported;
+  module.mount(page.app, { value: module.presets.confirmation(), lang: "en", export: (value) => { exported = value; } });
+  page.node("tf-label").value = "Exact English name";
+  page.node("tf-export-json").emit("click");
+  assert.equal(exported.nodes[0].label.en, "Exact English name");
+  assert.match(page.app.innerHTML, /Customer fields/);
+  assert.match(page.app.innerHTML, /aria-label="Flow diagram; select a step to edit"/);
+  assert.equal(page.node("tf-label").value, "Exact English name");
+});
+
+test("graph validation follows server ID, entry, source and UTF-8 size restrictions", () => {
+  const page = fixture(), module = page.context.window.ExtoreTaskFlowEditor;
+  for (const mutate of [
+    (value) => { value.nodes[0].id = "Details"; value.entry = "Details"; },
+    (value) => { value.entry = "process"; },
+    (value) => { value.nodes[1].inputs.requirements.field = "unknown"; },
+    (value) => { value.nodes[0].prompt["zh-CN"] = "中".repeat(35000); },
+  ]) { const value = module.presets.confirmation(); mutate(value); assert.throws(() => module.validate(value)); }
+  const value = module.presets.confirmation(); value.nodes[0].timeout_seconds = 5; value.nodes[0].timeout_next = "details";
+  assert.doesNotThrow(() => module.validate(value));
+});
+
+test("changing the product schema while validation waits invalidates both success and failure feedback", async () => {
+  for (const failed of [false, true]) {
+    const page = fixture(), module = page.context.window.ExtoreTaskFlowEditor;
+    let finish, fail, outputKey = "content";
+    module.mount(page.app, { value: module.presets.confirmation(), product: () => ({ mode: "manual", parameters: [], outputs: [{ key: outputKey, type: "textarea" }] }), validate: () => new Promise((resolve, reject) => { finish = resolve; fail = reject; }) });
+    const pending = page.node("tf-check").emit("click");
+    outputKey = "new_output";
+    if (failed) fail(new Error("Obsolete schema error")); else finish({ ok: true });
+    await pending;
+    assert.equal(page.node("tf-validation-status").textContent, "");
+    assert.equal(page.node("task-flow-editor-error").textContent, "");
+    assert.equal(page.node("tf-check").disabled, false);
+  }
+});
+
+test("a current product-capture error on validation completion cannot leave old success feedback", async () => {
+  const page = fixture(), module = page.context.window.ExtoreTaskFlowEditor;
+  let finish, invalidProduct = false;
+  module.mount(page.app, { value: module.presets.confirmation(), product: () => { if (invalidProduct) throw new Error("Current output field is invalid"); return { mode: "manual", outputs: [] }; }, validate: () => new Promise((resolve) => { finish = resolve; }) });
+  const pending = page.node("tf-check").emit("click");
+  invalidProduct = true; finish({ ok: true }); await pending;
+  assert.equal(page.node("tf-validation-status").textContent, "");
+  assert.match(page.node("task-flow-editor-error").textContent, /Current output field/);
+});
+
+test("untouched legal choice values and multiline translated labels survive mount and capture byte for byte", () => {
+  for (const locale of ["zh-CN", "en"]) {
+    const page = fixture(), module = page.context.window.ExtoreTaskFlowEditor;
+    const definition = module.presets.confirmation();
+    const options = [
+      { value: "word|ppt", label: { "zh-CN": "文档\n演示", en: "Document\nPresentation" } },
+      { value: "normal", label: { "zh-CN": "  正常选项  ", en: "  Normal choice  " } },
+    ];
+    definition.nodes[0].fields = [{ key: "requirements", type: "select", label: { "zh-CN": "规格" }, options }];
+    const editor = module.mount(page.app, { value: definition, lang: locale });
+    assert.match(page.app.innerHTML, /id="tf-fields-0-choices"[^>]*readonly/);
+    assert.deepEqual(JSON.parse(JSON.stringify(editor.getValue().nodes[0].fields[0].options)), options);
+    // Even a programmatic edit cannot reinterpret the ambiguous display form.
+    page.node("tf-fields-0-choices").value = "word | wrong label";
+    assert.deepEqual(JSON.parse(JSON.stringify(editor.getValue().nodes[0].fields[0].options)), options);
+  }
+});
+
+test("simple choice projections only parse on an actual edit and omitted required means checked", () => {
+  const page = fixture(), module = page.context.window.ExtoreTaskFlowEditor;
+  const definition = module.presets.confirmation();
+  const options = [{ value: "word", label: { "zh-CN": " Word ", en: "Word" } }, { value: "ppt", label: { "zh-CN": "PPT", en: "Slides" } }];
+  definition.nodes[0].fields = [{ key: "requirements", type: "select", label: { "zh-CN": "规格" }, options }];
+  const editor = module.mount(page.app, { value: definition });
+  assert.equal(page.node("tf-fields-0-required").checked, true);
+  assert.equal(editor.getValue().nodes[0].fields[0].required, true);
+  assert.deepEqual(JSON.parse(JSON.stringify(editor.getValue().nodes[0].fields[0].options)), options);
+  page.node("tf-fields-0-choices").value = "word | 文档\nppt | 演示";
+  const changed = editor.getValue().nodes[0].fields[0].options;
+  assert.equal(changed[0].value, "word");
+  assert.equal(changed[0].label["zh-CN"], "文档");
+  assert.equal(changed[0].label.en, "Word");
+  assert.equal(changed[1].label.en, "Slides");
+});
+
+test("fit and full-size controls affect only the bounded diagram and preserve unsaved configuration", () => {
+  const page = fixture(), module = page.context.window.ExtoreTaskFlowEditor;
+  const editor = module.mount(page.app, { value: module.presets.aladdin() });
+  page.node("tf-label").value = "Keep this draft";
+  page.node("tf-fit").emit("click");
+  assert.equal(page.node("tf-fit").getAttribute("aria-pressed"), "true");
+  assert.match(page.app.innerHTML, /transform:scale\(0\./);
+  assert.equal(editor.getValue().nodes[0].label["zh-CN"], "Keep this draft");
+  page.node("tf-actual-size").emit("click");
+  assert.equal(page.node("tf-actual-size").getAttribute("aria-pressed"), "true");
+  assert.match(page.app.innerHTML, /transform:scale\(1\)/);
+  assert.equal(editor.getValue().nodes[0].label["zh-CN"], "Keep this draft");
 });

@@ -1,0 +1,31 @@
+{
+  "name": "文件处理",
+  "description": "",
+  "public": false,
+  "mode": "manual",
+  "delivery": "content",
+  "view_policy": "repeat",
+  "parameters": [],
+  "outputs": [
+    {
+      "key": "delivery_file",
+      "label": {
+        "zh-CN": "交付文件",
+        "en": "delivery_file"
+      },
+      "type": "file",
+      "required": true
+    },
+    {
+      "key": "notes",
+      "label": {
+        "zh-CN": "交付说明",
+        "en": "notes"
+      },
+      "type": "textarea",
+      "required": true
+    }
+  ],
+  "allow_retry": true,
+  "max_attempts": 3
+}

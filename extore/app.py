@@ -96,6 +96,7 @@ from .source import router as source_router
 from .text_cards import router as text_cards_router
 from .variants import card_variant, issued_variant_ids
 from .work_instructions import router as work_instructions_router
+from .workflow_validation import router as workflow_validation_router
 
 
 @asynccontextmanager
@@ -126,6 +127,7 @@ app.include_router(proxy_routes_router)
 app.include_router(maintenance_router)
 app.include_router(text_cards_router)
 app.include_router(work_instructions_router)
+app.include_router(workflow_validation_router)
 
 
 @app.exception_handler(RequestValidationError)
@@ -714,6 +716,14 @@ def product_templates(request: Request):
 def admin_processors(request: Request):
     session(request)
     return processor_catalog()
+
+
+@app.get("/api/task-flows/schema", summary="Task-flow v1 structural JSON Schema")
+def task_flow_schema():
+    """Public definition syntax only; contains no issued or merchant data."""
+    from .task_flow_schema import definition_schema
+
+    return JSONResponse(definition_schema(), media_type="application/schema+json")
 
 
 @app.get("/api/manage/processors")

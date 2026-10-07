@@ -1,0 +1,22 @@
+{
+  "name": "有范围判断的文本服务",
+  "description": "",
+  "public": false,
+  "mode": "manual",
+  "delivery": "content",
+  "view_policy": "repeat",
+  "parameters": [],
+  "outputs": [
+    {
+      "key": "content",
+      "label": {
+        "zh-CN": "答复",
+        "en": "content"
+      },
+      "type": "textarea",
+      "required": true
+    }
+  ],
+  "allow_retry": true,
+  "max_attempts": 3
+}

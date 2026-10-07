@@ -212,7 +212,7 @@ test("approval and QR modules load before app startup with revised assets", () =
   assert.ok(owner >= 0 && account > owner && app > account);
   assert.match(scripts[owner][1], /\bdefer\b/);
   assert.match(scripts[owner][2], /\?v=20261007-shops$/);
-  assert.match(scripts[app][2], /\?v=20261007-queue-refinement$/);
+  assert.match(scripts[app][2], /\?v=20261008-workflow-standard$/);
   const device = scripts.findIndex((script) => script[2].startsWith("/static/device-login.js"));
   const encoder = scripts.findIndex((script) => script[2].startsWith("/static/vendor/qrcodegen.js"));
   const qr = scripts.findIndex((script) => script[2].startsWith("/static/totp-qr.js"));

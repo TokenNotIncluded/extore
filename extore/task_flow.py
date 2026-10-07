@@ -13,7 +13,13 @@ import uuid
 
 from .secret_store import MAX_SECRET_BYTES, _context, open_secret, store_secret
 from .security import fail
-from .task_flow_definition import MAX_TRANSITIONS, validate_definition, validate_values
+from .task_flow_definition import (
+    MAX_FIELDS,
+    MAX_NODES,
+    MAX_TRANSITIONS,
+    validate_definition,
+    validate_values,
+)
 
 MAX_RUN_CIPHERTEXT_BYTES = 2 * 1024 * 1024
 
@@ -324,7 +330,46 @@ def _step(c, run, epoch=None):
     ).fetchone()
 
 
+def _reference_origin(snapshot, reference):
+    """Resolve projection aliases to a real input/process field, without recursion.
+
+    Display and end mappings do not create stored values or attachment rights.
+    Their aliases always refer to the latest completed occurrence of the real
+    source in the current attempt. Invalid/cyclic frozen references fail closed.
+    """
+    nodes, visited = _nodes(snapshot), set()
+    for _ in range(MAX_NODES * MAX_FIELDS + 1):
+        if (
+            not isinstance(reference, dict)
+            or set(reference) != {"node", "field"}
+            or not isinstance(reference["node"], str)
+            or not isinstance(reference["field"], str)
+        ):
+            fail("任务流程字段引用无效", 409)
+        identity = reference["node"], reference["field"]
+        node = nodes.get(identity[0])
+        if node is None or identity in visited:
+            fail("任务流程字段引用无效或循环", 409)
+        visited.add(identity)
+        if node["kind"] in ("input", "process"):
+            fields = node["fields"] if node["kind"] == "input" else node["outputs"]
+            field = next(
+                (field for field in fields if field["key"] == identity[1]), None
+            )
+            if field is None:
+                fail("任务流程引用的字段不存在", 409)
+            return {"node": identity[0], "field": identity[1]}, field
+        mapping = (
+            node.get("show_from", {})
+            if node["kind"] == "display"
+            else node.get("result", {})
+        )
+        reference = mapping.get(identity[1])
+    fail("任务流程字段引用超过上限", 409)
+
+
 def _source(c, run, snapshot, reference):
+    reference, _ = _reference_origin(snapshot, reference)
     step = c.execute(
         "SELECT * FROM task_flow_steps WHERE job_id=? AND attempt=? AND node_id=? "
         "AND state='completed' ORDER BY flow_epoch DESC LIMIT 1",
@@ -342,6 +387,7 @@ def _source(c, run, snapshot, reference):
 def _references(c, run, snapshot, mapping):
     values, sources = {}, {}
     for key, reference in mapping.items():
+        reference, _ = _reference_origin(snapshot, reference)
         value, step, _ = _source(c, run, snapshot, reference)
         values[key] = value
         sources[key] = {
@@ -354,11 +400,7 @@ def _references(c, run, snapshot, mapping):
 
 
 def _field(snapshot, reference):
-    node = _nodes(snapshot)[reference["node"]]
-    fields = (
-        node.get("fields", []) if node["kind"] == "input" else node.get("outputs", [])
-    )
-    return next(field for field in fields if field["key"] == reference["field"])
+    return _reference_origin(snapshot, reference)[1]
 
 
 def _next(c, run, snapshot, transition):
@@ -525,7 +567,11 @@ def _mutate_run(c, run, **changes):
 
 def _clear_sensitive(c, run, snapshot, process=None):
     references = process.get("inputs", {}).values() if process else None
-    node_ids = {ref["node"] for ref in references} if references is not None else None
+    node_ids = (
+        {_reference_origin(snapshot, ref)[0]["node"] for ref in references}
+        if references is not None
+        else None
+    )
     for step in c.execute(
         "SELECT * FROM task_flow_steps WHERE job_id=? AND attempt=? AND kind='input'",
         (run["job_id"], run["attempt"]),
@@ -568,7 +614,8 @@ def _sensitive_sources(c, run, snapshot, node):
     """Metadata used for bounded TTL sweep; raw values stay encrypted."""
     sources = []
     for reference in node.get("inputs", {}).values():
-        if not _field(snapshot, reference).get("sensitive"):
+        reference, field = _reference_origin(snapshot, reference)
+        if not field.get("sensitive"):
             continue
         step = c.execute(
             "SELECT * FROM task_flow_steps WHERE job_id=? AND attempt=? AND node_id=? "
@@ -576,7 +623,6 @@ def _sensitive_sources(c, run, snapshot, node):
             (run["job_id"], run["attempt"], reference["node"]),
         ).fetchone()
         payload = _payload(c, snapshot, step) if step is not None else {}
-        field = _field(snapshot, reference)
         if payload.get("input", {}).get(reference["field"]) == "" and not field.get(
             "required", True
         ):
@@ -879,8 +925,8 @@ def _inputs(c, run, snapshot, node, *, consume=False):
     earliest = None
     writes = {}
     for key, reference in node["inputs"].items():
+        reference, field = _reference_origin(snapshot, reference)
         value, source, payload = _source(c, run, snapshot, reference)
-        field = _field(snapshot, reference)
         if field.get("sensitive"):
             if value == "" and not field.get("required", True):
                 values[key] = value

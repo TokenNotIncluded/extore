@@ -31,6 +31,7 @@ jobs:
       - run: uv run ruff format --check --config pyproject.toml processors/official/extore_processors processors/official/tests
       - run: uv run pytest -q
       - run: uv run python -m compileall -q extore scripts
+      - run: uv run python examples/workflows/validate_examples.py
       - run: node --check extore/static/account.js
       - run: node --check extore/static/vendor/qrcodegen.js
       - run: node --check extore/static/totp-qr.js
@@ -55,6 +56,8 @@ jobs:
       - run: uv build -q
       - run: uv run extore --help
       - run: uv run extore --version
+      - run: uv run extore workflow --help
+      - run: uv run extore workflow validate --definition examples/workflows/file-transform/flow.json --product examples/workflows/file-transform/product.json
       - run: uv run extore manage --help
       - run: uv run extore admin --help
       - run: uv run extore admin board --help

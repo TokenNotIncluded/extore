@@ -1,0 +1,40 @@
+{
+  "name": "阿拉丁神灯 · 三个问题",
+  "description": "",
+  "public": false,
+  "mode": "manual",
+  "delivery": "content",
+  "view_policy": "repeat",
+  "parameters": [],
+  "outputs": [
+    {
+      "key": "answer_1",
+      "label": {
+        "zh-CN": "第1个答案",
+        "en": "answer_1"
+      },
+      "type": "textarea",
+      "required": true
+    },
+    {
+      "key": "answer_2",
+      "label": {
+        "zh-CN": "第2个答案",
+        "en": "answer_2"
+      },
+      "type": "textarea",
+      "required": true
+    },
+    {
+      "key": "answer_3",
+      "label": {
+        "zh-CN": "第3个答案",
+        "en": "answer_3"
+      },
+      "type": "textarea",
+      "required": true
+    }
+  ],
+  "allow_retry": true,
+  "max_attempts": 3
+}

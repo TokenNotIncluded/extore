@@ -1,0 +1,122 @@
+{
+  "version": 1,
+  "entry": "materials",
+  "nodes": [
+    {
+      "id": "materials",
+      "kind": "input",
+      "label": {
+        "zh-CN": "提交文件和要求",
+        "en": "Submit a file and instructions"
+      },
+      "prompt": {
+        "zh-CN": "准备文件后开始。",
+        "en": "Have your file ready, then start."
+      },
+      "question": {
+        "zh-CN": "上传一个文件，说明你希望如何处理。",
+        "en": "Upload one file and explain the requested transformation."
+      },
+      "fields": [
+        {
+          "key": "source_file",
+          "label": {
+            "zh-CN": "输入文件",
+            "en": "source_file"
+          },
+          "type": "file",
+          "required": true
+        },
+        {
+          "key": "instructions",
+          "label": {
+            "zh-CN": "处理要求",
+            "en": "instructions"
+          },
+          "type": "textarea",
+          "required": true
+        }
+      ],
+      "timeout_seconds": 900,
+      "timeout_next": "expired",
+      "next": "transform"
+    },
+    {
+      "id": "transform",
+      "kind": "process",
+      "label": {
+        "zh-CN": "处理并生成文件",
+        "en": "Process and generate a file"
+      },
+      "inputs": {
+        "source_file": {
+          "node": "materials",
+          "field": "source_file"
+        },
+        "instructions": {
+          "node": "materials",
+          "field": "instructions"
+        }
+      },
+      "outputs": [
+        {
+          "key": "delivery_file",
+          "label": {
+            "zh-CN": "交付文件",
+            "en": "delivery_file"
+          },
+          "type": "file",
+          "required": true
+        },
+        {
+          "key": "notes",
+          "label": {
+            "zh-CN": "交付说明",
+            "en": "notes"
+          },
+          "type": "textarea",
+          "required": true
+        }
+      ],
+      "timeout_seconds": 3600,
+      "timeout_next": "failed",
+      "failure_next": "failed",
+      "next": "finished"
+    },
+    {
+      "id": "finished",
+      "kind": "end",
+      "state": "succeeded",
+      "result": {
+        "delivery_file": {
+          "node": "transform",
+          "field": "delivery_file"
+        },
+        "notes": {
+          "node": "transform",
+          "field": "notes"
+        }
+      }
+    },
+    {
+      "id": "expired",
+      "kind": "end",
+      "state": "failed",
+      "message": {
+        "zh-CN": "本次输入超时，可重新开始。",
+        "en": "Your input timed out. You can retry."
+      },
+      "retryable": true
+    },
+    {
+      "id": "failed",
+      "kind": "end",
+      "state": "failed",
+      "message": {
+        "zh-CN": "本次处理未完成，可重新开始。",
+        "en": "This attempt could not be completed. You can retry."
+      },
+      "retryable": true
+    }
+  ]
+}

@@ -195,6 +195,24 @@ header {
 .delivery-field + .delivery-field {
   margin-top: 24px;
 }
+.delivery-text-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px 12px;
+}
+.delivery-text-actions button {
+  min-height: 44px;
+}
+.delivery-text-actions [role="status"] {
+  flex: 1 1 180px;
+}
+.delivery-text-manual {
+  margin-top: 16px;
+}
+.delivery-text-manual textarea {
+  white-space: pre-wrap;
+}
 @media (max-width: 700px) {
   .grid.cards-summary {
     grid-template-columns: repeat(2, minmax(0, 1fr));

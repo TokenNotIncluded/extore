@@ -945,6 +945,7 @@ def _secret_output(args, prefix, callback):
 
 
 _API_ROUTES = (
+    ("POST", r"/api/admin/task-flows/validate"),
     ("GET", r"/api/(?:admin|manage)/card-batches"),
     ("DELETE", r"/api/(?:admin|manage)/card-batches/[A-Za-z0-9_-]+"),
     (
@@ -1059,6 +1060,7 @@ def _api(client, owner, args):
         shop_commands._require_identity(owner)
     private_input = args.method in WRITE_METHODS and (
         args.path == "/api/platform/settings"
+        or args.path == "/api/admin/task-flows/validate"
         or args.path.startswith(("/api/auth/", shop_commands.PROFILE_PREFIX))
     )
     body = (

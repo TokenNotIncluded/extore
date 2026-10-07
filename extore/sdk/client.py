@@ -281,6 +281,12 @@ class PrivateWorkerClient:
             urllib.request.ProxyHandler({}), _NoRedirect()
         )
 
+    def execution(self, scope):
+        """Bind callback/file helpers to an already-verified execution identity."""
+        from .flow import FlowExecution
+
+        return FlowExecution(self, scope)
+
     def _request(self, scope, method, path, body, *, headers=None, binary=False):
         ts, nonce = str(int(time.time())), secrets.token_urlsafe(24)
         body_digest = hashlib.sha256(body).hexdigest()

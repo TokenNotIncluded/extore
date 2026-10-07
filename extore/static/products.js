@@ -488,8 +488,19 @@
     </form>`;
 
     let taskFlowEnabled = Boolean(product.task_flow);
+    let readFlowProduct = () => ({
+      mode: product.mode,
+      parameters: structuredClone(parameters),
+      outputs: product.delivery === "service" ? [] : structuredClone(outputs),
+    });
     const taskFlowEditor = window.ExtoreTaskFlowEditor?.mount($("#product-task-flow"), {
       value: product.task_flow || null,
+      lang: ctx.lang,
+      product: () => readFlowProduct(),
+      validate: (definition, schema) => ctx.api(
+        ctx.role === "staff" ? "/manage/task-flows/validate" : "/admin/task-flows/validate",
+        { definition, product: schema },
+      ),
       disabled: !ctx.canConfigure,
       active,
       onChange: (enabled) => {
@@ -695,6 +706,14 @@
         customParameters = structuredClone(parameters);
         customOutputs = structuredClone(outputs);
       }
+    };
+    readFlowProduct = () => {
+      captureCustom();
+      return {
+        mode: $("#p-mode").value,
+        parameters: structuredClone(parameters),
+        outputs: $("#p-delivery").value === "service" ? [] : structuredClone(outputs),
+      };
     };
     // Shop secrets live in separate write-only profiles. Product edits never
     // echo a masked value or an empty configuration back to the server.
