@@ -3,7 +3,6 @@
 import json
 import time
 import uuid
-from pathlib import Path
 
 import pytest
 from test_processor_profiles import merchant
@@ -75,7 +74,9 @@ def snapshot():
         }
 
 
-def test_private_projection_counts_worker_kinds_and_read_only(owner, monkeypatch):
+def test_private_projection_counts_worker_kinds_and_read_only(
+    owner, monkeypatch, tmp_path
+):
     pid, sid = create(owner)
     staff = create_link(owner, pid, ["queue.monitor"], name="可见处理人员")
     actor = staff["id"]
@@ -142,9 +143,9 @@ def test_private_projection_counts_worker_kinds_and_read_only(owner, monkeypatch
     assert workers["处理人员"]["kind"] == "unknown"
     assert all(len(w["id"]) == 64 and w["active_jobs"] == 1 for w in workers.values())
     # A representative fixture contains only this already validated projection.
-    Path(
-        "/home/lightjunction/.cache/extore-progress-board-20261007/progress-board-contract.json"
-    ).write_text(json.dumps(value, ensure_ascii=False))
+    (tmp_path / "progress-board-contract.json").write_text(
+        json.dumps(value, ensure_ascii=False)
+    )
 
 
 def test_monitor_only_cannot_get_details_process_or_list_attachments(owner):
