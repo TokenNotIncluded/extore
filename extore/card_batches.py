@@ -127,7 +127,14 @@ def list_batches(c, pid, view, variant_id, search, offset, limit):
             "GROUP BY i.batch_id,i.product_id) "
         )
     )
-    where = "WHERE (:search='' OR instr(lower(label),lower(:search))>0 OR instr(lower(id),lower(:search))>0)"
+    where = (
+        "WHERE (:search='' OR instr(lower(label),lower(:search))>0 "
+        "OR instr(lower(id),lower(:search))>0 OR id IN ("
+        "SELECT COALESCE(batch_id,'legacy') FROM inventory WHERE "
+        "(:variant_id='' OR variant_id=:variant_id) AND ("
+        "instr(upper(id),upper(:search))>0 OR "
+        "instr(upper(COALESCE(code_suffix,'')),upper(:search))>0)))"
+    )
     total = c.execute(
         grouped + "SELECT COUNT(*) FROM folders " + where, params
     ).fetchone()[0]

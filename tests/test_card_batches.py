@@ -65,6 +65,10 @@ def test_folder_grouping_counts_search_pagination_and_no_plaintext(
     assert batch["states"]["unused"] == 3
     assert batch["deleted"] is False
     assert folders(owner, pid, search="秋日")["total"] == 1
+    cid = card_id(result["codes"][0])
+    assert folders(owner, pid, search=cid)["items"][0]["id"] == result["batch_id"]
+    suffix = result["codes"][0].replace("-", "")[-6:]
+    assert folders(owner, pid, search=suffix)["items"][0]["id"] == result["batch_id"]
     assert len(folders(owner, pid, limit=1, offset=1)["items"]) == 1
     assert folders(owner, pid, search="%' OR 1=1--")["items"] == []
     serialized = json.dumps(listing)
