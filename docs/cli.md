@@ -33,7 +33,7 @@ CLI 显示公开授权地址、短设备码和设备指纹，最多等待 10 分
 extore manage login --device-code --origin https://extore.lmm.best --shop SHOP_ID --pipelines-all --client-name '店铺 Bot' --no-wait
 ```
 
-这是申请时该店当前队列商品的快照，仅允许三个队列权限；不会获得店主账号管理、SMTP、其他店铺或未来新商品的权限。店主可在首次批准时缩小商品清单与权限，成功结果中的 `authorization` 和 `grants` 是实际有效范围。
+这是申请时该店当前队列商品的快照，仅允许队列权限；默认申请 `queue.view,queue.process,queue.retry`，0.9.0 起也可用 `--permissions queue.monitor` 只申请进度看板。不会获得店主账号管理、SMTP、其他店铺或未来新商品的权限。店主可在首次批准时缩小商品清单与权限，成功结果中的 `authorization` 和 `grants` 是实际有效范围。
 
 提示写到 stderr；成功结果写到 stdout 的一行 JSON，包含商品授权摘要，不包含私钥、Bearer、签名或服务器挑战。`--no-wait` 的 stdout 为 `{"ok":true,"pending":true,"authorization":{"approval_url":"…","user_code":"…","fingerprint":"…","expires":…}}`，可以将其中公开字段转告本人，无需让本人访问 AI 的云端终端。
 
@@ -51,7 +51,7 @@ extore manage authorize --authorization SHOP_AUTHORIZATION_ID --product NEW_PROD
 extore manage authorize --authorization SHOP_AUTHORIZATION_ID --pipelines-all --reason '申请当前新增的队列商品' --no-wait
 ```
 
-第一条适用于单商品授权。单商品授权保持一个商品；处理另一个商品需另执行 `login --product NEW_PRODUCT_ID`。店铺流水线授权可重复 `--product` 追加商品，或用 `--pipelines-all` 重新申请当前快照，两种选择不能同时使用；它仍只允许三个队列权限。
+第一条适用于单商品授权。单商品授权保持一个商品；处理另一个商品需另执行 `login --product NEW_PRODUCT_ID`。店铺流水线授权可重复 `--product` 追加商品，或用 `--pipelines-all` 重新申请当前快照，两种选择不能同时使用；它仍只允许队列处理与独立的 `queue.monitor` 进度查看权限。
 
 本人批准后，重复相同申请并去掉 `--no-wait` 完成。待批准、拒绝或申请过期都不会改变原有权限；批准并领取后，原商品设备 ID 和任务处理者保持稳定，正在处理的任务可继续交付。领取后网络中断可重复原命令续签；若未收到领取结果且设备码已过期，需重新核对批准，仍恢复原授权与任务身份。追加授权不会延长原到期时间。
 

@@ -27,6 +27,8 @@
 
 ## 任务状态
 
+0.9.0 提供独立的 `GET /api/manage/progress-board`：[进度看板](progress-board.md)只返回状态、数字进度、步骤序号、处理者管理身份和时间，不返回任务参数、消息、交付内容或文件。它允许独立的 `queue.monitor` 权限或已有的 `queue.view`；处理者不能通过只读看板权限读取任务详情。店主固定到本店，平台管理员必须明确选择 `shop_id`，商品管理者固定到授权商品。
+
 ```mermaid
 stateDiagram-v2
   [*] --> waiting: 流程卡准备任务
@@ -446,7 +448,8 @@ Worker 使用 `POST /api/callbacks/v2/{product_id}/{job_id}/result` 回调，JSO
 
 | 权限 | 允许的操作 |
 |---|---|
-| `queue.view` | 查看该商品任务、参数和处理进度 |
+| `queue.monitor` | 只查看该商品进度看板，不含任务参数、处理说明、交付内容或附件 |
+| `queue.view` | 查看该商品任务、参数和处理进度，也可查看进度看板 |
 | `queue.process` | 人或 AI 领取队列任务，更新、完成、标记失败、退回补充或拒绝自己领取的任务；须同时有 `queue.view` |
 | `queue.retry` | 核实失败任务后放行重试；须同时有 `queue.view` |
 | `product.edit` | 查看与编辑商品展示信息和顾客参数；单独授予时不能读取签名密钥或更改发货、查看与重试规则 |
@@ -455,7 +458,7 @@ Worker 使用 `POST /api/callbacks/v2/{product_id}/{job_id}/result` 回调，JSO
 | `events.manage` | 查看与重投该商品事件 |
 | `links.delegate` | 为该商品生成更小权限的链接，查看与撤销自己的后代链接 |
 
-全部八项权限用于店长管理指定商品。默认权限和升级前已有链接的权限为 `["queue.view","queue.process"]`，不会自动扩大。未知权限、空权限列表、处理或重试权限缺少 `queue.view`，以及自动发货配置权限缺少 `product.edit`，都返回 422。
+完整商品权限以服务器 `LINK_PERMISSIONS` 为准。默认权限和升级前已有链接的权限为 `["queue.view","queue.process"]`，不会自动扩大。`queue.monitor` 可独立授予。未知权限、空权限列表、处理或重试权限缺少 `queue.view`，以及自动发货配置权限缺少 `product.edit`，都返回 422。
 
 `fulfillment.configure` 可以读取 Webhook 签名密钥。对于采用 Webhook 处理的商品，持有该密钥可以向系统提交该商品的签名回调。因此，此权限具有控制该商品外部发货的能力，不能只因为需要编辑商品展示就授予。队列操作仍单独校验 `queue.process` 与 `queue.retry`。
 
@@ -534,7 +537,7 @@ Content-Type: application/json
 | 类型 | 商品范围 | 权限边界 |
 | --- | --- | --- |
 | `product` | 明确请求的一个商品，由服务器确定所属店铺 | 本文定义的商品管理权限；批准范围只能是申请权限的子集 |
-| `shop.pipeline` | 明确店铺中，申请时快照内本次选择的队列商品（`mode="manual"`） | 仅 `queue.view`、`queue.process`、`queue.retry`，不能授予完整店主管理 |
+| `shop.pipeline` | 明确店铺中，申请时快照内本次选择的队列商品（`mode="manual"`） | 默认 `queue.view`、`queue.process`、`queue.retry`，也可显式申请独立的 `queue.monitor`；不能授予完整店主管理 |
 
 处理或重试队列必须同时包含 `queue.view`；`fulfillment.configure` 必须同时包含 `product.edit`。服务器检查商品存在、店铺归属、店铺启用、请求设备密钥、批准者身份与近期认证。商品管理会话和 CLI Bearer 不能批准新范围；平台管理员或店主的浏览器操作也必须经过明确核对与批准，已有登录本身不等于批准设备。
 

@@ -60,6 +60,8 @@ Extore 接手支付之后的兑换与交付：验证卡密，将顾客带到对�
 3. 提交参数后创建唯一任务，重复提交返回同一个任务。
 4. 队列管理者、预设处理器或外部平台完成任务，顾客通过领取链接查看进度和结果。
 
+[进度看板](https://github.com/TokenNotIncluded/extore/blob/main/docs/progress-board.md)把各商品流水线和处理者进度汇总到同一页，只展示状态、百分比、步骤序号和更新时间，不读取需求或交付内容。可用独立的 `queue.monitor` 权限授权进度观察者，网页、CLI 和 WebMCP 使用同一个只读接口。
+
 队列商品可修改未来任务的输入输出，已有任务保留各自的结构快照。自动商品发行卡密后锁定处理器和输入输出结构。SKU 的 `price` 字段是参考价，仅供外部商城配置参考。Extore 只负责兑换与交付，不收款；实际售价、收款和销售库存由商家在上游平台管理。
 
 可选的[任务流程](https://github.com/TokenNotIncluded/extore/blob/main/docs/task-flow.md)把顾客输入、处理和展示串起来。验证或批量准备不会替顾客开始计时；顾客只看到当前允许的题目和明确展示的结果。流程在发行卡密时固定，旧卡没有流程快照时继续走原来的兑换方式。短期敏感输入有有效期，只传给当前获授权的处理节点，不能放到展示、普通事件或最终交付中。
@@ -167,6 +169,7 @@ SMTP 凭据、TOTP 密钥与店铺处理器配置加密保存。店主可以回�
 | [Python SDK](https://github.com/TokenNotIncluded/extore/blob/main/docs/python-sdk.md) | 预设处理器协议、任务结果、外部验签与回调示例 |
 | [私有 Worker v2](https://github.com/TokenNotIncluded/extore/blob/main/docs/private-worker.md) · [SDK v2](https://github.com/TokenNotIncluded/extore/blob/main/docs/python-sdk-v2.md) | 按店铺、任务、尝试和节点签名派发，结果与附件幂等回调 |
 | [0.8.0 更新说明](https://github.com/TokenNotIncluded/extore/blob/main/docs/releases/0.8.0.md) | 本轮能力、兼容性与仍需单独验收的边界 |
+| [0.9.0 更新说明](https://github.com/TokenNotIncluded/extore/blob/main/docs/releases/0.9.0.md) | 只读进度看板、商品流水线与处理者负载；支持独立权限、CLI 和 WebMCP |
 | [0.8.2 更新说明](https://github.com/TokenNotIncluded/extore/blob/main/docs/releases/0.8.2.md) | 清空回收站与彻底删除商品；保留已有卡密、任务和交付 |
 | [0.8.1 更新说明](https://github.com/TokenNotIncluded/extore/blob/main/docs/releases/0.8.1.md) | 商品删除、回收站恢复与独立删除权限；保留旧卡密和任务 |
 | [验收记录](https://github.com/TokenNotIncluded/extore/blob/main/docs/acceptance.md) | 已记录的验证结果、对接边界与限制 |

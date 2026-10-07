@@ -79,7 +79,8 @@ window.ExtoreWebMCP.dispose();
 
 | 权限 | 允许的范围 |
 |---|---|
-| `queue.view` | 查看该商品队列 |
+| `queue.monitor` | 只查看该商品的进度看板，不读取任务内容、处理说明或附件 |
+| `queue.view` | 查看该商品队列，也可以查看进度看板 |
 | `queue.process` | 领取队列任务、更新进度、提交结果、标记失败；人或获授权的 AI 都可处理 |
 | `queue.retry` | 核实后放行该商品失败任务重试 |
 | `product.edit` | 查看并修改该商品基本配置，如名称、说明、图片、参数和队列输出展示文本 |
@@ -88,7 +89,7 @@ window.ExtoreWebMCP.dispose();
 | `events.manage` | 查看与重投该商品事件 |
 | `links.delegate` | 创建严格更小权限的子管理链接、管理下级授权 |
 
-`/staff` 的 `products` / `jobs` / `cards` / `staff` / `events` 标签根据实际权限提供，`sessions` 允许查看自己的登录状态，不能进入 `security`。`queue.process` 和 `queue.retry` 都必须同时授予 `queue.view`；`fulfillment.configure` 必须同时授予 `product.edit`。商家创建的完整商品管理链接可以授予全部 8 项权限；前端显示标签不代表持有权限。
+`/staff` 的管理标签根据实际权限提供，独立的 `queue.monitor` 只提供进度看板和自己的会话状态，不提供任务详情。`queue.process` 和 `queue.retry` 都必须同时授予 `queue.view`；`fulfillment.configure` 必须同时授予 `product.edit`。完整商品权限以服务器 `LINK_PERMISSIONS` 为准；前端显示标签不代表持有权限。
 
 权限依赖同时写入授权工具 `inputSchema` 的 `allOf` 条件，并由执行函数和服务端再次验证，不能仅依赖浏览器校验 Schema。
 
@@ -117,6 +118,7 @@ window.ExtoreWebMCP.dispose();
 | 卡密标签：商家或 `cards.manage` | `extore_cards_list`、`extore_cards_issue`、`extore_card_revoke` | 查询、批量发行、撤销卡密 |
 | 卡密标签：商家或 `cards.manage` | `extore_card_stats`、`extore_card_inventory`、`extore_card_history` | 只读统计、分页库存与卡密生命周期，均不返回完整卡密 |
 | 管理链接标签：商家或 `links.delegate` | `extore_staff_list`、`extore_staff_authorize`、`extore_staff_revoke` | 查询、创建或撤销商品管理链接；委托限于下级授权 |
+| 管理页：商家或 `queue.monitor` / `queue.view` | `extore_progress_board` | 读取进度看板，平台管理员须选定店铺；不返回任务内容 |
 | 任务标签：商家或 `queue.view` | `extore_queue_products`、`extore_queue_select`、`extore_jobs_list` | 选择和查看商品独立队列 |
 | 任务标签：商家或 `queue.view` | `extore_jobs_files_list`、`extore_jobs_file_read` | 查看任务附件元数据、受限读取文件 |
 | 任务标签：商家或 `queue.process` | `extore_jobs_claim`、`extore_jobs_progress`、`extore_jobs_complete`、`extore_jobs_fail`、`extore_jobs_request_retry`、兼容 `extore_jobs_request_changes`、`extore_jobs_reject` | 批量处理队列任务，要求重试或拒绝须说明原因，仍限于授权商品 |
