@@ -204,6 +204,6 @@ def test_actual_owner_transport_signs_route_mutation_and_shop_query(tmp_path):
     assert result["ok"] and result["result"]["enabled"] is False
     assert "never-export" not in json.dumps(result)
     assert observed == [
-        ("GET", "/api/admin/proxy/routes?shop_id=" + SHOP),
+        ("GET", "/api/admin/proxy/routes?shop_id=" + SHOP + "&history=true"),
         ("PUT", "/api/admin/proxy/routes/" + ROUTE + "?shop_id=" + SHOP),
     ]

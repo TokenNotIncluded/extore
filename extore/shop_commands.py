@@ -61,6 +61,9 @@ def add_commands(subcommands):
             "delete",
         ),
     )
+    routes["list"].add_argument(
+        "--history", action="store_true", help="include disabled and archived routes"
+    )
     cleanup = proxy_groups.add_parser(
         "cleanup", help="remove unused historical identities and disabled routes"
     )
@@ -543,6 +546,7 @@ def proxy_metadata(value, *, public=False):
             "updated",
             "kind",
             "current",
+            "archived",
         )
     )
     return {key: value[key] for key in keys if key in value}
@@ -814,9 +818,21 @@ def _proxy_dispatch(client, owner, args):
                 "Route response belongs to a different shop", code="invalid_response"
             )
         return business._finish(args, {"ok": True, "result": proxy_metadata(value)})
-    if group == "identities" and operation == "list" and args.history:
-        query["history"] = "true"
-    rows = client.request(owner, "GET", path, params=query)
+    list_query = dict(query)
+    if (
+        operation == "list"
+        and args.history
+        or group == "routes"
+        and operation
+        in (
+            "export",
+            "enable",
+            "disable",
+            "default",
+        )
+    ):
+        list_query["history"] = "true"
+    rows = client.request(owner, "GET", path, params=list_query)
     if not isinstance(rows, list) or any(
         not isinstance(row, dict) or row.get("shop_id") != shop for row in rows
     ):

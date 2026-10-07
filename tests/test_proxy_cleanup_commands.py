@@ -86,6 +86,61 @@ def test_identity_list_defaults_current_and_history_is_explicit(tmp_path):
     assert PRIVATE not in json.dumps(result)
 
 
+def test_route_list_defaults_active_and_explicit_history_keeps_archive_metadata(
+    tmp_path,
+):
+    client = Client(
+        [{"route_id": ROUTE, "shop_id": SHOP, "archived": True, "private_key": PRIVATE}]
+    )
+    shop_commands.dispatch(client, OWNER, args(tmp_path, "routes", "list"))
+    result = shop_commands.dispatch(
+        client, OWNER, args(tmp_path, "routes", "list", "--history")
+    )
+    assert result["result"][0]["archived"] is True
+    assert PRIVATE not in json.dumps(result)
+    assert client.calls == [
+        ("GET", "/api/admin/proxy/routes", {"params": {"shop_id": SHOP}}),
+        (
+            "GET",
+            "/api/admin/proxy/routes",
+            {"params": {"shop_id": SHOP, "history": "true"}},
+        ),
+    ]
+
+
+@pytest.mark.parametrize("operation", ["enable", "disable", "default", "export"])
+def test_route_lookup_includes_history_without_adding_it_to_write_scope(
+    tmp_path, operation
+):
+    row = {
+        "route_id": ROUTE,
+        "issuer_id": IDENTITY,
+        "shop_id": SHOP,
+        "identity_id": IDENTITY,
+        "name": "main",
+        "origin": ORIGIN,
+        "path": "/",
+        "public_key": "A" * 43,
+        "enabled": False,
+        "archived": True,
+    }
+
+    class HistoryClient(Client):
+        def request(self, owner, method, path, **kwargs):
+            self.calls.append((method, path, kwargs))
+            return [row] if method == "GET" else row
+
+    client = HistoryClient(None)
+    shop_commands.dispatch(client, OWNER, args(tmp_path, "routes", operation, ROUTE))
+    assert client.calls[0] == (
+        "GET",
+        "/api/admin/proxy/routes",
+        {"params": {"shop_id": SHOP, "history": "true"}},
+    )
+    if operation != "export":
+        assert client.calls[-1][2]["params"] == {"shop_id": SHOP}
+
+
 @pytest.mark.parametrize("group,target", [("identities", IDENTITY), ("routes", ROUTE)])
 def test_cleanup_preview_is_read_only_and_delete_is_explicit(tmp_path, group, target):
     client = Client(preview(group == "identities"))
