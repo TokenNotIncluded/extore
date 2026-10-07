@@ -30,6 +30,8 @@ class Client:
                 "shop_id": SHOP,
                 "identity_id": None,
                 "enabled": True,
+                "default_issuer": False,
+                "archived": False,
                 "private_key": "NEVER-ECHO",
             }
         ]
@@ -54,6 +56,7 @@ def test_proxy_owner_commands_are_registered_and_keep_public_keys(tmp_path):
     client = Client()
     result = shop_commands.dispatch(client, OWNER, args(tmp_path, "routes", "list"))
     assert result["result"][0]["public_key"] == PUBLIC["public_key"]
+    assert result["result"][0]["archived"] is False
     assert "private_key" not in result["result"][0]
     assert client.calls[0][2]["params"] == {"shop_id": SHOP}
     assert "proxy" in shop_commands.COMMANDS
@@ -65,6 +68,7 @@ def test_proxy_export_is_exact_six_fields_and_import_ignores_no_hidden_fields(tm
         client, OWNER, args(tmp_path, "routes", "export", ROUTE)
     )
     assert result == PUBLIC
+    assert client.calls[-1][2]["params"] == {"shop_id": SHOP, "history": "true"}
     path = tmp_path / "route.json"
     path.write_text(json.dumps(result))
     imported = shop_commands.dispatch(
@@ -101,6 +105,7 @@ def test_proxy_shop_scope_is_explicit_for_root_and_fixed_for_merchant(tmp_path):
 def test_route_mutation_reads_scope_and_sends_strict_bool_with_shop_query(tmp_path):
     client = Client()
     shop_commands.dispatch(client, OWNER, args(tmp_path, "routes", "disable", ROUTE))
+    assert client.calls[0][2]["params"] == {"shop_id": SHOP, "history": "true"}
     method, path, kwargs = client.calls[-1]
     assert method == "PUT" and path.endswith("/" + ROUTE)
     assert kwargs == {"json": {"enabled": False}, "params": {"shop_id": SHOP}}
@@ -114,21 +119,42 @@ def test_route_mutation_reads_scope_and_sends_strict_bool_with_shop_query(tmp_pa
         )
 
 
-def test_local_issuer_route_uses_own_origin_and_explicit_default_only(tmp_path):
-    client = Client()
-    shop_commands.dispatch(
+def test_local_route_create_accepts_reused_mandatory_main_route(tmp_path):
+    class CurrentIssuerClient(Client):
+        def request(self, owner, method, path, **kwargs):
+            super().request(owner, method, path, **kwargs)
+            return {
+                **PUBLIC,
+                "name": "main",
+                "shop_id": SHOP,
+                "identity_id": IDENTITY,
+                "enabled": True,
+                "default_issuer": True,
+                "archived": False,
+                "private_key": "NEVER-ECHO",
+            }
+
+    client = CurrentIssuerClient()
+    result = shop_commands.dispatch(
         client,
         OWNER,
-        args(tmp_path, "routes", "create", "--name", "Local", "--identity", IDENTITY),
+        args(tmp_path, "routes", "create", "--name", "main", "--identity", IDENTITY),
     )
     assert client.calls[-1][2]["json"] == {
-        "name": "Local",
+        "name": "main",
         "identity_id": IDENTITY,
         "origin": OWNER["origin"],
         "path": "/",
         "default_issuer": False,
         "shop_id": SHOP,
     }
+    # The compatibility flag stays False in an old-style request, but the server
+    # returns the existing mandatory route rather than clearing it or adding one.
+    assert result["result"]["route_id"] == ROUTE
+    assert result["result"]["name"] == "main"
+    assert result["result"]["default_issuer"] is True
+    assert result["result"]["archived"] is False
+    assert "NEVER-ECHO" not in json.dumps(result)
 
 
 def test_foreign_response_and_unsafe_target_never_create_an_import(tmp_path):
@@ -158,6 +184,11 @@ def test_actual_owner_transport_signs_route_mutation_and_shop_query(tmp_path):
         assert "cookie" not in request.headers
         assert request.headers["authorization"] == "Bearer short-lived-owner-secret"
         assert request.url.params["shop_id"] == SHOP
+        assert dict(request.url.params) == (
+            {"shop_id": SHOP}
+            if request.method == "PUT"
+            else {"shop_id": SHOP, "history": "true"}
+        )
         observed.append((request.method, request.url.raw_path.decode()))
         if request.method == "PUT":
             raw = request.read()
