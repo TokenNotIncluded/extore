@@ -854,6 +854,9 @@ def add_parser(commands):
         if operation == "revoke":
             parser.add_argument("id")
     shop_commands.add_commands(sub)
+    from .http_proxy import add_proxy_arguments
+
+    add_proxy_arguments(admin)
     return admin
 
 
@@ -1562,6 +1565,9 @@ def dispatch(client, args):
 
 
 def execute(args, *, transport=None):
+    from .http_proxy import resolve_proxy
+
+    proxy_settings = resolve_proxy(args)
     path = profile_path(args.profile)
     args.profile = path
     _no_symlinks(path)
@@ -1578,7 +1584,10 @@ def execute(args, *, transport=None):
         ):
             raise ManageError("Invalid owner profile", code="invalid_profile")
         with _BusinessOwner(
-            data, transport=transport, persist=lambda: _save_profile(path, data)
+            data,
+            transport=transport,
+            persist=lambda: _save_profile(path, data),
+            proxy_settings=proxy_settings,
         ) as client:
             try:
                 result = dispatch(client, args)

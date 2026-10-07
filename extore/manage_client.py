@@ -251,12 +251,12 @@ def _safe_grant(grant):
 
 
 class ManageClient:
-    def __init__(self, data, *, transport=None, persist=None):
+    def __init__(self, data, *, transport=None, persist=None, proxy_settings=None):
+        from .http_proxy import make_client
+
         self.data = data
         self.persist = persist or (lambda: None)
-        self.http = httpx.Client(
-            timeout=30, follow_redirects=False, transport=transport, trust_env=False
-        )
+        self.http = make_client(proxy_settings, timeout=30, transport=transport)
 
     def __enter__(self):
         return self
@@ -2646,6 +2646,9 @@ def add_parser(commands):
     from .manage_commands import add_commands
 
     add_commands(subcommands)
+    from .http_proxy import add_proxy_arguments
+
+    add_proxy_arguments(manage)
     return manage
 
 
@@ -2669,6 +2672,9 @@ def _read_text(path, limit):
 
 
 def execute(args, *, transport=None):
+    from .http_proxy import resolve_proxy
+
+    proxy_settings = resolve_proxy(args)
     command = "complete" if args.manage_command == "succeed" else args.manage_command
     path = profile_path(args.profile)
     origin = origin_from_url(args.origin) if getattr(args, "origin", None) else None
@@ -2678,7 +2684,10 @@ def execute(args, *, transport=None):
     # key. Catch inside the context; normal errors retain private profile state.
     with private_profile(path, create=command == "login") as data:
         with ManageClient(
-            data, transport=transport, persist=lambda: _save_profile(path, data)
+            data,
+            transport=transport,
+            persist=lambda: _save_profile(path, data),
+            proxy_settings=proxy_settings,
         ) as client:
             try:
                 result = dispatch(client, args, command, origin)

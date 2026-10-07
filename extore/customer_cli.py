@@ -889,15 +889,16 @@ def _private_output(target):
 
 
 class CustomerClient:
-    def __init__(self, data=None, *, transport=None, persist=None):
+    def __init__(self, data=None, *, transport=None, persist=None, proxy_settings=None):
+        from .http_proxy import make_client
+
         self.data = data
         self.persist = persist or (lambda: None)
         self.upload_limits = {}
-        self.http = httpx.Client(
+        self.http = make_client(
+            proxy_settings,
             transport=transport,
             timeout=httpx.Timeout(120, connect=15),
-            follow_redirects=False,
-            trust_env=False,
         )
 
     def __enter__(self):
@@ -2008,6 +2009,9 @@ def add_parser(commands):
                 required=True,
                 help="confirm permanent destruction",
             )
+    from .http_proxy import add_proxy_arguments
+
+    add_proxy_arguments(customer)
     return customer
 
 
@@ -2282,17 +2286,25 @@ def dispatch(client, args):
 
 
 def execute(args, *, transport=None):
+    from .http_proxy import resolve_proxy
+
+    proxy_settings = resolve_proxy(args)
     if args.customer_command == "products" or (
         args.customer_command == "schema" and args.product
     ):
-        with CustomerClient(transport=transport) as client:
+        with CustomerClient(
+            transport=transport, proxy_settings=proxy_settings
+        ) as client:
             return dispatch(client, args)
     path = profile_path(args.profile)
     with private_profile(
         path, create=args.customer_command in ("exchange", "import-receipt")
     ) as data:
         with CustomerClient(
-            data, transport=transport, persist=lambda: _save_profile(path, data)
+            data,
+            transport=transport,
+            persist=lambda: _save_profile(path, data),
+            proxy_settings=proxy_settings,
         ) as client:
             return dispatch(client, args)
 
