@@ -32,6 +32,8 @@ let lang = preferences.resolved.language,
   managementLinkId = null,
   tab = "products",
   products = [],
+  productsView = "active",
+  managedProductDeleted = false,
   cardProductId = "",
   queueProductId = "",
   queueView = "active",
@@ -1256,6 +1258,7 @@ const permissionLabels = {
   "cards.manage": "发行、查看与撤销卡密",
   "events.manage": "查看事件与重新投递",
   "links.delegate": "创建与撤销下级管理链接",
+  "product.delete": "删除与恢复商品（保留旧卡密和任务）",
 };
 function acceptAuth(auth) {
   authStatus = auth;
@@ -1268,6 +1271,7 @@ function acceptAuth(auth) {
   managementMaxCLIUses = auth.max_cli_uses ?? 1;
   managementRemainingCLIUses = auth.remaining_cli_uses ?? Math.max(0, managementMaxCLIUses - (auth.cli_uses || 0));
   managementLinkId = auth.link_id || auth.staff_id || null;
+  managedProductDeleted = false;
   if (location.pathname === "/admin" && role === "admin" && $("#management-identity")) $("#management-identity").textContent = managementIdentity();
 }
 function managementIdentity() {
@@ -1286,7 +1290,7 @@ function managementTabs() {
     ["cards", "卡密", "cards.manage"],
     ["staff", "管理链接", "links.delegate"],
     ["events", "事件记录", "events.manage"],
-  ].filter(([, , permission]) => permitted(permission));
+  ].filter(([key, , permission]) => permitted(permission) || (key === "products" && permitted("product.delete")));
   items.push(["sessions", "会话与审计"]);
   if (role === "admin") {
     items.push(["security", "账户安全"], ["profiles", "商品处理器配置"], ["proxy", "兑换路由"]);
@@ -1320,7 +1324,12 @@ async function renderTab() {
   queueLoadId++;
   window.ExtoreWebMCP?.refresh();
   if (tab === "products") {
-    if (role === "staff") products = [await api("/manage/product")];
+    if (role === "staff") {
+      if (permitted("product.edit")) products = [await api("/manage/product")];
+      else products = await api("/manage/products?view=" + productsView);
+      const product = products.find((item) => item.id === managedProductId);
+      if (product) managedProductDeleted = product.deleted === true || Boolean(product.deleted_at);
+    }
     await renderProducts();
   }
   if (tab === "jobs") await renderJobs();
@@ -1390,18 +1399,22 @@ async function copyCLIPrompt(options, host, isCurrent = () => true) {
   }
   toast(copied ? tr("AI 提示词已复制", "AI prompt copied") : tr("复制失败，已选中提示词，请手动复制。", "Could not copy. The prompt is selected; copy it manually."));
 }
-function productUIContext() {
+function productUIContext(visibleProducts = products) {
   const loadId = queueLoadId;
   const pathname = location.pathname;
   const scope = authStatus.shop_id, sessionId = authStatus.session_id;
   const requestOptions = managementOptions();
+  const selectedProductsView = productsView;
   return {
     api: (path, body, method, options = {}) => api(path, body, method, { ...requestOptions, ...options }),
     workspace: $("#workspace"),
-    products,
+    products: visibleProducts,
+    productView: productsView,
     role,
     sessionId: authStatus.session_id ?? null,
     canConfigure: permitted("fulfillment.configure"),
+    canEdit: permitted("product.edit"),
+    canDelete: permitted("product.delete"),
     shopId: authStatus.shop_id,
     superadmin: window.ExtoreAccount?.rootScope(authStatus) === true,
     canManageCards: permitted("cards.manage"),
@@ -1411,15 +1424,48 @@ function productUIContext() {
       location.pathname === pathname &&
       tab === "products",
     onSaved: (updated) => {
-      if (loadId === queueLoadId && authStatus.shop_id === scope && authStatus.session_id === sessionId && location.pathname === pathname && tab === "products") products = updated;
+      if (loadId === queueLoadId && authStatus.shop_id === scope && authStatus.session_id === sessionId && location.pathname === pathname && tab === "products") {
+        if (selectedProductsView === "active") products = updated.filter((product) => product.deleted !== true && !product.deleted_at);
+        else {
+          const cached = new Map(products.map((product) => [product.id, product]));
+          for (const product of updated) {
+            if (product.deleted === true || product.deleted_at) cached.delete(product.id);
+            else cached.set(product.id, product);
+          }
+          products = [...cached.values()];
+        }
+        const managed = updated.find((product) => product.id === managedProductId);
+        if (managed) managedProductDeleted = managed.deleted === true || Boolean(managed.deleted_at);
+      }
     },
+    onViewChange: (view, fallbackProducts = visibleProducts) => renderProducts(view, true, { view: selectedProductsView, products: fallbackProducts }),
     notify: toast,
     copyManagementLink,
     refreshTools: () => window.ExtoreWebMCP?.refresh(),
   };
 }
-async function renderProducts() {
-  return window.ExtoreProducts.render(productUIContext());
+async function renderProducts(requestedView = productsView, refresh = false, fallback = { view: productsView, products }) {
+  const view = ["active", "deleted", "all"].includes(requestedView) ? requestedView : "active";
+  productsView = view;
+  let visibleProducts = products;
+  if (refresh || view !== "active") {
+    const loadId = ++queueLoadId;
+    const pathname = location.pathname, authority = managementAuthority(), options = managementOptions();
+    try {
+      visibleProducts = await api((role === "staff" ? "/manage" : "/admin") + "/products?" + new URLSearchParams({ view }), undefined, "GET", options);
+    } catch (error) {
+      if (loadId !== queueLoadId || pathname !== location.pathname || tab !== "products" || authority !== managementAuthority() || authStatus.session_id !== options.expectedSessionId) return;
+      productsView = fallback.view;
+      await window.ExtoreProducts.render(productUIContext(fallback.products));
+      if (loadId === queueLoadId && tab === "products" && $("#error")) $("#error").textContent = tr("商品列表加载失败，请重试：", "Could not load products. Try again: ") + error.message;
+      return;
+    }
+    if (loadId !== queueLoadId || pathname !== location.pathname || tab !== "products" || authority !== managementAuthority() || authStatus.session_id !== options.expectedSessionId) return;
+    if (view === "active") products = visibleProducts;
+    const managed = visibleProducts.find((product) => product.id === managedProductId);
+    if (managed) managedProductDeleted = managed.deleted === true || Boolean(managed.deleted_at);
+  }
+  return window.ExtoreProducts.render(productUIContext(visibleProducts));
 }
 async function editProduct(p) {
   return window.ExtoreProducts.edit(productUIContext(), p);
@@ -1460,7 +1506,7 @@ async function renderJobs(filter = "", requestedProductId = queueProductId, requ
   if ($("#batch-form")) $("#batch-form").innerHTML = "";
   const active = () =>
     loadId === queueLoadId && managementAuthority() === authority && authStatus.session_id === requestOptions.expectedSessionId && location.pathname === pathname && tab === "jobs";
-  const available = await api("/manage/products", undefined, "GET", requestOptions);
+  const available = await api("/manage/products?view=all", undefined, "GET", requestOptions);
   if (!active()) return;
   if (!available.length) {
     queueProductId = "";
@@ -1485,7 +1531,7 @@ async function renderJobs(filter = "", requestedProductId = queueProductId, requ
   const dialogCurrent = (generation) => active() && generation === batchDialogGeneration;
   const closeBatchDialog = () => { batchDialogGeneration++; $("#batch-form").innerHTML = ""; };
   $("#workspace").innerHTML = `
-    <div class="field queue-picker"><label for="queue-product">选择商品队列</label><select id="queue-product" ${role === "staff" ? "disabled" : ""}>${available.map((p) => `<option value="${esc(p.id)}" ${p.id === productId ? "selected" : ""}>${esc(p.name)}</option>`).join("")}</select></div>
+    <div class="field queue-picker"><label for="queue-product">选择商品队列</label><select id="queue-product" ${role === "staff" ? "disabled" : ""}>${available.map((p) => `<option value="${esc(p.id)}" ${p.id === productId ? "selected" : ""}>${esc(p.name)}${p.deleted === true || p.deleted_at ? tr("（已删除）", " (deleted)") : ""}</option>`).join("")}</select></div>
     <div class="queue-heading"><h2>${esc(selectedProduct.name)} · 处理队列</h2><button id="copy-queue-ai" class="secondary">复制给 AI 的提示词</button><p class="caption">${manual ? "本队列只处理这个商品。先领取任务，再更新进度或提交结果。" : "本商品由程序自动处理，这里查看进度与处理记录。"}</p>${role === "staff" ? `<p class="caption">CLI 剩余绑定次数：${managementRemainingCLIUses}。${managementRemainingCLIUses ? "复制提示词后，由你在网页确认设备码来绑定 CLI。" : "请使用已绑定的 CLI 设备和原来的配置文件。"}</p>` : ""}</div><div id="queue-ai-prompt"></div>
     <div class="toolbar"><select id="job-view" aria-label="队列视图"><option value="active" ${view === "active" ? "selected" : ""}>待处理</option><option value="processed" ${view === "processed" ? "selected" : ""}>已处理</option><option value="all" ${view === "all" ? "selected" : ""}>全部</option></select><select id="job-state" aria-label="任务状态"><option value="">全部状态</option>${Object.entries(
       states,
@@ -1717,7 +1763,7 @@ async function renderJobs(filter = "", requestedProductId = queueProductId, requ
 async function renderCards() {
   const loadId = queueLoadId;
   const pathname = location.pathname;
-  if (role === "staff") products = await api("/manage/products");
+  const available = await api((role === "staff" ? "/manage" : "/admin") + "/products?view=all");
   if (
     loadId !== queueLoadId ||
     pathname !== location.pathname ||
@@ -1727,7 +1773,7 @@ async function renderCards() {
   return window.ExtoreCards.render({
     api,
     workspace: $("#workspace"),
-    products,
+    products: available,
     role,
     productId: role === "staff" ? managedProductId : cardProductId,
     isCurrent: () =>
@@ -2115,6 +2161,8 @@ window.ExtoreWebMCP?.configure({
     cardId: batchSelection || "",
     queueProduct,
     permissions,
+    productsView,
+    productDeleted: managedProductDeleted,
     productId: managedProductId,
     linkExpires: managementExpires,
   }),
@@ -2141,7 +2189,7 @@ window.ExtoreWebMCP?.configure({
     navigate,
     selectQueue: async (productId, options = {}) => {
       const available = await api(
-        "/manage/products",
+        "/manage/products?view=all",
         undefined,
         "GET",
         options,

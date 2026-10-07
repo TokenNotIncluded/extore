@@ -10,7 +10,7 @@ const source = fs.readFileSync(path.join(__dirname, "../extore/static/webmcp.js"
 const plain = (value) => JSON.parse(JSON.stringify(value));
 const nextTurn = () => new Promise((resolve) => setTimeout(resolve, 0));
 const permissionCodes = [
-  "queue.view", "queue.process", "queue.retry", "product.edit", "fulfillment.configure", "cards.manage", "events.manage", "links.delegate",
+  "queue.view", "queue.process", "queue.retry", "product.edit", "product.delete", "fulfillment.configure", "cards.manage", "events.manage", "links.delegate",
 ];
 const staffContext = (overrides = {}) => ({
   page: "staff", role: "staff", tab: "jobs", productId: "p1", queueProductId: "p1",
@@ -121,7 +121,10 @@ async function harness(t, options = {}) {
     calls.push({ type: "api", url, body: body && plain(body), method, signal: requestOptions?.signal });
     if (options.api) return options.api(url, body, method, requestOptions, state);
     if (url === "/auth/status") return { role: state.role, product_id: state.productId, permissions: state.permissions, link_expires: state.linkExpires };
-    if (["/products", "/admin/products", "/manage/products"].includes(url)) return products;
+    if (["/products", "/admin/products", "/manage/products"].includes(url.split("?")[0])) {
+      const view = new URL("https://extore.test" + url).searchParams.get("view") || "active";
+      return products.filter((p) => view === "all" || (view === "deleted" ? p.deleted === true : p.deleted !== true));
+    }
     if (["/admin/processors", "/manage/processors"].includes(url)) return processorCatalog;
     if (url === "/manage/product" && method === "GET") return products.find((p) => p.id === state.productId);
     if (url.startsWith("/manage/jobs")) {
@@ -769,6 +772,7 @@ test("quick creation posts the selected template and safely returns only the del
     context: { page: "admin", role: "admin", tab: "products" },
     api: async (url, body, method) => {
       if (url === "/auth/status") return { role: "admin" };
+      if (url === "/admin/products?view=all") return [product()];
       if (url === "/admin/products/quick" && method === "POST") return response;
       if (url === "/admin/product-templates") return [{ id: "manual_content" }, { id: "manual_service" }];
       assert.fail("Unexpected quick product API: " + url);
@@ -856,6 +860,188 @@ test("management reads redact all secret fields recursively, including private l
   assert.match(result.data[0].description, /\[private link\]/);
   const detail = await h.call("product_admin_get", { product_id: "p1" });
   assert.equal(Object.hasOwn(detail.data, "webhook_secret"), false);
+});
+
+test("product deletion is independently delegated and does not grant product editing", async (t) => {
+  const editor = await harness(t, { context: staffContext({ tab: "products", permissions: ["product.edit"] }) });
+  assert.equal(editor.names().includes("extore_product_delete"), false);
+  assert.equal(editor.names().includes("extore_product_restore"), false);
+  const deleter = await harness(t, { context: staffContext({ tab: "jobs", permissions: ["product.delete"] }) });
+  assert.equal((await deleter.call("ui_navigate", { page: "staff", tab: "products" })).ok, true);
+  await deleter.settle();
+  for (const name of ["product_delete", "product_restore", "products_admin_list", "product_admin_get"])
+    assert.ok(deleter.names().includes("extore_" + name), name);
+  for (const name of ["product_update", "product_export_prompt", "product_create", "processors_list"])
+    assert.equal(deleter.names().includes("extore_" + name), false, name);
+  assert.equal(deleter.tool("product_delete").annotations.destructiveHint, true);
+  assert.equal(deleter.tool("product_restore").annotations.destructiveHint, false);
+  assert.equal(deleter.tool("product_delete").annotations.consequentialHint, true);
+});
+
+test("product deletion and restoration require exact explicit confirmation before any request", async (t) => {
+  const h = await harness(t, { context: { page: "admin", role: "admin", tab: "products" } });
+  for (const name of ["product_delete", "product_restore"]) for (const input of [
+    {}, { product_id: "p1" }, { product_id: "p1", confirm: false }, { product_id: "p1", confirm: "true" },
+    { product_id: "../p1", confirm: true }, { product_id: "p1", confirm: true, permanent: true },
+    { product_id: "p1", confirmed: true },
+  ]) rejected(await h.call(name, input));
+  assert.equal(h.calls.length, 0);
+});
+
+test("owner lifecycle tools read recoverable state and send only the delete or restore contract", async (t) => {
+  let deleted = false;
+  const h = await harness(t, {
+    context: { page: "admin", role: "admin", tab: "products" },
+    api: async (url, body, method) => {
+      if (url === "/auth/status") return { role: "admin" };
+      if (url === "/admin/products?view=all") return [product({ deleted, deleted_at: deleted ? 123 : null })];
+      if (url === "/admin/products/p1" && method === "DELETE") deleted = true;
+      else if (url === "/admin/products/p1/restore" && method === "POST") deleted = false;
+      else assert.fail("Unexpected lifecycle request: " + url);
+      return { ok: true, product_id: "p1", deleted, deleted_at: deleted ? 123 : null, token: "SECRET", internal: "PRIVATE" };
+    },
+  });
+  const removed = await h.call("product_delete", { product_id: "p1", confirm: true });
+  assert.deepEqual(plain(removed.data), { ok: true, product_id: "p1", deleted: true, deleted_at: 123 });
+  const details = await h.call("product_admin_get", { product_id: "p1" });
+  assert.equal(details.data.deleted, true);
+  const restored = await h.call("product_restore", { product_id: "p1", confirm: true });
+  assert.equal(restored.data.deleted, false);
+  assert.deepEqual(mutations(h).map(({ url, method, body }) => ({ url, method, body })), [
+    { url: "/admin/products/p1", method: "DELETE", body: { confirmed: true } },
+    { url: "/admin/products/p1/restore", method: "POST", body: {} },
+  ]);
+});
+
+test("staff lifecycle tools stay in their product and recheck the independent server permission", async (t) => {
+  let permissions = ["product.delete"];
+  const h = await harness(t, {
+    context: staffContext({ tab: "products", permissions }),
+    api: async (url, body, method) => {
+      if (url === "/auth/status") return { role: "staff", product_id: "p1", permissions };
+      if (url === "/manage/products?view=all" && method === "GET") return [product({ deleted: true, deleted_at: 1 })];
+      if (url === "/manage/product?product_id=p1" && method === "DELETE") return { ok: true, product_id: "p1", deleted: true, deleted_at: 1 };
+      if (url === "/manage/product/restore?product_id=p1" && method === "POST") return { ok: true, product_id: "p1", deleted: false, deleted_at: null };
+      assert.fail("Unexpected staff lifecycle request: " + url);
+    },
+  });
+  rejected(await h.call("product_delete", { product_id: "p2", confirm: true }), "forbidden");
+  assert.equal(mutations(h).length, 0);
+  assert.equal((await h.call("product_delete", { product_id: "p1", confirm: true })).ok, true);
+  assert.equal((await h.call("product_restore", { product_id: "p1", confirm: true })).ok, true);
+  permissions = ["product.edit"];
+  rejected(await h.call("product_delete", { product_id: "p1", confirm: true }), "forbidden");
+  assert.equal(mutations(h).length, 2);
+  assert.deepEqual(mutations(h)[0].body, { confirmed: true });
+  assert.deepEqual(mutations(h)[1].body, {});
+});
+
+test("management product lists support active deleted and all with safe lifecycle metadata", async (t) => {
+  const products = [product({ deleted: false, deleted_at: null }), product({ id: "p2", deleted: true, deleted_at: 42, webhook_secret: "SECRET" })];
+  const h = await harness(t, { context: { page: "admin", role: "admin", tab: "products" }, products });
+  assert.deepEqual(plain((await h.call("products_admin_list", {})).data).map((p) => p.id), ["p1"]);
+  const removed = await h.call("products_admin_list", { view: "deleted" });
+  assert.equal(removed.data[0].deleted_at, 42);
+  assert.equal(Object.hasOwn(removed.data[0], "webhook_secret"), false);
+  assert.deepEqual(plain((await h.call("products_admin_list", { view: "all" })).data).map((p) => p.id), ["p1", "p2"]);
+  assert.ok(h.calls.some((call) => call.url === "/admin/products"));
+  assert.ok(h.calls.some((call) => call.url === "/admin/products?view=deleted"));
+  rejected(await h.call("products_admin_list", { view: "archived" }));
+  const staff = await harness(t, { context: staffContext({ tab: "products", permissions: ["product.delete"] }), products });
+  assert.deepEqual(plain((await staff.call("products_admin_list", { view: "all" })).data).map((p) => p.id), ["p1"]);
+  assert.ok(staff.calls.some((call) => call.url === "/manage/products?view=all"));
+});
+
+test("delete-only staff reads safe product summaries before get delete and restore", async (t) => {
+  const summary = { id: "p1", name: "Summary", deleted: true, deleted_at: 1 };
+  const h = await harness(t, {
+    context: staffContext({ tab: "products", permissions: ["product.delete"] }),
+    api: async (url, body, method) => {
+      if (url === "/auth/status") return { role: "staff", product_id: "p1", permissions: ["product.delete"] };
+      if (url === "/manage/products?view=all" && method === "GET") return [summary];
+      if (url === "/manage/product?product_id=p1" && method === "DELETE") return { ok: true, product_id: "p1", deleted: true, deleted_at: 1 };
+      if (url === "/manage/product/restore?product_id=p1" && method === "POST") return { ok: true, product_id: "p1", deleted: false, deleted_at: null };
+      assert.fail("Delete-only staff requested full product configuration: " + url);
+    },
+  });
+  assert.deepEqual(plain((await h.call("product_admin_get", { product_id: "p1" })).data), summary);
+  assert.equal((await h.call("product_delete", { product_id: "p1", confirm: true })).ok, true);
+  assert.equal((await h.call("product_restore", { product_id: "p1", confirm: true })).ok, true);
+  assert.equal(h.calls.some((call) => call.url === "/manage/product" && call.method === "GET"), false);
+  assert.match(h.tool("product_delete").description, /Existing card codes can still be redeemed/);
+  assert.equal(h.tool("product_delete").description.includes("New redemptions"), false);
+});
+
+test("product list filters conservatively treat deletion timestamps as deleted", async (t) => {
+  const rows = [product({ deleted: false, deleted_at: null }), product({ id: "p2", deleted: false, deleted_at: 3 })];
+  const h = await harness(t, {
+    context: { page: "admin", role: "admin", tab: "products" },
+    api: async (url) => {
+      if (url === "/auth/status") return { role: "admin" };
+      if (url.startsWith("/admin/products")) return rows;
+      assert.fail("Unexpected conservative filtering request: " + url);
+    },
+  });
+  assert.deepEqual(plain((await h.call("products_admin_list", { view: "active" })).data).map((p) => p.id), ["p1"]);
+  assert.deepEqual(plain((await h.call("products_admin_list", { view: "deleted" })).data).map((p) => p.id), ["p2"]);
+  assert.deepEqual(plain((await h.call("products_admin_list", { view: "all" })).data).map((p) => p.id), ["p1", "p2"]);
+});
+
+test("cached product tools expire when lifecycle or list-view context changes", async (t) => {
+  const h = await harness(t, { context: staffContext({ tab: "products", permissions: ["product.edit", "product.delete"] }) });
+  const update = h.tool("product_update");
+  h.state.productDeleted = true;
+  await h.refresh();
+  for (const name of ["product_update", "product_export_prompt"]) assert.equal(h.names().includes("extore_" + name), false);
+  assert.ok(h.names().includes("extore_product_restore"));
+  rejected(await update.execute({ product_id: "p1", changes: { name: "Changed" }, confirm: true }), "stale_context");
+  const list = h.tool("products_admin_list");
+  h.state.productsView = "deleted";
+  await h.refresh();
+  rejected(await list.execute({}), "stale_context");
+  assert.equal(h.calls.length, 0);
+});
+
+test("fresh deletion state blocks product updates and local exports even with stale UI metadata", async (t) => {
+  let exported = false;
+  const h = await harness(t, {
+    context: staffContext({ tab: "products", permissions: ["product.edit"] }),
+    products: [product({ deleted: true, deleted_at: 12 })],
+    productExport: { prompt: () => { exported = true; return "PROMPT"; } },
+  });
+  rejected(await h.call("product_update", { product_id: "p1", changes: { name: "Changed" }, confirm: true }), "product_deleted");
+  rejected(await h.call("product_export_prompt", { product_id: "p1" }), "product_deleted");
+  assert.equal(exported, false);
+  assert.equal(mutations(h).length, 0);
+});
+
+test("fresh summary lifecycle checks block cards and new links without requiring edit access", async (t) => {
+  const cards = await harness(t, { context: staffContext({ tab: "cards", permissions: ["cards.manage"] }), products: [product({ deleted: true, deleted_at: 12 })] });
+  rejected(await cards.call("cards_issue", { product_id: "p1", count: 1, confirm: true }), "product_deleted");
+  assert.ok(cards.calls.some((call) => call.url === "/manage/products?view=all"));
+  assert.equal(cards.calls.some((call) => call.url === "/manage/product"), false);
+  assert.equal(mutations(cards).length, 0);
+  const links = await harness(t, { context: staffContext({ tab: "staff", permissions: ["links.delegate", "queue.view"] }), products: [product({ deleted: true, deleted_at: 12 })] });
+  rejected(await links.call("staff_authorize", { product_id: "p1", name: "Child", days: 1, permissions: ["queue.view"], confirm: true }), "product_deleted");
+  assert.equal(mutations(links).length, 0);
+});
+
+test("deleted products cannot seed new copies and do not lose existing queue capabilities", async (t) => {
+  const p = product({ deleted: true, deleted_at: 12 });
+  const owner = await harness(t, { context: { page: "admin", role: "admin", tab: "products" }, products: [p] });
+  rejected(await owner.call("product_quick_create", { template_id: "existing_product", from_product_id: "p1", confirm: true }), "product_deleted");
+  assert.equal(mutations(owner).length, 0);
+  const queue = await harness(t, { context: staffContext({ productDeleted: true, queueProduct: p }), products: [p] });
+  assert.ok(queue.names().includes("extore_jobs_list"));
+  assert.ok(queue.names().includes("extore_jobs_complete"));
+  assert.equal((await queue.call("jobs_list", { product_id: "p1" })).data.length, 2);
+});
+
+test("readonly deletion metadata is never carried into the product update body", async (t) => {
+  const h = await harness(t, { context: { page: "admin", role: "admin", tab: "products" }, products: [product({ deleted: false, deleted_at: null })] });
+  assert.equal((await h.call("product_update", { product_id: "p1", changes: { name: "Updated" }, confirm: true })).ok, true);
+  assert.equal(Object.hasOwn(mutations(h)[0].body, "deleted"), false);
+  assert.equal(Object.hasOwn(mutations(h)[0].body, "deleted_at"), false);
 });
 
 test("receipt context and status expose useful metadata without token or delivery content", async (t) => {
@@ -2975,6 +3161,7 @@ test("management link login limits use bounded defaults and fresh parent ceiling
     context: staffContext({ tab: "staff", permissions: permissionCodes }),
     api: async (url, body, method) => {
       if (url === "/auth/status") return { role: "staff", product_id: "p1", permissions: permissionCodes, max_uses: 2, link_expires: Date.now() / 1000 + 86400 * 2 };
+      if (url === "/manage/products?view=all") return [product()];
       if (url === "/manage/links" && method === "POST") return { id: "s2", max_uses: body.max_uses, url: "https://extore.test/staff#private" };
       assert.fail("Unexpected login-limit request: " + url);
     },
@@ -3243,6 +3430,7 @@ test("delegated CLI binding ceilings are checked against fresh parent authority 
     context: staffContext({ tab: "staff", permissions: permissionCodes }),
     api: async (url, body, method) => {
       if (url === "/auth/status") return { role: "staff", product_id: "p1", permissions: permissionCodes, max_uses: 2, max_cli_uses: ceiling, link_expires: Date.now() / 1000 + 86400 * 2 };
+      if (url === "/manage/products?view=all") return [product()];
       if (url === "/manage/links" && method === "POST") return { id: "s2", max_cli_uses: body.max_cli_uses, url: "https://extore.test/staff#issued-cli-link" };
       assert.fail("Unexpected delegated CLI quota request: " + url);
     },
@@ -3268,6 +3456,7 @@ test("management link metadata includes safe CLI counters without exposing crede
     context: { page: "admin", role: "admin", tab: "staff" },
     api: async (url, body, method) => {
       if (url === "/auth/status") return { role: "admin" };
+      if (url === "/admin/products?view=all") return [product()];
       if (url === "/admin/staff" && method === "GET") return [{ ...metadata, url: "https://extore.test/staff#existing-link" }];
       if (url === "/admin/staff" && method === "POST") return { ...metadata, url: "https://extore.test/staff#new-link" };
       assert.fail("Unexpected safe link metadata request: " + url);

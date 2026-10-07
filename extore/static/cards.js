@@ -43,6 +43,8 @@
     : `${tr("参考价", "Reference price")} ${variant.currency || "CNY"} ${variant.price}`;
   const variantLabel = (variant) =>
     `${variant.name}${variant.price != null ? ` · ${variantPrice(variant)}` : ""}${variant.enabled === false ? tr(" · 已停用", " · Disabled") : ""}`;
+  const productDeleted = (product) =>
+    product?.deleted === true || product?.deleted_at != null;
   const status = (value) => {
     const style = value.startsWith("failed") || value === "rejected"
       ? "failed"
@@ -71,9 +73,12 @@
     let disposed = false;
     let textImport = null;
     let selected = products.find((product) => product.id === productId)?.id;
-    if (!selected) selected = products[0]?.id || "";
+    if (!selected)
+      selected = products.find((product) => !productDeleted(product))?.id ||
+        products[0]?.id || "";
+    const selectedProduct = () => products.find((product) => product.id === selected);
     const productVariants = () => {
-      const product = products.find((product) => product.id === selected);
+      const product = selectedProduct();
       return normalizeVariants(
         Array.isArray(product?.variants)
           ? product.variants
@@ -113,7 +118,8 @@
     active = instance;
     if (!current()) return instance;
     workspace.innerHTML = `<div class="section-head"><h2>卡密管理</h2><button id="cards-refresh" class="secondary" ${products.length ? "" : "disabled"}>刷新</button></div>
-      <div class="field"><label for="cards-product">选择商品</label><select id="cards-product" ${role === "staff" || !products.length ? "disabled" : ""}>${products.map((product) => `<option value="${escape(product.id)}" ${product.id === selected ? "selected" : ""}>${escape(product.name)}</option>`).join("")}</select></div>
+      <div class="field"><label for="cards-product">选择商品</label><select id="cards-product" ${role === "staff" || !products.length ? "disabled" : ""}>${products.map((product) => `<option value="${escape(product.id)}" ${product.id === selected ? "selected" : ""}>${escape(product.name)}${productDeleted(product) ? tr(" · 已删除", " · Deleted") : ""}</option>`).join("")}</select></div>
+      <p id="cards-product-notice" class="caption" role="status" aria-live="polite"></p>
       <div id="cards-error" class="error" role="alert"></div>
       ${
         products.length
@@ -161,6 +167,7 @@
       node("#cards-codes").innerHTML = "";
     };
     const variantControls = () => {
+      const deleted = productDeleted(selectedProduct());
       const enabled = variants.filter((variant) => variant.enabled);
       if (!enabled.some((variant) => variant.id === issueVariant))
         issueVariant =
@@ -177,9 +184,17 @@
             .join("")
         : `<option value="">${tr("暂无启用规格", "No enabled variants")}</option>`;
       issueSelect.value = issueVariant;
-      disable(issueSelect, !enabled.length);
-      disable(node("#cards-issue-submit"), !enabled.length);
-      node("#cards-issue-help").textContent = enabled.length
+      const canIssue = !deleted && enabled.length > 0;
+      disable(issueSelect, !canIssue);
+      disable(node("#cards-issue-submit"), !canIssue);
+      for (const selector of ["#cards-count", "#cards-label", "#cards-expires"])
+        disable(node(selector), !canIssue);
+      node("#cards-product-notice").textContent = deleted
+        ? tr("此商品已删除。已有卡密、统计与使用记录仍可查看，不能再发行卡密或补充库存。", "This product was deleted. Existing codes, statistics and usage history remain available. Issuing codes and adding stock are disabled.")
+        : "";
+      node("#cards-issue-help").textContent = deleted
+        ? tr("已删除商品不能生成卡密。", "Deleted products cannot issue codes.")
+        : enabled.length
         ? tr(
             "每张卡密绑定选定规格。顾客兑换时无需再选择规格。",
             "Each code is bound to this variant. Customers do not choose a variant when redeeming.",
@@ -205,10 +220,11 @@
     const drawTextImport = () => {
       textImport?.dispose();
       textImport = null;
-      const product = products.find((item) => item.id === selected);
+      node("#cards-text-import").innerHTML = "";
+      const product = selectedProduct();
       const stock = product?.mode === "stock";
       node("#cards-regular-issue").hidden = stock;
-      if (!stock) return;
+      if (!stock || productDeleted(product)) return;
       if (!window.ExtoreTextCards) {
         node("#cards-text-import").textContent = tr("文本导入未加载，请刷新页面。", "Text import did not load. Refresh this page.");
         return;
@@ -476,6 +492,8 @@
       "#cards-issue",
       "submit",
       async () => {
+        if (productDeleted(selectedProduct()))
+          throw new Error(tr("已删除商品不能生成卡密。", "Deleted products cannot issue codes."));
         const requestedVariant = node("#cards-issue-variant").value;
         const variant = variants.find(
           (variant) => variant.id === requestedVariant && variant.enabled,

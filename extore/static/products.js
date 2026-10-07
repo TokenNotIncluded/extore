@@ -59,6 +59,7 @@
     Array.isArray(product.variants) && product.variants.length
       ? product.variants
       : [defaultVariant()];
+  const isDeleted = (product) => product?.deleted === true || Boolean(product?.deleted_at);
   let generatedId = 0;
   const newItemId = (prefix) => {
     const random = globalThis.crypto?.randomUUID
@@ -173,21 +174,77 @@
     const { active, $, all, on, report, perform } = view;
     const exportProduct = exportHandler(ctx, view);
     const owner = ctx.role === "admin";
-    const products = ctx.products;
-    ctx.workspace.innerHTML = `<div class="section-head"><h2>商品</h2>${owner ? '<button id="new-product">新建商品</button>' : ""}</div>
-      ${owner ? `<div class="form-divider"><div class="grid">${select("quick-template", "快速新建模板", [["random", "随机选择模板"]], "random")}<div class="field"><label for="quick-product">生成私有草稿与 AI 配置链接</label><button id="quick-product" class="secondary" disabled>随机快速新建</button></div></div><p class="caption">先创建一个私有商品，再把仅能配置这个商品的链接交给 AI 完善。配置链接有效期为 7 天。复制已有商品后，需重新填写私密发货配置。</p></div>` : ""}
+    const tr = (zh, en) => ctx.lang === "en" ? en : zh;
+    const productView = ["active", "deleted", "all"].includes(ctx.productView) ? ctx.productView : "active";
+    const products = (ctx.products || []).filter((product) => productView === "all" || isDeleted(product) === (productView === "deleted"));
+    const activeProducts = products.filter((product) => !isDeleted(product));
+    const canDelete = owner || ctx.canDelete === true;
+    const canEdit = owner || ctx.canEdit !== false;
+    const canCreate = owner && productView !== "deleted";
+    ctx.workspace.innerHTML = `<div class="section-head"><h2>${tr("商品", "Products")}</h2>${canCreate ? `<button id="new-product">${tr("新建商品", "New product")}</button>` : ""}</div>
+      <div class="toolbar product-lifecycle-toolbar">${select("products-view", tr("商品视图", "Product view"), [["active", tr("在售商品", "Active products")], ["deleted", tr("回收站", "Recycle bin")], ["all", tr("全部商品", "All products")]], productView)}</div><div id="product-lifecycle-confirmation" aria-live="polite"></div>
+      ${canCreate ? `<div class="form-divider"><div class="grid">${select("quick-template", "快速新建模板", [["random", "随机选择模板"]], "random")}<div class="field"><label for="quick-product">生成私有草稿与 AI 配置链接</label><button id="quick-product" class="secondary" disabled>随机快速新建</button></div></div><p class="caption">先创建一个私有商品，再把仅能配置这个商品的链接交给 AI 完善。配置链接有效期为 7 天。复制已有商品后，需重新填写私密发货配置。</p></div>` : ""}
       ${createdLink ? `<div class="parameter" id="quick-created"><h3>商品已创建 · ${escape(createdLink.productName)}</h3><p class="caption">这个链接只允许编辑当前商品与发货配置。请复制保存；离开后完整链接不再显示。</p>${field("quick-management-link", "AI 商品配置链接", createdLink.url, "text", "readonly")}<div class="toolbar"><button id="copy-quick-link" class="secondary">${ctx.lang === "en" ? "Copy link" : "复制链接"}</button><button id="edit-quick-product" class="secondary">继续配置商品</button></div></div>` : ""}
-      ${products.length ? `<div class="product-list">${products.map((product) => `<article class="product-row">${product.logo ? `<img src="${escape(product.logo)}" alt="" loading="lazy" referrerpolicy="no-referrer">` : `<div class="product-icon">${icon}</div>`}<div class="product-info"><h3>${escape(product.name)}</h3><p>${product.public ? "公开展示" : "仅持卡可见"} · ${escape({ manual: "队列", stock: "一卡一文本", webhook: "外部 Webhook", script: "商品处理器" }[product.mode] || product.mode)} · ${product.delivery === "service" ? "服务状态" : "内容交付"}</p><div class="variant-summary">${productVariants(product).map((variant) => `<span>${escape(variant.name)} · ${escape(priceLabel(variant))}${variant.enabled === false ? " · 已停用" : ""}</span>`).join("")}</div><div class="mono muted">${escape(product.id)}</div></div><div class="product-actions"><button class="secondary" data-edit="${escape(product.id)}">配置</button><button type="button" class="secondary" data-export="${escape(product.id)}">${ctx.lang === "en" ? "Copy product info" : "复制商品资料"}</button></div></article>`).join("")}</div>` : '<div class="empty">还没有商品。先创建商品，再生成卡密。</div>'}
+      ${products.length ? `<div class="product-list">${products.map((product) => `<article class="product-row">${product.logo ? `<img src="${escape(product.logo)}" alt="" loading="lazy" referrerpolicy="no-referrer">` : `<div class="product-icon">${icon}</div>`}<div class="product-info"><h3>${escape(product.name)}</h3><p>${isDeleted(product) ? tr("已删除 · 旧卡密与任务仍有效", "Deleted · existing codes and tasks remain valid") : `${product.public ? "公开展示" : "仅持卡可见"} · ${escape({ manual: "队列", stock: "一卡一文本", webhook: "外部 Webhook", script: "商品处理器" }[product.mode] || product.mode)} · ${product.delivery === "service" ? "服务状态" : "内容交付"}`}</p><div class="variant-summary">${productVariants(product).map((variant) => `<span>${escape(variant.name)} · ${escape(priceLabel(variant))}${variant.enabled === false ? " · 已停用" : ""}</span>`).join("")}</div><div class="mono muted">${escape(product.id)}</div></div><div class="product-actions">${isDeleted(product) ? (canDelete ? `<button type="button" class="secondary" data-restore="${escape(product.id)}">${tr("恢复商品", "Restore product")}</button>` : "") : `${canEdit ? `<button class="secondary" data-edit="${escape(product.id)}">${tr("配置", "Configure")}</button><button type="button" class="secondary" data-export="${escape(product.id)}">${tr("复制商品资料", "Copy product info")}</button>` : ""}${canDelete ? `<button type="button" class="danger" data-delete="${escape(product.id)}">${tr("删除商品", "Delete product")}</button>` : ""}`}</div></article>`).join("")}</div>` : `<div class="empty">${productView === "deleted" ? tr("回收站暂无商品。", "The recycle bin is empty.") : tr("暂无商品。", "No products here.")}</div>`}
       <div id="product-export-panel"></div>
       <div id="error" class="error" role="alert"></div>`;
+    let confirmation = 0;
+    const reload = async (selectedView = productView) => {
+      if (!active()) return;
+      if (ctx.onViewChange) return ctx.onViewChange(selectedView, ctx.products);
+      const values = await ctx.api((owner ? "/admin" : "/manage") + "/products?" + new URLSearchParams({ view: selectedView }), undefined, "GET");
+      if (!active()) return;
+      ctx.productView = selectedView;
+      ctx.products = values;
+      ctx.onSaved(values);
+      return render(ctx);
+    };
+    on("#products-view", "change", () => reload($("#products-view").value));
+    const lifecycle = async (product, deleted) => {
+      if (!active() || !canDelete || isDeleted(product) === deleted) return;
+      const generation = ++confirmation;
+      const panel = $("#product-lifecycle-confirmation");
+      panel.innerHTML = `<section class="product-lifecycle-confirmation"><h3>${escape(tr("删除商品：", "Delete product: ") + product.name)}</h3><p>${tr("商品会移入回收站，不再公开展示或发行新卡密。已有卡密、领取链接与未完成任务仍然有效；恢复后可以继续使用。", "The product moves to the recycle bin and stops public listing and new code issuance. Existing codes, receipt links and unfinished tasks remain valid. Restore it to continue configuring and issuing codes.")}</p><div class="actions"><button type="button" class="danger" id="confirm-product-delete">${tr("确认移入回收站", "Confirm move to recycle bin")}</button><button type="button" class="secondary" id="cancel-product-delete">${tr("取消", "Cancel")}</button></div></section>`;
+      on("#cancel-product-delete", "click", () => { confirmation++; panel.innerHTML = ""; });
+      on("#confirm-product-delete", "click", async () => {
+        if (!active() || generation !== confirmation || !canDelete) return;
+        const cancel = $("#cancel-product-delete");
+        if (cancel) cancel.disabled = true;
+        const endpoint = owner ? "/admin/products/" + encodeURIComponent(product.id) : "/manage/product?" + new URLSearchParams({ product_id: product.id });
+        let result;
+        try { result = await ctx.api(endpoint, { confirmed: true }, "DELETE"); }
+        finally { if (active() && generation === confirmation && cancel?.isConnected) cancel.disabled = false; }
+        if (!active() || generation !== confirmation) return;
+        if (result?.ok !== true || result.product_id !== product.id || result.deleted !== true) throw new Error(tr("未能确认删除结果，请刷新商品列表。", "Could not confirm deletion. Refresh the product list."));
+        ctx.products = ctx.products.map((value) => value.id === product.id ? { ...value, deleted: true, deleted_at: result.deleted_at } : value);
+        ctx.onSaved(ctx.products);
+        ctx.notify(tr("商品已移入回收站，旧卡密与任务仍有效。", "Product moved to the recycle bin. Existing codes and tasks remain valid."));
+        await reload();
+      });
+    };
+    all("[data-delete]").forEach((node) => node.addEventListener("click", () => perform(() => lifecycle(products.find((product) => product.id === node.dataset.delete), true), node)));
+    all("[data-restore]").forEach((node) => node.addEventListener("click", () => perform(async () => {
+      const product = products.find((product) => product.id === node.dataset.restore);
+      if (!active() || !canDelete || !isDeleted(product)) return;
+      const endpoint = owner ? "/admin/products/" + encodeURIComponent(product.id) + "/restore" : "/manage/product/restore?" + new URLSearchParams({ product_id: product.id });
+      const result = await ctx.api(endpoint, {}, "POST");
+      if (!active()) return;
+      if (result?.ok !== true || result.product_id !== product.id || result.deleted !== false) throw new Error(tr("未能确认恢复结果，请刷新商品列表。", "Could not confirm restoration. Refresh the product list."));
+      ctx.products = ctx.products.map((value) => value.id === product.id ? { ...value, deleted: false, deleted_at: null } : value);
+      ctx.onSaved(ctx.products);
+      ctx.notify(tr("商品已恢复。", "Product restored."));
+      await reload();
+    }, node)));
     on("#new-product", "click", () => edit(ctx));
     all("[data-edit]").forEach((node) =>
       node.addEventListener("click", () => {
-        if (active())
-          edit(
-            ctx,
-            products.find((product) => product.id === node.dataset.edit),
-          );
+        perform(async () => {
+          if (!active() || !canEdit) return;
+          const source = ctx.role === "staff" ? await ctx.api("/manage/product", undefined, "GET") : products.find((product) => product.id === node.dataset.edit);
+          if (!active()) return;
+          if (!source || source.id !== node.dataset.edit || isDeleted(source)) throw new Error(tr("商品已删除或权限已改变，请刷新商品列表。", "The product was deleted or its permissions changed. Refresh the list."));
+          await edit(ctx, source);
+        }, node);
       }),
     );
     all("[data-export]").forEach((node) =>
@@ -224,7 +281,7 @@
       );
     }
     ctx.refreshTools();
-    if (!owner) return;
+    if (!canCreate) return;
     let templates;
     try {
       const response = await ctx.api("/admin/product-templates");
@@ -235,8 +292,8 @@
     }
     if (!active()) return;
     $("#quick-template").innerHTML =
-      `<option value="random">随机选择模板</option>${templates.map((template) => `<option value="${escape(template.id)}">${escape(localized(template.name, ctx.lang))}</option>`).join("")}${products.map((product) => `<option value="existing_product:${escape(product.id)}">复制：${escape(product.name)}</option>`).join("")}`;
-    $("#quick-product").disabled = !templates.length && !products.length;
+      `<option value="random">随机选择模板</option>${templates.map((template) => `<option value="${escape(template.id)}">${escape(localized(template.name, ctx.lang))}</option>`).join("")}${activeProducts.map((product) => `<option value="existing_product:${escape(product.id)}">复制：${escape(product.name)}</option>`).join("")}`;
+    $("#quick-product").disabled = !templates.length && !activeProducts.length;
     on("#quick-product", "click", async () => {
       const chosen = $("#quick-template").value;
       let body;
@@ -273,6 +330,10 @@
 
   async function edit(ctx, source) {
     if (!ctx.isCurrent()) return;
+    if (isDeleted(source) || (ctx.role !== "admin" && ctx.canEdit === false)) {
+      ctx.notify(ctx.lang === "en" ? "Restore the product or obtain editing permission before configuring it." : "请先恢复商品或取得编辑权限，再配置商品。");
+      return render(ctx);
+    }
     const view = begin(ctx, "editor");
     const { active, $, all, perform, on, report } = view;
     const exportProduct = exportHandler(ctx, view);

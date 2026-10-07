@@ -163,6 +163,8 @@ function page(options = {}) {
     products: options.products || [],
     role: options.role || "admin",
     canConfigure: options.canConfigure ?? true,
+    canEdit: options.canEdit ?? true,
+    canDelete: options.canDelete ?? false,
     canManageCards: options.canManageCards ?? false,
     lang: "zh-CN",
     isCurrent: () => active,
@@ -233,6 +235,124 @@ async function editProduct(p, value = product(), processors = catalog) {
   p.requests[0].resolve(processors);
   await editing;
 }
+
+test("deleting a product requires the inline confirmation and cancel sends no mutation", async () => {
+  const p = page({ role: "staff", canDelete: true, products: [product()] });
+  await p.ui.render(p.ctx);
+  await p.node('[data-delete="product-one"]').emit("click");
+  assert.match(p.node("#product-lifecycle-confirmation").innerHTML, /已有卡密、领取链接与未完成任务仍然有效/);
+  assert.equal(p.requests.length, 0);
+  const previousConfirm = p.node("#confirm-product-delete");
+  await p.node("#cancel-product-delete").emit("click");
+  assert.equal(p.node("#product-lifecycle-confirmation").innerHTML, "");
+  await previousConfirm.emit("click");
+  assert.equal(p.requests.length, 0);
+});
+
+test("only the explicit delete capability allows a staff manager to delete or restore", async () => {
+  const editor = page({ role: "staff", canEdit: true, canDelete: false, products: [product()] });
+  await editor.ui.render(editor.ctx);
+  assert.equal(editor.node('[data-delete="product-one"]'), null);
+  const manager = page({ role: "staff", canEdit: false, canDelete: true, products: [product()] });
+  await manager.ui.render(manager.ctx);
+  assert.ok(manager.node('[data-delete="product-one"]'));
+  assert.equal(manager.node('[data-edit="product-one"]'), null);
+  assert.equal(manager.node('[data-export="product-one"]'), null);
+  await manager.ui.edit(manager.ctx, product());
+  assert.equal(manager.requests.length, 0);
+  assert.match(manager.notifications[0], /编辑权限/);
+});
+
+test("successful deletion reloads the active list and never removes existing cards or tasks", async () => {
+  const p = page({ role: "staff", canDelete: true, products: [product()] });
+  await p.ui.render(p.ctx);
+  await p.node('[data-delete="product-one"]').emit("click");
+  await p.node("#confirm-product-delete").emit("click");
+  assert.equal(p.requests[0].url, "/manage/product?product_id=product-one");
+  assert.equal(p.requests[0].method, "DELETE");
+  assert.deepEqual(JSON.parse(JSON.stringify(p.requests[0].body)), { confirmed: true });
+  p.requests[0].resolve({ ok: true, product_id: "product-one", deleted: true, deleted_at: 123 });
+  await flush();
+  assert.equal(p.requests[1].url, "/manage/products?view=active");
+  p.requests[1].resolve([]);
+  await flush();
+  assert.equal(p.node('[data-delete="product-one"]'), null);
+  assert.equal(p.saved[0][0].deleted, true);
+  assert.deepEqual(p.saved.at(-1), []);
+  assert.equal(p.requests.filter((request) => /cards|jobs/.test(request.url)).length, 0);
+});
+
+test("deletion errors retain the confirmation and re-enable the controls for another try", async () => {
+  const p = page({ role: "staff", canDelete: true, products: [product()] });
+  await p.ui.render(p.ctx);
+  await p.node('[data-delete="product-one"]').emit("click");
+  await p.node("#confirm-product-delete").emit("click");
+  assert.equal(p.node("#confirm-product-delete").disabled, true);
+  assert.equal(p.node("#cancel-product-delete").disabled, true);
+  p.requests[0].reject(new Error("网络连接失败，请重试"));
+  await flush();
+  assert.equal(p.node("#confirm-product-delete").disabled, false);
+  assert.equal(p.node("#cancel-product-delete").disabled, false);
+  assert.equal(p.node("#error").textContent, "网络连接失败，请重试");
+  assert.ok(p.node('[data-delete="product-one"]'));
+});
+
+test("a late deletion response cannot render another page or update its product cache", async () => {
+  const p = page({ role: "staff", canDelete: true, products: [product()] });
+  await p.ui.render(p.ctx);
+  await p.node('[data-delete="product-one"]').emit("click");
+  await p.node("#confirm-product-delete").emit("click");
+  p.leave();
+  p.workspace.innerHTML = "another page";
+  p.requests[0].resolve({ ok: true, product_id: "product-one", deleted: true, deleted_at: 123 });
+  await flush();
+  assert.equal(p.workspace.innerHTML, "another page");
+  assert.equal(p.requests.length, 1);
+  assert.equal(p.saved.length, 0);
+});
+
+test("the recycle bin restores products but exposes no configuration, export or creation controls", async () => {
+  const p = page({ products: [product({ deleted: true, deleted_at: 123 })] });
+  p.ctx.productView = "deleted";
+  p.ctx.lang = "en";
+  await p.ui.render(p.ctx);
+  assert.equal(p.requests.length, 0);
+  assert.equal(p.node("#new-product"), null);
+  assert.equal(p.node("#quick-product"), null);
+  assert.equal(p.node('[data-edit="product-one"]'), null);
+  assert.equal(p.node('[data-export="product-one"]'), null);
+  assert.match(p.workspace.innerHTML, /existing codes and tasks remain valid/);
+  const restoring = p.node('[data-restore="product-one"]').emit("click");
+  assert.equal(p.requests[0].url, "/admin/products/product-one/restore");
+  assert.equal(p.requests[0].method, "POST");
+  p.requests[0].resolve({ ok: true, product_id: "product-one", deleted: false, deleted_at: null });
+  await flush();
+  p.requests[1].resolve([]);
+  await restoring;
+  assert.equal(p.node('[data-restore="product-one"]'), null);
+  assert.match(p.workspace.innerHTML, /recycle bin is empty/);
+});
+
+test("product view selection fetches only its chosen lifecycle list and ignores a late result", async () => {
+  const p = page({ role: "staff", canDelete: true, products: [product()] });
+  await p.ui.render(p.ctx);
+  p.node("#products-view").value = "deleted";
+  await p.node("#products-view").emit("change");
+  assert.equal(p.requests[0].url, "/manage/products?view=deleted");
+  p.leave();
+  p.requests[0].resolve([product({ deleted: true, deleted_at: 123 })]);
+  await flush();
+  assert.equal(p.saved.length, 0);
+});
+
+test("all-products view never offers deleted products as quick-copy templates", async () => {
+  const p = page({ products: [product(), product({ id: "deleted-product", name: "DELETED", deleted: true })] });
+  p.ctx.productView = "all";
+  await renderOwner(p);
+  assert.match(p.node("#quick-template").innerHTML, /existing_product:product-one/);
+  assert.doesNotMatch(p.node("#quick-template").innerHTML, /existing_product:deleted-product/);
+  assert.equal(p.node('[data-edit="deleted-product"]'), null);
+});
 
 test("only the owner can create or copy product drafts", async () => {
   const staff = page({ role: "staff", products: [product()] });

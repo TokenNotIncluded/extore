@@ -19,6 +19,7 @@
     "queue.process",
     "queue.retry",
     "product.edit",
+    "product.delete",
     "fulfillment.configure",
     "cards.manage",
     "events.manage",
@@ -231,12 +232,16 @@
       c.productId || "",
       [...(c.permissions || [])].sort(),
       c.tab || "",
+      c.productsView || "active",
+      c.productDeleted === true,
       c.queueProductId || "",
       c.queueProduct?.mode || "",
       c.queueProduct?.delivery || "",
       c.queueProduct?.outputs || [],
+      c.queueProduct?.deleted === true,
       c.product?.id || "",
       c.product?.parameters || [],
+      c.product?.deleted === true,
       Boolean(c.batch),
       c.cardId || "",
       c.currentToken || "",
@@ -1245,6 +1250,8 @@
         page: context().page,
         role: context().role,
         tab: context().tab || null,
+        productsView: ["admin", "staff"].includes(context().page) ? context().productsView || "active" : null,
+        productDeleted: context().role === "staff" ? context().productDeleted === true : null,
         queueProductId: context().queueProductId || null,
         productId:
           context().role === "staff" ? context().productId || null : null,
@@ -1278,7 +1285,9 @@
           }[input.tab];
           const granted = context().permissions || [];
           const permitted =
-            input.tab === "jobs"
+            input.tab === "products"
+              ? ["product.edit", "product.delete"].some((p) => granted.includes(p))
+              : input.tab === "jobs"
               ? ["queue.view", "queue.process", "queue.retry"].some((p) =>
                   granted.includes(p),
                 )
@@ -1651,6 +1660,37 @@
           "This management link is limited to its own product.",
         );
     };
+    const managementProducts = async (signal, view) => admin
+      ? request(query("/admin/products", { view }, ["view"]), undefined, "GET", signal)
+      : can("product.edit")
+        ? [await request("/manage/product", undefined, "GET", signal)]
+        : request(query("/manage/products", { view: view || "all" }, ["view"]), undefined, "GET", signal);
+    const findManagementProduct = async (input, signal, view) => {
+      assertProduct(input);
+      const rows = await managementProducts(signal, view);
+      checkInvocation(signal);
+      if (!Array.isArray(rows)) throw new ToolError("unavailable", "Product metadata is unavailable. Refresh this management page.");
+      const found = rows.find((p) => p?.id === input.product_id);
+      if (!found) throw new ToolError("not_found", "Product not found in this management scope.");
+      return found;
+    };
+    const assertActiveProduct = (found) => {
+      if (found.deleted === true || found.deleted_at != null)
+        throw new ToolError("product_deleted", "Restore this deleted product before editing, issuing cards, creating links or exporting a new listing.");
+      return found;
+    };
+    const activeManagementProduct = async (input, signal) => {
+      assertProduct(input);
+      const rows = await request(query(admin ? "/admin/products" : "/manage/products", { view: "all" }, ["view"]), undefined, "GET", signal);
+      checkInvocation(signal);
+      if (!Array.isArray(rows)) throw new ToolError("unavailable", "Product metadata is unavailable. Refresh this management page.");
+      const found = rows.find((p) => p?.id === input.product_id && (!scoped || p.id === c.productId));
+      if (!found) throw new ToolError("not_found", "Product not found in this management scope.");
+      return assertActiveProduct(found);
+    };
+    const scopedProductDeleted = scoped && (c.productDeleted === true ||
+      (c.product?.id === c.productId && c.product.deleted === true) ||
+      (c.queueProduct?.id === c.productId && c.queueProduct.deleted === true));
     if (manager) {
       add(
         "session_logout",
@@ -1716,12 +1756,49 @@
         }, { ...readonly, ...authority() },
       );
     }
+    if ((can("product.edit") || can("product.delete")) && (c.tab || "products") === "products") {
+      const readAuthority = authority(can("product.edit") ? "product.edit" : "product.delete");
+      add(
+        "products_admin_list", "管理商品列表",
+        "List only products authorized for this session, including hidden products. view defaults to active; deleted shows recoverable deleted products and all includes both. Product links see only their own product. Deletion metadata is included; integration secrets are omitted.",
+        object({ view: choice(["active", "deleted", "all"]) }),
+        async (input, signal) => {
+          const rows = await request(query(admin ? "/admin/products" : "/manage/products", input, ["view"]), undefined, "GET", signal);
+          checkInvocation(signal);
+          if (!Array.isArray(rows)) throw new ToolError("unavailable", "Product metadata is unavailable. Refresh this management page.");
+          const view = input.view || "active";
+          return rows.filter((p) => p && (!scoped || p.id === c.productId) &&
+            (view === "all" || (view === "deleted"
+              ? p.deleted === true || p.deleted_at != null
+              : p.deleted !== true && p.deleted_at == null)));
+        }, { ...readonly, ...readAuthority },
+      );
+      add(
+        "product_admin_get", "管理商品配置",
+        "Read one authorized product, including its recoverable deletion state. Secrets are omitted. A deleted product must be restored before editing or creating new inventory or access links.",
+        object({ product_id: id }, ["product_id"]),
+        (input, signal) => findManagementProduct(input, signal, "all"),
+        { ...readonly, ...readAuthority },
+      );
+      if (can("product.delete")) for (const restore of [false, true]) add(
+        restore ? "product_restore" : "product_delete",
+        restore ? "恢复商品" : "删除商品",
+        restore
+          ? "Restore one deleted product within the current management scope. Existing cards, links and queued tasks are preserved. Requires the independent product.delete permission; product.edit does not grant it. Explicit confirm:true is required."
+          : "Soft-delete one product within the current management scope. New card issuance, management links, configuration edits and listing exports are disabled until restoration. Existing card codes can still be redeemed and existing tasks remain accessible. This is recoverable, not permanent erasure. Requires the independent product.delete permission; product.edit does not grant it. Explicit confirm:true is required.",
+        object({ product_id: id, confirm: confirmed }, ["product_id", "confirm"]),
+        async (input, signal) => {
+          await findManagementProduct(input, signal, "all");
+          const path = admin ? "/admin/products/" + input.product_id : "/manage/product";
+          const data = await request(query(path + (restore ? "/restore" : ""), admin ? {} : { product_id: input.product_id }, ["product_id"]),
+            restore ? {} : { confirmed: true }, restore ? "POST" : "DELETE", signal);
+          await updateUI();
+          return project(data, ["ok", "product_id", "deleted", "deleted_at"]);
+        }, { ...write, ...authority("product.delete"), destructive: !restore },
+      );
+    }
     if (can("product.edit") && (c.tab || "products") === "products") {
       const productAuthority = authority("product.edit");
-      const managementProducts = async (signal) =>
-        admin
-          ? request("/admin/products", undefined, "GET", signal)
-          : [await request("/manage/product", undefined, "GET", signal)];
       add(
         "processors_list",
         "商品处理器目录",
@@ -1742,30 +1819,7 @@
           disclose: ["configuration.secret"],
         },
       );
-      add(
-        "products_admin_list",
-        "管理商品列表",
-        "List products authorized for this management session, including hidden products; product links only see their own product. Webhook secrets are omitted.",
-        object(),
-        (_, signal) => managementProducts(signal),
-        { ...readonly, ...productAuthority },
-      );
-      add(
-        "product_admin_get",
-        "管理商品配置",
-        "Read one merchant product with webhook secrets omitted. The secret can be replaced explicitly through product_update.",
-        object({ product_id: id }, ["product_id"]),
-        async (input, signal) => {
-          assertProduct(input);
-          const found = (await managementProducts(signal)).find(
-            (p) => p.id === input.product_id,
-          );
-          if (!found) throw new ToolError("not_found", "Product not found.");
-          return found;
-        },
-        { ...readonly, ...productAuthority },
-      );
-      add(
+      if (!scopedProductDeleted) add(
         "product_export_prompt",
         "导出商品 AI 提示词",
         "Export safe product listing information as a plain prompt for creating a listing on an external sales platform. Includes variant metadata and exact reference prices for store configuration; Extore handles redemption and does not collect payments. Never includes fulfillment secrets, raw card codes, or private links. Optional inventory is unredeemed card counts, not unsold stock, and is queried only with current cards.manage authority. This read-only tool does not write to the clipboard or create an external listing.",
@@ -1789,6 +1843,7 @@
             (p) => p.id === input.product_id,
           );
           if (!found) throw new ToolError("not_found", "Product not found.");
+          assertActiveProduct(found);
           checkInvocation(signal);
           const options = { lang: input.lang || "zh-CN" };
           if (
@@ -1872,6 +1927,8 @@
                 "invalid_arguments",
                 "The product name must not be empty.",
               );
+            if (input.template_id === "existing_product")
+              await activeManagementProduct({ product_id: input.from_product_id }, signal);
             const { confirm: ignored, ...body } = input;
             const data = await request(
               "/admin/products/quick",
@@ -1907,7 +1964,7 @@
           { ...write, ...privileged },
         );
       }
-      add(
+      if (!scopedProductDeleted) add(
         "product_update",
         "修改商品",
         "Patch an authorized product. Delivery configuration, retry policy, processor configuration, and output key/type/required changes require fulfillment.configure; queue field labels and tutorials need product.edit. Official processor schemas are defined by code. Unspecified fields and masked secrets are preserved internally; secrets are never returned. Explicit confirm:true is required.",
@@ -1930,7 +1987,8 @@
             (p) => p.id === input.product_id,
           );
           if (!old) throw new ToolError("not_found", "Product not found.");
-          const { id: ignored, ...config } = old;
+          assertActiveProduct(old);
+          const { id: ignored, deleted: ignoredDeleted, deleted_at: ignoredDeletedAt, ...config } = old;
           const product = { ...config, ...input.changes };
           if (
             own(input.changes, "outputs") &&
@@ -2082,7 +2140,7 @@
         },
         { ...readonly, ...cardsAuthority },
       );
-      add(
+      if (!scopedProductDeleted) add(
         "cards_issue",
         "发行卡密",
         "Issue new card codes for a product. Deliberately returns sensitive plaintext codes only once; save them securely. Explicit confirm:true is required.",
@@ -2105,6 +2163,7 @@
               "Card expiry must be a future Unix timestamp.",
             );
           const { confirm: ignored, ...body } = input;
+          await activeManagementProduct(input, signal);
           const data = await request(cardsPath, body, "POST", signal);
           await updateUI();
           return data;
@@ -2155,7 +2214,7 @@
         },
         { ...(applying ? write : readonly), ...linksAuthority },
       );
-      add(
+      if (!scopedProductDeleted) add(
         "staff_authorize",
         "创建商品管理链接",
         "Create a product-management access link with explicit permissions. Browser max_uses and CLI binding max_cli_uses are independent integer limits of 1–1000, each defaulting to 1. A delegated child must have strictly fewer permissions, cannot outlive its parent, and cannot exceed either parent login ceiling. Deliberately returns a private link; explicit confirm:true is required.",
@@ -2203,6 +2262,7 @@
                 "A child link cannot outlive its parent authorization.",
               );
           }
+          await activeManagementProduct(input, signal);
           const data = await request(
             linksPath,
             {
@@ -2675,6 +2735,7 @@
         annotations: {
           readOnlyHint: !!definition.readOnly,
           consequentialHint: !!definition.consequential,
+          ...(own(definition, "destructive") ? { destructiveHint: definition.destructive } : {}),
           untrustedContentHint: true,
         },
         async execute(input, options = {}) {

@@ -162,6 +162,9 @@ function fixture(handler, { language = "zh-CN" } = {}) {
     setClipboardHelper(helper) {
       context.window.ExtoreClipboard = helper;
     },
+    setTextCards(helper) {
+      context.window.ExtoreTextCards = helper;
+    },
   };
 }
 
@@ -194,6 +197,120 @@ test("有卡密权限的商品管理链接使用 manage scope 并固定商品", 
     page.requests.every((request) => request.url.includes("product-b")),
   );
   assert.equal(page.nodes.get("#cards-product").disabled, true);
+});
+
+test("历史商品保留在选择器中，默认优先选择未删除商品", async () => {
+  const page = fixture();
+  const instance = await page.module.render({
+    ...page.options,
+    productId: undefined,
+    products: [
+      { id: "deleted-product", name: "<历史商品>", deleted: true, deleted_at: 1700000000 },
+      page.options.products[1],
+    ],
+  });
+  assert.equal(instance.productId, "product-b");
+  assert.ok(page.requests.every((request) => request.url.includes("product-b")));
+  assert.match(page.workspace.innerHTML, /&lt;历史商品&gt; · 已删除/);
+  assert.equal(page.nodes.get("#cards-issue-submit").disabled, false);
+  assert.equal(page.nodes.get("#cards-product-notice").textContent, "");
+});
+
+test("显式选择已删除商品仍可查卡密和历史，禁止发行并阻止手动提交", async () => {
+  const page = fixture(({ url }) => Promise.resolve(
+    url.includes("card-stats") ? { summary: { total: 1 } }
+      : url.includes("card-inventory") ? { items: [{ id: "old-card", status: "unused" }], total: 1 }
+        : { card: { id: "old-card", product_name: "历史商品", status: "unused" }, timeline: [] },
+  ));
+  const instance = await page.module.render({
+    ...page.options,
+    products: [{ id: "product-a", name: "历史商品", deleted: true }],
+  });
+  assert.equal(instance.productId, "product-a");
+  for (const selector of ["#cards-issue-variant", "#cards-issue-submit", "#cards-count", "#cards-label", "#cards-expires"])
+    assert.equal(page.nodes.get(selector).disabled, true);
+  assert.equal(page.nodes.get("#cards-variant").disabled, false);
+  assert.match(page.nodes.get("#cards-product-notice").textContent, /已删除.*仍可查看/);
+  assert.match(page.nodes.get("#cards-stats").innerHTML, /<h2>1<\/h2>/);
+  page.nodes.get("#cards-issue").fire("submit");
+  await settle();
+  assert.equal(page.requests.filter((request) => request.method === "POST").length, 0);
+  assert.match(page.nodes.get("#cards-error").textContent, /已删除商品不能生成卡密/);
+  assert.equal(page.nodes.get("#cards-issue-submit").disabled, true);
+  page.nodes.get("#cards-inventory").querySelectorAll("[data-card-history]")[0].click();
+  await settle();
+  assert.match(page.nodes.get("#cards-history").innerHTML, /历史商品/);
+  assert.equal(page.requests.at(-1).url, "/admin/cards/old-card/history?product_id=product-a");
+});
+
+test("商品切换恢复发行状态，删除商品不因刷新规格重新启用", async () => {
+  const page = fixture(({ url }) => Promise.resolve(url.includes("card-stats")
+    ? { summary: {}, variants: [{ variant_id: "default", name: "默认规格", enabled: true }] }
+    : { items: [], total: 0 }));
+  await page.module.render({
+    ...page.options,
+    products: [page.options.products[0], { ...page.options.products[1], deleted: true }],
+  });
+  page.nodes.get("#cards-product").value = "product-b";
+  page.nodes.get("#cards-product").fire("change");
+  await settle();
+  assert.equal(page.nodes.get("#cards-issue-submit").disabled, true);
+  page.nodes.get("#cards-refresh").click();
+  await settle();
+  assert.equal(page.nodes.get("#cards-issue-submit").disabled, true);
+  page.nodes.get("#cards-product").value = "product-a";
+  page.nodes.get("#cards-product").fire("change");
+  await settle();
+  assert.equal(page.nodes.get("#cards-issue-submit").disabled, false);
+  assert.equal(page.nodes.get("#cards-count").disabled, false);
+  assert.equal(page.nodes.get("#cards-product-notice").textContent, "");
+});
+
+test("所有商品均删除时保留历史入口，deleted_at 也会禁止库存导入", async () => {
+  const page = fixture();
+  let mounts = 0;
+  page.setTextCards({ mount() { mounts++; return { dispose() {} }; } });
+  const instance = await page.module.render({
+    ...page.options,
+    productId: undefined,
+    products: [{ id: "deleted-stock", name: "历史库存", mode: "stock", deleted_at: 1700000000 }],
+  });
+  assert.equal(instance.productId, "deleted-stock");
+  assert.ok(page.requests.every((request) => request.url.includes("deleted-stock")));
+  assert.equal(page.nodes.get("#cards-issue-submit").disabled, true);
+  assert.equal(mounts, 0);
+  assert.match(page.nodes.get("#cards-product-notice").textContent, /不能再发行卡密或补充库存/);
+});
+
+test("切换到删除的库存商品先销毁旧导入表单，切回正常商品才重新加载", async () => {
+  const page = fixture();
+  const mounts = [];
+  let disposals = 0;
+  page.setTextCards({
+    mount({ root, product }) {
+      mounts.push(product.id);
+      root.innerHTML = '<input id="old-stock-input">';
+      return { dispose() { disposals++; } };
+    },
+  });
+  await page.module.render({
+    ...page.options,
+    products: [
+      { ...page.options.products[0], mode: "stock" },
+      { ...page.options.products[1], mode: "stock", deleted: true },
+    ],
+  });
+  assert.deepEqual(mounts, ["product-a"]);
+  page.nodes.get("#cards-product").value = "product-b";
+  page.nodes.get("#cards-product").fire("change");
+  await settle();
+  assert.equal(disposals, 1);
+  assert.deepEqual(mounts, ["product-a"]);
+  assert.equal(page.nodes.get("#cards-text-import").innerHTML, "");
+  page.nodes.get("#cards-product").value = "product-a";
+  page.nodes.get("#cards-product").fire("change");
+  await settle();
+  assert.deepEqual(mounts, ["product-a", "product-a"]);
 });
 
 test("切商品后迟到的旧数据与错误都不能覆盖当前商品", async () => {

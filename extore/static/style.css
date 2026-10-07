@@ -1133,6 +1133,20 @@ th {
 }
 .product-row .product-actions button {
   margin-left: 0;
+  min-height: 44px;
+}
+.product-lifecycle-confirmation {
+  padding: 20px 0;
+  border-bottom: 1px dashed var(--line);
+  margin-bottom: 20px;
+}
+.product-lifecycle-confirmation p {
+  max-width: 66ch;
+  margin-top: 12px;
+}
+.product-lifecycle-confirmation button,
+.product-lifecycle-toolbar select {
+  min-height: 44px;
 }
 .variant-summary {
   display: flex;
