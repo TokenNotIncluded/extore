@@ -20,24 +20,26 @@
 需要 Linux、Python 3.12+ 和 [uv](https://docs.astral.sh/uv/)：
 
 ```sh
-uv tool install --upgrade 'extore>=0.8.0'
+uv tool install --upgrade 'extore>=0.9.0'
 extore manage --help
-extore manage login --device-code --origin https://extore.lmm.best --product PRODUCT_ID --client-name '我的 AI Bot'
+extore manage login --device-code --origin https://extore.lmm.best --product PRODUCT_ID --client-name '我的 AI Bot' --agent-type dots
 ```
 
-CLI 显示公开授权地址、短设备码和设备指纹，最多等待 10 分钟。本人在浏览器登录店主账号、输入设备码，核对名称、指纹、商品和权限后批准。不需要预先创建管理链接，也不用将访问密钥交给 AI；审批后用本机保存的设备密钥续签。
+CLI 显示公开授权地址、短设备码和设备指纹，最多等待 10 分钟。本人在浏览器登录店主账号、输入设备码，核对名称、类型、指纹、商品和权限后批准。不需要预先创建管理链接，也不用将访问密钥交给 AI；审批后用本机保存的设备密钥续签。
+
+0.9.0 起，商品管理 CLI 登录需声明 `--client-name` 和 `--agent-type`。类型可用 `dots`、`grok_bot`、`other`，也可自定义；它只用于审批、审计和工人形象展示，不证明程序来自哪个厂商。旧设备授权继续有效，未申报类型的历史设备显示为未知，不自动补造身份。
 
 单商品默认申请 `queue.view,queue.process,queue.retry`，可用 `--permissions` 显式请求该商品所需的其他权限，店主看到完整范围后批准。需要某店的全部队列商品可执行：
 
 ```sh
-extore manage login --device-code --origin https://extore.lmm.best --shop SHOP_ID --pipelines-all --client-name '店铺 Bot' --no-wait
+extore manage login --device-code --origin https://extore.lmm.best --shop SHOP_ID --pipelines-all --client-name '店铺 Bot' --agent-type dots --no-wait
 ```
 
 这是申请时该店当前队列商品的快照，仅允许队列权限；默认申请 `queue.view,queue.process,queue.retry`，0.9.0 起也可用 `--permissions queue.monitor` 只申请进度看板。不会获得店主账号管理、SMTP、其他店铺或未来新商品的权限。店主可在首次批准时缩小商品清单与权限，成功结果中的 `authorization` 和 `grants` 是实际有效范围。
 
 提示写到 stderr；成功结果写到 stdout 的一行 JSON，包含商品授权摘要，不包含私钥、Bearer、签名或服务器挑战。`--no-wait` 的 stdout 为 `{"ok":true,"pending":true,"authorization":{"approval_url":"…","user_code":"…","fingerprint":"…","expires":…}}`，可以将其中公开字段转告本人，无需让本人访问 AI 的云端终端。
 
-如果 AI 的工具不能一直等待，先加 `--no-wait` 取得公开地址和设备码，交给本人批准后，再运行相同命令并去掉 `--no-wait`，保持相同 profile、目标、权限、原因和 client-name。未过期的申请会继续使用，网络中断或 Ctrl+C 后也可重复该命令。超过 10 分钟重新申请。拒绝或过期不会创建可用的商品授权。
+如果 AI 的工具不能一直等待，先加 `--no-wait` 取得公开地址和设备码，交给本人批准后，再运行相同命令并去掉 `--no-wait`，保持相同 profile、目标、权限、原因、client-name 和 agent-type。未过期的申请会继续使用，网络中断或 Ctrl+C 后也可重复该命令。超过 10 分钟重新申请。拒绝或过期不会创建可用的商品授权。
 
 成功后保存 `authorization.id` 和各商品 `grants[].id`。后者可作为业务命令的 `--grant`，分别指向商品设备，权限不会相互叠加。
 
@@ -62,7 +64,7 @@ extore manage authorize --authorization SHOP_AUTHORIZATION_ID --pipelines-all --
 已有管理链接的浏览器会话可以使用兼容设备码入口，不申请新的店主授权：
 
 ```sh
-extore manage login --device-code --existing-link --origin https://extore.lmm.best --product PRODUCT_ID --no-wait
+extore manage login --device-code --existing-link --origin https://extore.lmm.best --product PRODUCT_ID --client-name '我的 Bot' --agent-type other --no-wait
 ```
 
 省略商品和店铺目标的设备码命令也保留原兼容方式。管理链接留在本人浏览器，CLI 不接收它；浏览器与 CLI 的授权次数分别计算，批准不会再次消费浏览器次数。这个方式使用原链接既有权限，不接受新的 `--permissions`。
@@ -73,11 +75,25 @@ extore manage login --device-code --existing-link --origin https://extore.lmm.be
 extore manage login --link-stdin < /path/to/private-link.txt
 ```
 
-支持完整的 `/staff#…` 商品管理链接或 `/cli#…` 专用票据链接；不接受裸 token，也不通过命令行参数传递链接。生产服务器必须使用 HTTPS，本机回环地址可用 HTTP。`--client-name` 可设置后台审计中显示的设备名称。
+支持完整的 `/staff#…` 商品管理链接或 `/cli#…` 专用票据链接；不接受裸 token，也不通过命令行参数传递链接。生产服务器必须使用 HTTPS，本机回环地址可用 HTTP。`--client-name` 设置后台审计中显示的设备名称，`--agent-type` 声明客户端类型。
 
 登录时客户端在本机生成并私密保存 Ed25519 设备密钥，用签名证明持有私钥；服务器绑定设备和浏览器明确批准的商品授权。兼容入口中，默认每条管理链接允许 1 次浏览器登录及 1 个 CLI 设备绑定，两种额度独立；同一设备重复批准相同授权或后续续签不再次消耗 CLI 额度。不同商品的授权可保存到同一配置，操作时仍逐个检查权限。
 
 CLI Bearer 会话有效 8 小时，到期前或失效后客户端通过设备签名自动续签。主动授权还检查店铺、商品和授权版本，兼容入口还检查管理链接及全部祖先；设备或授权撤销、授权过期后不能继续使用。
+
+## 网络代理
+
+0.9.0 起，`manage`、`admin`、`customer` 都支持显式代理，设备码首次申请、授权领取、续签、任务和附件操作使用相同的连接方式：
+
+```sh
+extore manage --proxy http://127.0.0.1:7890 login --device-code --origin https://extore.lmm.best --product PRODUCT_ID --client-name '云端 Bot' --agent-type dots --no-wait
+extore manage --proxy-env next --all --watch
+extore customer --proxy socks5h://127.0.0.1:1080 exchange
+```
+
+`--proxy URL` 明确使用指定代理；`--proxy-env` 明确启用环境中的 `HTTP_PROXY`、`HTTPS_PROXY`、`ALL_PROXY` 和 `NO_PROXY`。两者不能同时使用。也可设置专用的 `EXTORE_PROXY`，不必把代理地址写入每条命令。不启用上述配置时仍使用直接连接。
+
+支持 HTTP、HTTPS 和 SOCKS 代理。代理设置不改变目标站点、签名范围或 TLS 证书校验，也不会把浏览器 Cookie 交给 CLI。客户端不将代理地址保存到授权配置或复制给 AI 的提示词，错误消息不回显代理凭据。包含密码的地址宜通过私密环境配置传入。
 
 ## 复制机器人接入提示词
 

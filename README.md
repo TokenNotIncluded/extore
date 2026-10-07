@@ -169,7 +169,7 @@ SMTP 凭据、TOTP 密钥与店铺处理器配置加密保存。店主可以回�
 | [Python SDK](https://github.com/TokenNotIncluded/extore/blob/main/docs/python-sdk.md) | 预设处理器协议、任务结果、外部验签与回调示例 |
 | [私有 Worker v2](https://github.com/TokenNotIncluded/extore/blob/main/docs/private-worker.md) · [SDK v2](https://github.com/TokenNotIncluded/extore/blob/main/docs/python-sdk-v2.md) | 按店铺、任务、尝试和节点签名派发，结果与附件幂等回调 |
 | [0.8.0 更新说明](https://github.com/TokenNotIncluded/extore/blob/main/docs/releases/0.8.0.md) | 本轮能力、兼容性与仍需单独验收的边界 |
-| [0.9.0 更新说明](https://github.com/TokenNotIncluded/extore/blob/main/docs/releases/0.9.0.md) | 只读进度看板、商品流水线与处理者负载；支持独立权限、CLI 和 WebMCP |
+| [0.9.0 更新说明](https://github.com/TokenNotIncluded/extore/blob/main/docs/releases/0.9.0.md) | 只读进度看板、工人身份与卡通形象、CLI 网络代理和更清晰的队列页面 |
 | [0.8.2 更新说明](https://github.com/TokenNotIncluded/extore/blob/main/docs/releases/0.8.2.md) | 清空回收站与彻底删除商品；保留已有卡密、任务和交付 |
 | [0.8.1 更新说明](https://github.com/TokenNotIncluded/extore/blob/main/docs/releases/0.8.1.md) | 商品删除、回收站恢复与独立删除权限；保留旧卡密和任务 |
 | [验收记录](https://github.com/TokenNotIncluded/extore/blob/main/docs/acceptance.md) | 已记录的验证结果、对接边界与限制 |
