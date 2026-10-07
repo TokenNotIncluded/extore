@@ -460,11 +460,11 @@ test("fit and full-size controls affect only the bounded diagram and preserve un
   page.node("tf-label").value = "Keep this draft";
   page.node("tf-fit").emit("click");
   assert.equal(page.node("tf-fit").getAttribute("aria-pressed"), "true");
-  assert.match(page.app.innerHTML, /transform:scale\(0\./);
+  assert.match(page.node("tf-canvas-inner").style.transform, /^scale\(0\./);
   assert.equal(editor.getValue().nodes[0].label["zh-CN"], "Keep this draft");
   page.node("tf-actual-size").emit("click");
   assert.equal(page.node("tf-actual-size").getAttribute("aria-pressed"), "true");
-  assert.match(page.app.innerHTML, /transform:scale\(1\)/);
+  assert.equal(page.node("tf-canvas-inner").style.transform, "scale(1)");
   assert.equal(editor.getValue().nodes[0].label["zh-CN"], "Keep this draft");
 });
 
@@ -482,4 +482,33 @@ test("raw v1 process deadlines use the server default when omitted", () => {
     definition.nodes[1].timeout_seconds = invalid;
     assert.throws(() => module.validate(definition));
   }
+});
+
+test("graph layout uses trusted CSSOM properties without CSP-blocked inline HTML style attributes", () => {
+  const page = fixture(), module = page.context.window.ExtoreTaskFlowEditor;
+  const definition = module.presets.aladdin(), model = module.graphModel(definition);
+  module.mount(page.app, { value: definition });
+  assert.doesNotMatch(page.app.innerHTML, /\sstyle\s*=/i);
+  assert.equal(page.node("tf-canvas-stage").style.width, model.width + "px");
+  assert.equal(page.node("tf-canvas-stage").style.height, model.height + "px");
+  assert.equal(page.node("tf-canvas-inner").style.width, model.width + "px");
+  assert.equal(page.node("tf-canvas-inner").style.height, model.height + "px");
+  assert.equal(page.node("tf-canvas-inner").style.transform, "scale(1)");
+  assert.equal(page.node("tf-canvas-inner").style.transformOrigin, "top left");
+  for (const node of model.nodes) {
+    const control = page.node("tf-node-" + node.id);
+    assert.equal(control.style.left, node.x + "px");
+    assert.equal(control.style.top, node.y + "px");
+    assert.equal(control.style.width, node.width + "px");
+    assert.equal(control.style.height, node.height + "px");
+  }
+  page.node("tf-fit").emit("click");
+  assert.doesNotMatch(page.app.innerHTML, /\sstyle\s*=/i);
+  const scale = Number(page.node("tf-canvas-inner").style.transform.slice(6, -1));
+  assert.ok(scale > 0 && scale < 1);
+  assert.equal(page.node("tf-canvas-stage").style.width, Math.ceil(model.width * scale) + "px");
+  assert.equal(page.node("tf-canvas-stage").style.height, Math.ceil(model.height * scale) + "px");
+  page.node("tf-actual-size").emit("click");
+  assert.equal(page.node("tf-canvas-inner").style.transform, "scale(1)");
+  assert.equal(page.node("tf-canvas-stage").style.width, model.width + "px");
 });
