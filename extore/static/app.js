@@ -596,7 +596,7 @@ window.addEventListener("popstate", start);
 window.addEventListener("hashchange", () => {
   if (location.pathname === "/cli/owner") start();
 });
-window.addEventListener("pagehide", () => { window.ExtoreTaskFlow?.dispose(app); ownerCliApproval?.dispose(); deviceCliApproval?.dispose(); pipelineAuthView?.dispose(); progressBoardController?.dispose(); });
+window.addEventListener("pagehide", () => { window.ExtoreProducts?.dispose?.($("#workspace")); window.ExtoreTaskFlow?.dispose(app); ownerCliApproval?.dispose(); deviceCliApproval?.dispose(); pipelineAuthView?.dispose(); progressBoardController?.dispose(); });
 
 async function home() {
   window.ExtoreTaskFlow?.dispose(app);
@@ -1524,6 +1524,7 @@ function shell() {
   );
 }
 async function renderTab() {
+  window.ExtoreProducts?.dispose?.($("#workspace"));
   progressBoardController?.dispose(); progressBoardController = null;
   proxyConfigView?.dispose();
   proxyConfigView = null;
@@ -2301,6 +2302,7 @@ async function staff() {
   await renderTab();
 }
 async function start() {
+  window.ExtoreProducts?.dispose?.($("#workspace"));
   progressBoardController?.dispose(); progressBoardController = null;
   proxyConfigView?.dispose();
   proxyConfigView = null;

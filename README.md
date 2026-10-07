@@ -73,6 +73,8 @@ Extore 接手支付之后的兑换与交付：验证卡密，将顾客带到对�
 
 [流程开发指南](docs/workflow-development.md)提供三轮问答、文件转换和选择拒绝的完整示例。开发者可以用 `extore workflow validate --definition flow.json --product product.json` 离线检查引用和类型，再用 `FlowDefinition` 构图、`FlowExecution` 更新当前处理步骤；定义版本与 Worker 的签名协议版本独立。
 
+没有合适的商品处理器时，可在配置页一键复制开发提示词，或运行 `extore processors contribute`。自有处理器须向 [extore-processors](https://github.com/TokenNotIncluded/extore-processors/compare) 提交 PR；经过源码审核、测试、合并并随 Extore 发布后，才进入商家可选目录。[贡献指南](docs/processor-contributing.md)提供开发模板、测试方法与提交说明。
+
 [一卡一文本](https://github.com/TokenNotIncluded/extore/blob/main/docs/text-stock.md)适合已有交付内容的库存；[签名兑换路由](https://github.com/TokenNotIncluded/extore/blob/main/docs/proxy-routing.md)适合多个 Extore 站点共用入口。普通旧卡密不会被拿去逐个试探其他站点，入口站后端不接收下游路由卡密。
 
 需要重试时，处理者须说明原因并选择「修改后重提」或「原资料重试」；外部故障也能作为原因。拒绝处理会禁用卡密。原任务、规格和步骤计划保留，重新开始后进度归零。

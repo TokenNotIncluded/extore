@@ -19,7 +19,7 @@
   function mount({ root, api, auth = {}, mode = "login", token = "", isCurrent = () => true, navigate = (url) => { window.location.href = url; }, passkey, language = "zh-CN", onAuth = () => {}, copyProcessorPrompt } = {}) {
     if (!root?.querySelector || typeof api !== "function") throw new TypeError("Account page needs a root and API");
     mounts.get(root)?.dispose();
-    let disposed = false, version = 0, busy = false, selectedProfileShop = "", enrollment = null;
+    let disposed = false, version = 0, busy = false, selectedProfileShop = "", enrollment = null, contributionView = null;
     const controller = new AbortController();
     const active = () => !disposed && root.isConnected !== false && isCurrent();
     const $ = (selector) => root.querySelector(selector);
@@ -29,6 +29,7 @@
     const error = (e) => text("#account-error", e?.name === "NotAllowedError" ? tr("验证已取消，可以重试。", "Verification cancelled. You can retry.") : e?.message || tr("操作未完成，请重试。", "The operation did not complete. Retry."));
     const page = (title, body) => {
       if (!active()) return;
+      clearContribution();
       clearTotpSetup();
       version++;
       root.innerHTML = `<div class="account-page ${["security", "shops", "mail", "profiles"].includes(mode) ? "" : "narrow"}"><div class="section-head"><h${mode === "security" || ["shops", "mail", "profiles"].includes(mode) ? "2" : "1"}>${esc(title)}</h${mode === "security" || ["shops", "mail", "profiles"].includes(mode) ? "2" : "1"}><a href="/admin">${tr("商家后台", "Dashboard")}</a></div>${body}<p id="account-error" class="error" role="alert"></p><div id="account-confirmation"></div></div>`;
@@ -65,7 +66,8 @@
       previous.container.innerHTML = "";
       previous.form.hidden = false;
     }
-    const leavePage = () => { version++; clearTotpSetup(); clearSecrets(); };
+    function clearContribution() { contributionView?.dispose(); contributionView = null; }
+    const leavePage = () => { version++; clearContribution(); clearTotpSetup(); clearSecrets(); };
     window.addEventListener?.("pagehide", leavePage);
     async function checkScope(allowFreshSession = false, verified = null) {
       const current = verified || await request("/auth/status");
@@ -413,8 +415,13 @@
         }
         return workflow;
       };
-      page("商品处理器配置", `<p class="caption">按店铺隔离的工作流配置：处理器参数、普通变量、密钥与运行限制。保存会创建新版本；商品需重新绑定才影响之后发行的卡密，已发行卡密继续使用原来的冻结版本。</p><section class="panel processor-config-card"><h3>新建配置</h3><form id="profile-create-form" class="processor-config-form">${rootScope(auth) ? `<div class="field"><label for="profile-shop">所属店铺</label><select id="profile-shop"><option value="">请选择店铺</option>${shopsList.map((shop) => `<option value="${esc(shop.id)}" ${profileShop === shop.id ? "selected" : ""}>${esc(shop.name)}</option>`).join("")}</select></div>` : ""}<div class="processor-config-basics grid">${field("profile-name", "配置名称", "text", 'required maxlength="120"')}<div class="field"><label for="profile-processor">商品处理器</label><select id="profile-processor" required><option value="">请选择处理器</option>${specs.map((spec) => `<option value="${esc(spec.id)}">${esc(label(spec.name, spec.id))}</option>`).join("")}</select></div></div><div id="profile-fields"></div><div class="actions"><button type="submit">创建配置</button>${typeof copyProcessorPrompt === "function" ? '<button id="profile-copy-template" type="button" class="secondary">复制配置提示词</button>' : ""}</div></form></section><div id="processor-cli-prompt"></div><div id="profile-items">${items.map((item) => `<section class="panel processor-config-card"><div class="section-head"><div><h3>${esc(item.name)}</h3><p class="caption">${esc(label(specs.find((spec) => spec.id === item.processor_id)?.name, item.processor_id))} · 当前版本 ${esc(item.revision)}${item.disabled ? " · 已停用" : ""}</p><p class="caption mono">${esc(item.processor_id)} · ${esc(item.shop_id)}</p></div><div class="actions">${typeof copyProcessorPrompt === "function" ? `<button data-profile-copy="${esc(item.id)}" class="secondary" type="button">复制配置提示词</button>` : ""}${item.disabled ? "" : `<button data-profile-edit="${esc(item.id)}" class="secondary">编辑配置</button><button data-profile-delete="${esc(item.id)}" class="danger">停用</button>`}</div></div><p class="caption">已绑定商品保留各自的绑定版本；在商品页重新绑定后，后续发行才使用此配置版本。已发行卡密不会改变。</p><div id="profile-editor-${esc(item.id)}"></div></section>`).join("")}</div>`);
+      page("商品处理器配置", `<p class="caption">按店铺隔离的工作流配置：处理器参数、普通变量、密钥与运行限制。保存会创建新版本；商品需重新绑定才影响之后发行的卡密，已发行卡密继续使用原来的冻结版本。</p><div id="profile-processor-contribution"></div><section class="panel processor-config-card"><h3>新建配置</h3><form id="profile-create-form" class="processor-config-form">${rootScope(auth) ? `<div class="field"><label for="profile-shop">所属店铺</label><select id="profile-shop"><option value="">请选择店铺</option>${shopsList.map((shop) => `<option value="${esc(shop.id)}" ${profileShop === shop.id ? "selected" : ""}>${esc(shop.name)}</option>`).join("")}</select></div>` : ""}<div class="processor-config-basics grid">${field("profile-name", "配置名称", "text", 'required maxlength="120"')}<div class="field"><label for="profile-processor">商品处理器</label><select id="profile-processor" required><option value="">请选择处理器</option>${specs.map((spec) => `<option value="${esc(spec.id)}">${esc(label(spec.name, spec.id))}</option>`).join("")}</select></div></div><div id="profile-fields"></div><div class="actions"><button type="submit">创建配置</button>${typeof copyProcessorPrompt === "function" ? '<button id="profile-copy-template" type="button" class="secondary">复制配置提示词</button>' : ""}</div></form></section><div id="processor-cli-prompt"></div><div id="profile-items">${items.map((item) => `<section class="panel processor-config-card"><div class="section-head"><div><h3>${esc(item.name)}</h3><p class="caption">${esc(label(specs.find((spec) => spec.id === item.processor_id)?.name, item.processor_id))} · 当前版本 ${esc(item.revision)}${item.disabled ? " · 已停用" : ""}</p><p class="caption mono">${esc(item.processor_id)} · ${esc(item.shop_id)}</p></div><div class="actions">${typeof copyProcessorPrompt === "function" ? `<button data-profile-copy="${esc(item.id)}" class="secondary" type="button">复制配置提示词</button>` : ""}${item.disabled ? "" : `<button data-profile-edit="${esc(item.id)}" class="secondary">编辑配置</button><button data-profile-delete="${esc(item.id)}" class="danger">停用</button>`}</div></div><p class="caption">已绑定商品保留各自的绑定版本；在商品页重新绑定后，后续发行才使用此配置版本。已发行卡密不会改变。</p><div id="profile-editor-${esc(item.id)}"></div></section>`).join("")}${items.length ? "" : `<div class="empty"><h3>${tr("尚未创建处理器配置", "No processor configurations yet")}</h3><p>${tr("先选择处理器并创建配置，再到商品页绑定。没有合适的处理器时，可以从上方入口通过 PR 贡献。", "Choose a processor and create a configuration, then bind it on the product page. If none fits, use the contribution entry above to submit a PR.")}</p></div>`}</div>`);
       const displayVersion = version;
+      contributionView = window.ExtoreProcessorContribution?.mount({
+        root: $("#profile-processor-contribution"), api: request,
+        language, isCurrent: () => active() && version === displayVersion,
+        identity: () => JSON.stringify([auth.role, auth.shop_id, auth.session_id, profileShop]),
+      });
       const copyPrompt = (item, processorId) => {
         if (!profileShop) throw new Error("请选择所属店铺");
         if (!processorId) throw new Error("请选择可用的商品处理器");
@@ -446,7 +453,7 @@
       }, node)));
       root.querySelectorAll("[data-profile-delete]").forEach((node) => node.addEventListener("click", () => run(() => fresh(async () => { await request("/admin/processor-profiles/" + encodeURIComponent(node.dataset.profileDelete), null, "DELETE"); if (active()) await profiles(); }, "确认停用处理器配置"), node)));
     }
-    const instance = Object.freeze({ dispose() { disposed = true; version++; controller.abort(); clearTotpSetup(); clearSecrets(); window.removeEventListener?.("pagehide", leavePage); if (mounts.get(root) === instance) mounts.delete(root); }, confirmFresh: fresh, get active() { return active(); } });
+    const instance = Object.freeze({ dispose() { disposed = true; version++; controller.abort(); clearContribution(); clearTotpSetup(); clearSecrets(); window.removeEventListener?.("pagehide", leavePage); if (mounts.get(root) === instance) mounts.delete(root); }, confirmFresh: fresh, get active() { return active(); } });
     mounts.set(root, instance);
     const ready = mode === "confirm" ? () => page("确认身份", "") : mode === "security" ? security : mode === "shops" ? shops : mode === "mail" ? mail : mode === "profiles" ? profiles : mode === "login" ? login : emailFlow;
     instanceReady(ready);

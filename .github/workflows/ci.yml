@@ -44,6 +44,7 @@ jobs:
       - run: node --check extore/static/worker-identity.js
       - run: node --check extore/static/preferences.js
       - run: node --check extore/static/products.js
+      - run: node --check extore/static/processor-contribution.js
       - run: node --check extore/static/cards.js
       - run: node --check extore/static/webmcp.js
       - run: node --check extore/static/product-export.js
@@ -57,6 +58,8 @@ jobs:
       - run: uv run extore --help
       - run: uv run extore --version
       - run: uv run extore workflow --help
+      - run: uv run extore processors --help
+      - run: uv run extore processors contribute --language en --output "$RUNNER_TEMP/extore-contribution.json"
       - run: uv run extore workflow validate --definition examples/workflows/file-transform/flow.json --product examples/workflows/file-transform/product.json
       - run: uv run extore manage --help
       - run: uv run extore admin --help

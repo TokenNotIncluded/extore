@@ -91,7 +91,13 @@
   const select = (id, label, options, value, attributes = "") =>
     `<div class="field"><label for="${id}">${escape(label)}</label><select id="${id}" ${attributes}>${options.map(([key, text]) => `<option value="${escape(key)}" ${value === key ? "selected" : ""}>${escape(text)}</option>`).join("")}</select></div>`;
 
+  function dispose(root) {
+    views.get(root)?.contribution?.dispose();
+    views.delete(root);
+  }
+
   function begin(ctx, name) {
+    dispose(ctx.workspace);
     const view = { name };
     views.set(ctx.workspace, view);
     const active = () => ctx.isCurrent() && views.get(ctx.workspace) === view;
@@ -123,7 +129,7 @@
         perform(() => handler(eventObject), event === "click" ? node : null);
       });
     };
-    return { active, $, all, perform, on, report };
+    return { active, $, all, perform, on, report, setContribution(instance) { view.contribution = instance; } };
   }
 
   function exportHandler(ctx, view) {
@@ -480,13 +486,18 @@
         <p id="queue-help" class="caption">队列任务可以由人员或 AI 领取处理。下方定义顾客填写的信息，以及完成任务时必须提交的结果。</p>
         <p id="stock-help" class="caption" hidden>保存商品后，在「卡密」页粘贴文本或导入 UTF-8 文件，一行生成一张卡密。顾客兑换后直接领取对应文本，无需排队。</p>
         <div id="webhook-settings"><p class="caption">将任务交给外部平台处理。接收地址须为 HTTPS 公网地址，使用签名密钥验证任务与回调。</p><div class="grid">${field("p-url", "Webhook 接收地址", product.webhook_url || "", "url", disabled)}${field("p-secret", "Webhook 签名密钥（至少 32 字符）", product.webhook_secret || "", "password", `${disabled} autocomplete="new-password"`)}</div></div>
-        <div id="processor-settings">${select("p-processor", "商品处理器", [["", "正在加载处理器…"]], "", owner ? disabled : "disabled")}<p id="processor-description" class="caption"></p><div id="processor-configuration"></div><p class="caption">顾客填写项与交付结果由处理器代码定义。这里只能选择商品处理器预设并填写它声明的配置。</p></div>
+        <div id="processor-settings">${select("p-processor", "商品处理器", [["", "正在加载处理器…"]], "", owner ? disabled : "disabled")}<p id="processor-description" class="caption"></p><div id="processor-configuration"></div><p class="caption">顾客填写项与交付结果由处理器代码定义。请选择已审核的商品处理器，并填写它声明的配置。</p><div id="product-processor-contribution"></div></div>
       </div>
       <div class="form-divider"><div class="section-head"><h3>顾客填写的信息</h3><button type="button" id="add-param" class="secondary">添加参数</button></div><div id="parameters"></div></div>
       <div class="form-divider" id="outputs-section"><div class="section-head"><h3>任务完成时提交的结果</h3><button type="button" id="add-output" class="secondary" ${disabled}>添加输出字段</button></div><p class="caption">结果只在顾客主动领取时显示。人员、AI 或外部平台提交完成结果时，都须符合这些定义。</p><div id="outputs"></div></div>
       <p class="caption">队列商品调整输入输出后，新任务采用新定义，已提交任务保留原定义。自动处理商品发行卡密后，处理方式与输入输出结构不能更换。</p><button type="submit" id="save-product" class="full">保存商品</button><div id="error" class="error" role="alert"></div>
     </form>`;
 
+    view.setContribution(window.ExtoreProcessorContribution?.mount({
+      root: $("#product-processor-contribution"), api: ctx.api,
+      language: () => ctx.lang, isCurrent: active,
+      identity: () => JSON.stringify([ctx.role, ctx.shopId, ctx.sessionId]),
+    }));
     let taskFlowEnabled = Boolean(product.task_flow);
     let readFlowProduct = () => ({
       mode: product.mode,
@@ -1053,5 +1064,5 @@
     }
   }
 
-  window.ExtoreProducts = { render, edit };
+  window.ExtoreProducts = { render, edit, dispose };
 })();

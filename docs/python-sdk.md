@@ -19,6 +19,8 @@ SDK 位于 `extore/sdk/`，任务和回调模块只使用 Python 标准库。二
 
 商家不能安装任意 Python 文件、上传脚本、指定路径或 Git URL。增加处理器需要向处理器仓库贡献代码，经审核后随主项目更新固定版本。顾客输入 `parameters`、交付字段 `outputs` 和店铺配置 `shop_configuration` 由处理器代码定义，商品配置不能改写这些字段。预设结构仍使用 `schema_version=1`；`configuration` 是 `shop_configuration` 的兼容名称。
 
+想开发自己的处理器，见 [贡献入口与脚手架](processor-contributing.md)。提交 Fork 或 PR 不会在服务器执行；源码审核合并后还须升级 Extore 固定子模块并发布。需要私有源码、联网或支付时使用外部 Worker。
+
 | 处理器 | 店铺配置 `shop_configuration` | 顾客输入 `parameters` | 交付 `output` |
 |---|---|---|---|
 | `resource_link` | 必填 `resource_url`：HTTPS 地址，最多 2000 字符；可选 `message`：多行文本，最多 10000 字符，默认空串 | 无 | 必填 `resource_url`；可选 `message` |

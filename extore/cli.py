@@ -79,13 +79,20 @@ def main(argv=None):
     from .customer_cli import add_parser as add_customer_parser
     from .manage_client import add_parser as add_manage_parser
     from .owner_client import add_parser as add_owner_parser
+    from .processor_contribution_commands import add_parser as add_processor_parser
     from .workflow_commands import add_parser as add_workflow_parser
 
     add_version(add_manage_parser(commands))
     add_version(add_customer_parser(commands))
     add_version(add_owner_parser(commands))
     add_version(add_workflow_parser(commands))
+    add_version(add_processor_parser(commands))
     args = parser.parse_args(argv)
+    if args.command == "processors":
+        from .processor_contribution_commands import run as processors_main
+
+        processors_main(args)
+        return 0
     if args.command == "workflow":
         from .workflow_commands import run as workflow_main
 

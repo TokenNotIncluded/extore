@@ -726,6 +726,16 @@ def task_flow_schema():
     return JSONResponse(definition_schema(), media_type="application/schema+json")
 
 
+@app.get(
+    "/api/processor-contributions", summary="Reviewed processor contribution guide"
+)
+def processor_contributions():
+    """Static public policy and development prompt; never reads merchant data."""
+    from .processor_contributions import contribution_contract
+
+    return contribution_contract()
+
+
 @app.get("/api/manage/processors")
 def managed_processors(request: Request):
     s = session(request, ("admin", "staff"))

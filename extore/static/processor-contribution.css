@@ -1,0 +1,37 @@
+.processor-contribution { padding: 16px 0; border-bottom: 1px dashed var(--dashed-line); }
+.processor-contribution > summary { cursor: pointer; min-height: 44px; padding: 9px 0; font-size: .9rem; color: var(--muted); }
+.processor-contribution > summary strong { font-weight: 600; color: var(--green); margin-left: 8px; }
+.processor-contribution > summary:focus-visible { outline: 2px solid var(--green); outline-offset: 4px; border-radius: 4px; }
+.processor-contribution-body { padding: 12px 0 4px; max-width: 78ch; }
+.processor-contribution-body > p { margin: 0 0 18px; }
+.processor-contribution-links { display: flex; align-items: center; flex-wrap: wrap; gap: 12px 24px; margin: 0 0 24px; }
+.processor-contribution-links a { display: inline-flex; align-items: center; min-height: 44px; font-size: .85rem; }
+.processor-contribution-guide ol { padding-left: 22px; margin: 0 0 28px; }
+.processor-contribution-guide li { margin: 0 0 14px; padding-left: 4px; font-size: .82rem; }
+.processor-contribution-guide li strong { display: block; color: var(--ink); font-weight: 600; }
+.processor-contribution-guide li span { display: block; color: var(--muted); }
+.processor-contribution-proposal { padding-top: 24px; border-top: 1px dashed var(--dashed-line); }
+.processor-contribution-proposal h4 { margin: 0 0 8px; font-size: 1.05rem; }
+.processor-contribution-proposal > .caption { margin: 0 0 24px; max-width: 70ch; }
+.processor-contribution-proposal .field { margin-bottom: 20px; }
+.processor-contribution-proposal .field > label { font-size: .85rem; }
+.processor-contribution-proposal .field > .caption { margin: 6px 0 0; font-size: .78rem; }
+.processor-contribution-proposal textarea { min-height: 100px; }
+.processor-contribution-io { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 20px; }
+.processor-contribution-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; }
+.processor-contribution-actions button { min-height: 44px; font-size: .85rem; }
+.processor-contribution-actions button:disabled { cursor: not-allowed; }
+.processor-contribution-status { color: var(--green); font-size: .82rem; margin: 16px 0 0; }
+.processor-contribution-status:empty { margin: 0; }
+.processor-contribution-manual { margin-top: 20px; }
+.processor-contribution-manual > label { display: block; font-size: .85rem; margin-bottom: 8px; }
+.processor-contribution-manual textarea { min-height: 230px; font-size: .85rem; }
+.processor-contribution [hidden] { display: none !important; }
+.processor-contribution .error { font-size: .85rem; overflow-wrap: anywhere; }
+@media (max-width: 600px) {
+  .processor-contribution > summary { font-size: .88rem; }
+  .processor-contribution-io { grid-template-columns: 1fr; gap: 0; }
+  .processor-contribution-actions button { width: 100%; }
+  .processor-contribution-proposal input, .processor-contribution-proposal textarea, .processor-contribution-manual textarea { font-size: 16px; }
+  .processor-contribution-links { gap: 4px 20px; }
+}

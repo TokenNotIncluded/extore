@@ -45,6 +45,8 @@ extore workflow validate \
 
 公开的 [`GET /api/task-flows/schema`](https://extore.lmm.best/api/task-flows/schema) 返回 JSON Schema Draft 2020-12。Schema 适合编辑器提示和结构校验；节点唯一性、引用、字段兼容和商品输出仍须通过 `validate` 或 SDK 的规范校验。保存商品和发行卡密也会再次校验。离线校验不执行处理器，不证明业务结果正确，也不检查真实附件权限或第三方服务是否可用。
 
+图定义严格拒绝额外字段，不要把 `$schema` 加进 `flow.json`。IDE 使用外部文件关联即可，例如 VS Code 的 `json.schemas` 配置一项 `{"fileMatch":["**/flow.json"],"url":"./task-flow.schema.json"}`，指向 CLI 导出的 Schema；它不会改变商品实际保存的图。
+
 在编辑器设置中把导出的 Schema 关联到流程文件即可。流程 v1 严格限制顶层字段，不要把 `$schema` 加进 `flow.json`；它属于外部校验工具的配置，不是任务图的一部分。
 
 编辑器可调用已认证的 `POST /api/admin/task-flows/validate`；商品管理会话用 `POST /api/manage/task-flows/validate`，需 `fulfillment.configure` 权限。只提交明确草稿：
