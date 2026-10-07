@@ -2,6 +2,7 @@
 
 import argparse
 import ipaddress
+import logging
 import os
 from dataclasses import dataclass, field
 from urllib.parse import urlsplit
@@ -88,6 +89,23 @@ class ProxySettings:
     routes: tuple = field(default=(), repr=False)
 
 
+class _SocksAuthenticationFilter(logging.Filter):
+    """HTTPcore's SOCKS start trace includes the complete auth tuple."""
+
+    def filter(self, record):
+        return not record.getMessage().startswith("setup_socks5_connection.started")
+
+
+def _protect_proxy_logging(settings):
+    values = [settings.url, *(value for _, value in settings.routes)]
+    if any(value and value.startswith(("socks5://", "socks5h://")) for value in values):
+        logger = logging.getLogger("httpcore.socks")
+        if not any(
+            isinstance(item, _SocksAuthenticationFilter) for item in logger.filters
+        ):
+            logger.addFilter(_SocksAuthenticationFilter())
+
+
 def _env(name, environ):
     # Lowercase values take precedence, including an explicit empty value.
     return environ.get(name.lower(), environ.get(name, ""))
@@ -172,6 +190,7 @@ def resolve_proxy(args=None, *, environ=None):
 
 def make_client(settings=None, *, timeout=30, transport=None):
     settings = resolve_proxy() if settings is None else settings
+    _protect_proxy_logging(settings)
     opened = []
     try:
         kwargs = {

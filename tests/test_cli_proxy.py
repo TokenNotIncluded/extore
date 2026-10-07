@@ -1,4 +1,5 @@
 import argparse
+import logging
 
 import pytest
 
@@ -194,3 +195,23 @@ def test_environment_mounts_keep_tls_and_environment_certificates_disabled(monke
             "trust_env": False,
         }
     ]
+
+
+def test_socks_debug_trace_does_not_log_auth_and_keeps_ordinary_logs(
+    monkeypatch, caplog
+):
+    logger = logging.getLogger("httpcore.socks")
+    monkeypatch.setattr(logger, "filters", [])
+    monkeypatch.setattr("extore.http_proxy.httpx.Client", lambda **kwargs: object())
+    make_client(
+        ProxySettings("explicit", "socks5h://user:synthetic-secret@proxy.example:1080")
+    )
+    with caplog.at_level(logging.DEBUG, logger="httpcore.socks"):
+        logger.debug(
+            "setup_socks5_connection.started auth=(b'user', b'synthetic-secret')"
+        )
+        logger.debug("setup_socks5_connection.complete")
+        logger.debug("connect_tcp.started host='proxy.example' port=1080")
+    assert "synthetic-secret" not in caplog.text
+    assert "setup_socks5_connection.complete" in caplog.text
+    assert "connect_tcp.started" in caplog.text
