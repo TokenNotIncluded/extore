@@ -89,6 +89,7 @@ def resolve_audit_shop(c, actor, target):
         "SELECT shop_id FROM products WHERE id=?",
         "SELECT products.shop_id FROM jobs JOIN products ON products.id=jobs.product_id WHERE jobs.id=?",
         "SELECT products.shop_id FROM cards JOIN products ON products.id=cards.product_id WHERE cards.id=?",
+        "SELECT products.shop_id FROM card_batches JOIN products ON products.id=card_batches.product_id WHERE card_batches.id=?",
         "SELECT products.shop_id FROM staff JOIN products ON products.id=staff.product_id WHERE staff.id=?",
         "SELECT products.shop_id FROM events JOIN products ON products.id=events.product_id WHERE events.id=?",
         "SELECT products.shop_id FROM cli_devices JOIN staff ON staff.id=cli_devices.staff_id JOIN products ON products.id=staff.product_id WHERE cli_devices.id=?",

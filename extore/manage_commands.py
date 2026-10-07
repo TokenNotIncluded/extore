@@ -499,9 +499,30 @@ def add_commands(subcommands):
             "import-text",
             "revoke",
             "batch",
+            "batches",
+            "batch-delete",
+            "batch-restore",
+            "batch-purge",
         ),
     )
     cards["list"].add_argument("--limit", type=_limit, default=50)
+    cards["batches"].add_argument(
+        "--view", choices=("active", "deleted"), default="active"
+    )
+    cards["batches"].add_argument("--variant", default="")
+    cards["batches"].add_argument("--search", default="")
+    cards["batches"].add_argument("--offset", type=_offset, default=0)
+    cards["batches"].add_argument("--limit", type=_limit, default=50)
+    for operation in ("batch-delete", "batch-restore", "batch-purge"):
+        cards[operation].add_argument("--batch", required=True, help="batch folder ID")
+        cards[operation].add_argument(
+            "--yes", action="store_true", help="confirm the selected batch action"
+        )
+    for operation in ("batch-delete", "batch-purge"):
+        cards[operation].add_argument(
+            "--revision",
+            help="exact revision from the prior preview; omit --yes to preview",
+        )
     for action in ("inventory", "batch"):
         cards[action].add_argument("--status", choices=("", *STATUSES), default="")
         cards[action].add_argument("--variant", default="")
@@ -793,6 +814,29 @@ def require_product_delete_confirmation(args):
     """Run before grant/session renewal so an unconfirmed delete stays local."""
     command = getattr(args, "manage_command", "")
     named_operation = getattr(args, "operation", "")
+    if command == "cards" and named_operation in (
+        "batch-delete",
+        "batch-restore",
+        "batch-purge",
+    ):
+        if not isinstance(getattr(args, "batch", None), str) or not re.fullmatch(
+            r"[A-Za-z0-9_-]{1,100}", args.batch
+        ):
+            raise ManageError("Use one batch folder ID", code="invalid_input")
+        if named_operation == "batch-restore" and not args.yes:
+            raise ManageError("Batch restore requires --yes", code="invalid_input")
+        if (
+            named_operation != "batch-restore"
+            and args.yes
+            and (
+                not isinstance(args.revision, str)
+                or not re.fullmatch(r"[a-f0-9]{64}", args.revision)
+            )
+        ):
+            raise ManageError(
+                "Use --revision from the preview together with --yes",
+                code="invalid_input",
+            )
     if command == "product" and named_operation in ("delete", "restore", "purge"):
         if not isinstance(getattr(args, "product", None), str) or not re.fullmatch(
             r"[A-Za-z0-9_-]{1,100}", args.product
@@ -1370,6 +1414,58 @@ def _import_text(args):
 
 def cards_command(client, grant, args):
     operation = args.operation
+    if operation == "batches":
+        if args.limit > 100:
+            raise ManageError(
+                "Batch pages allow at most 100 folders", code="invalid_input"
+            )
+        return {
+            "ok": True,
+            **_object(
+                _request(
+                    client,
+                    grant,
+                    "GET",
+                    "/api/manage/card-batches",
+                    params={
+                        "view": args.view,
+                        "variant_id": args.variant,
+                        "search": args.search,
+                        "offset": args.offset,
+                        "limit": args.limit,
+                    },
+                )
+            ),
+        }
+    if operation in ("batch-delete", "batch-restore", "batch-purge"):
+        if not re.fullmatch(r"[A-Za-z0-9_-]{1,100}", args.batch):
+            raise ManageError("Use one batch folder ID", code="invalid_input")
+        path = "/api/manage/card-batches/" + quote(args.batch, safe="")
+        if operation == "batch-restore":
+            if not args.yes:
+                raise ManageError("Batch restore requires --yes", code="invalid_input")
+            return _request(client, grant, "POST", path + "/restore")
+        action = "delete" if operation == "batch-delete" else "purge"
+        if not args.yes:
+            return {
+                "ok": True,
+                "requires_confirmation": True,
+                **_object(_request(client, grant, "POST", path + f"/{action}-preview")),
+            }
+        if not isinstance(args.revision, str) or not re.fullmatch(
+            r"[a-f0-9]{64}", args.revision
+        ):
+            raise ManageError(
+                "Use --revision from the preview together with --yes",
+                code="invalid_input",
+            )
+        return _request(
+            client,
+            grant,
+            "DELETE" if action == "delete" else "POST",
+            path if action == "delete" else path + "/purge",
+            json={"revision": args.revision, "confirmed": True},
+        )
     if operation == "list":
         items = _objects(
             _request(
@@ -1639,6 +1735,13 @@ _API_ROUTES = (
     ("POST", r"cards/[^/]+/revoke", "cards.manage"),
     ("GET", r"card-stats", "cards.manage"),
     ("GET", r"card-inventory", "cards.manage"),
+    ("GET", r"card-batches", "cards.manage"),
+    ("DELETE", r"card-batches/[A-Za-z0-9_-]+", "cards.manage"),
+    (
+        "POST",
+        r"card-batches/[A-Za-z0-9_-]+/(?:delete-preview|purge-preview|restore|purge)",
+        "cards.manage",
+    ),
     ("GET", r"cards/[^/]+/history", "cards.manage"),
     ("GET", r"links", "links.delegate"),
     ("POST", r"links", "links.delegate"),

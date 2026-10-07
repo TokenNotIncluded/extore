@@ -940,6 +940,12 @@ def _secret_output(args, prefix, callback):
 
 
 _API_ROUTES = (
+    ("GET", r"/api/(?:admin|manage)/card-batches"),
+    ("DELETE", r"/api/(?:admin|manage)/card-batches/[A-Za-z0-9_-]+"),
+    (
+        "POST",
+        r"/api/(?:admin|manage)/card-batches/[A-Za-z0-9_-]+/(?:delete-preview|purge-preview|restore|purge)",
+    ),
     ("GET", r"/api/admin/maintenance"),
     ("PUT", r"/api/admin/maintenance/policy"),
     ("POST", r"/api/admin/maintenance/cleanup"),

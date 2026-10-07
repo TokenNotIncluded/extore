@@ -9,6 +9,7 @@ from typing import Literal
 
 from fastapi import APIRouter, Query, Request
 
+from .card_batches import router as batch_router
 from .db import db
 from .security import authorize_management, card_digest, fail, session
 
@@ -66,6 +67,19 @@ def init_schema(c):
             c.execute(
                 "ALTER TABLE card_meta ADD COLUMN variant_snapshot TEXT NOT NULL DEFAULT '{}'"
             )
+        # Archive folders independently of fulfillment. A purged batch leaves
+        # job-linked card metadata hidden, never reclassified as legacy stock.
+        archive_columns = (
+            (("deleted_at", "REAL"),)
+            if table == "card_batches"
+            else (
+                ("batch_deleted_at", "REAL"),
+                ("batch_previous_state", "TEXT"),
+            )
+        )
+        for name, kind in archive_columns:
+            if name not in columns:
+                c.execute(f"ALTER TABLE {table} ADD COLUMN {name} {kind}")
     c.execute("CREATE INDEX IF NOT EXISTS card_meta_batch ON card_meta(batch_id)")
     c.execute("CREATE INDEX IF NOT EXISTS card_meta_expiry ON card_meta(expires)")
     c.execute("CREATE INDEX IF NOT EXISTS card_meta_variant ON card_meta(variant_id)")
@@ -402,7 +416,9 @@ def _inventory(
         "variant_id": variant_id,
     }
     where = (
-        " WHERE (:status='' OR status=:status) AND (:batch_id='' OR batch_id=:batch_id)"
+        " WHERE (:status='' OR status=:status) AND (:batch_id='' OR batch_id=:batch_id"
+        " OR (:batch_id='legacy' AND batch_id IS NULL AND id NOT IN"
+        " (SELECT card_id FROM card_meta WHERE batch_deleted_at IS NOT NULL)))"
         " AND (:variant_id='' OR variant_id=:variant_id)"
         " AND (:search='' OR instr(upper(id),:search)>0 OR instr(upper(COALESCE(code_suffix,'')),:search)>0)"
     )
@@ -596,3 +612,6 @@ def managed_card_history(
     s = session(request, ("admin", "staff"))
     with db() as c:
         return _history(c, s, cid, _scope(c, s, product_id))
+
+
+router.include_router(batch_router)
