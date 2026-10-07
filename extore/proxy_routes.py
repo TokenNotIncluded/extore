@@ -430,11 +430,19 @@ def _issued_count(c, row):
     if not row["identity_id"]:
         return 0
     cutoff = float(setting(c, "proxy_tracking_started", "0"))
+    # A trashed batch can be restored. Keep its pins until the batch is
+    # permanently purged; revocation outside a recoverable batch can release it.
+    columns = {r["name"] for r in c.execute("PRAGMA table_info(card_meta)")}
+    restorable = "0"
+    if "batch_previous_state" in columns:
+        restorable = "(cards.state='revoked' AND meta.batch_previous_state='ready' AND meta.batch_id IS NOT NULL)"
     return c.execute(
         "SELECT count(*) FROM cards JOIN products ON products.id=cards.product_id "
         "LEFT JOIN card_meta meta ON meta.card_id=cards.id LEFT JOIN jobs j ON j.card_id=cards.id "
         "LEFT JOIN proxy_issued_cards issued ON issued.card_id=cards.id "
-        "WHERE products.shop_id=? AND cards.state NOT IN ('revoked','rejected') "
+        "WHERE products.shop_id=? AND (cards.state NOT IN ('revoked','rejected') OR "
+        + restorable
+        + ") "
         "AND (j.id IS NULL OR j.state NOT IN ('destroyed','rejected')) "
         "AND (j.id IS NULL OR j.state!='succeeded' OR (COALESCE(json_extract(products.config,'$.view_policy'),'repeat')!='once' "
         "AND COALESCE(json_extract(products.config,'$.delivery'),'content')!='service')) "
