@@ -431,6 +431,9 @@ def test_schema13_additive_migration_preserves_old39_tables(owner):
     with db() as c:
         # Remove later additions to reproduce an actual schema-11 database.
         for table in (
+            "job_delivery_versions",
+            "job_revision_requests",
+            "card_entitlements",
             "proxy_issued_cards",
             "job_worker_identities",
             "proxy_routes",
@@ -466,7 +469,7 @@ def test_schema13_additive_migration_preserves_old39_tables(owner):
         }
     init()
     with db() as c:
-        assert c.execute("PRAGMA user_version").fetchone()[0] == 20
+        assert c.execute("PRAGMA user_version").fetchone()[0] == 21
         for name, (ddl, rows) in before.items():
             assert (
                 c.execute(

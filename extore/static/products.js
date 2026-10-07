@@ -473,6 +473,7 @@
       <div class="form-divider" id="product-progress-section"><div class="section-head"><h3>处理步骤</h3><button type="button" id="add-progress-step" class="secondary">添加步骤</button></div><p class="caption">按处理顺序配置步骤，顾客可跟踪每一步的状态。修改只用于之后的任务，正在处理的任务会保留原来的步骤。</p><div id="product-progress-steps"></div></div>
       <div class="form-divider" id="product-task-flow"></div>
       <div class="form-divider"><div class="section-head"><h3>规格 / 档位</h3><button type="button" id="add-variant" class="secondary">添加规格</button></div><p class="caption">每个规格有独立的卡密库存，数量在卡密页查看。参考价供外部商城配置参考；Extore 只负责兑换与交付，不收款。</p><div id="product-variants"></div><p class="caption">规格标识固定。已有卡密的规格不能删除，可停用，避免继续发行。</p></div>
+      <section class="form-divider" id="product-revision-policy"><h3>${ctx.lang === "en" ? "Revisions included with each code" : "卡密附带的修改权益"}</h3><label class="variant-enabled"><input id="p-revisions-enabled" type="checkbox" ${product.revision_policy ? "checked" : ""} ${disabled}>${ctx.lang === "en" ? "Allow a new delivery revision after fulfillment" : "交付后允许顾客提出修改"}</label><div id="revision-policy-fields">${field("p-revision-key", ctx.lang === "en" ? "Code attribute used as the revision allowance" : "作为修改额度的卡密属性键", product.revision_policy?.attribute_key || "", "text", `${disabled} maxlength="100" list="revision-attribute-keys" autocomplete="off"`)}<datalist id="revision-attribute-keys"></datalist>${textarea("p-revision-label", ctx.lang === "en" ? "Allowance label (language → text JSON)" : "权益显示名称（语言 → 文本 JSON）", JSON.stringify(product.revision_policy?.label || { "zh-CN": "修改次数", en: "Revisions" }, null, 2), disabled)}</div><p id="revision-policy-help" class="caption">${ctx.lang === "en" ? "Choose any attribute key from your variant attributes and give it an integer from 0 to 1000 for each variant; missing means zero. Issued codes freeze their own attributes and allowance; later product edits do not change them. Available for repeatable content delivery without task flows; excludes one-code-one-text products." : "从规格属性中选一个自定义键，各规格填写 0–1000 的整数，未填写视为 0 次。制卡时会冻结卡密属性与修改额度，之后修改商品不会改变已发行卡密。适用于可重复查看的内容交付，不支持一卡一文本或任务编排。"}${!ctx.canConfigure && product.revision_policy ? ` ${ctx.lang === "en" ? "Your permission can change display attributes; changing the selected allowance requires fulfillment configuration permission." : "当前权限可修改其他展示属性；所选修改额度需要配置发货权限。"}` : ""}</p></section>
       <div class="checks"><label><input id="p-public" type="checkbox" ${product.public ? "checked" : ""}>公开展示商品</label><label><input id="p-retry" type="checkbox" ${product.allow_retry ? "checked" : ""} ${disabled}>允许明确失败后重试</label></div>
       ${field("p-attempts", "最多尝试次数", product.max_attempts, "number", `${disabled} min="1" max="20"`)}
       <div class="form-divider" id="delivery-connection"><h3>发货对接</h3>
@@ -486,11 +487,13 @@
       <p class="caption">队列商品调整输入输出后，新任务采用新定义，已提交任务保留原定义。自动处理商品发行卡密后，处理方式与输入输出结构不能更换。</p><button type="submit" id="save-product" class="full">保存商品</button><div id="error" class="error" role="alert"></div>
     </form>`;
 
+    let taskFlowEnabled = Boolean(product.task_flow);
     const taskFlowEditor = window.ExtoreTaskFlowEditor?.mount($("#product-task-flow"), {
       value: product.task_flow || null,
       disabled: !ctx.canConfigure,
       active,
       onChange: (enabled) => {
+        taskFlowEnabled = enabled;
         const section = $("#parameters")?.closest(".form-divider");
         if (section) section.hidden = enabled;
       },
@@ -522,6 +525,46 @@
       } catch {
         throw new Error(`${label}需要填写“语言 → 文本”的 JSON 对象`);
       }
+    };
+    const revisionPolicyAvailable = () =>
+      $("#p-mode").value !== "stock" && $("#p-delivery").value === "content" &&
+      $("#p-view").value === "repeat" && !taskFlowEnabled;
+    const syncRevisionPolicy = () => {
+      $("#revision-policy-fields").hidden = !$("#p-revisions-enabled").checked;
+      const keys = [...new Set(variants.flatMap((variant) => Object.keys(variant.attributes || {})))];
+      $("#revision-attribute-keys").innerHTML = keys.map((key) => `<option value="${escape(key)}"></option>`).join("");
+      $("#product-revision-policy").dataset.available = String(revisionPolicyAvailable());
+    };
+    const captureRevisionPolicy = () => {
+      const originalPolicy = product.revision_policy || null;
+      if (!ctx.canConfigure && $("#p-revisions-enabled").checked !== Boolean(originalPolicy))
+        throw new Error("修改卡密权益配置需要配置发货权限。");
+      if (!ctx.canConfigure && originalPolicy) {
+        const originalVariants = productVariants(product);
+        const key = originalPolicy.attribute_key;
+        if (variants.some((variant) => (variant.attributes?.[key] ?? 0) !==
+            (originalVariants.find((value) => value.id === variant.id)?.attributes?.[key] ?? 0)))
+          throw new Error(`修改卡密属性 ${key} 的额度需要配置发货权限；其他展示属性仍可修改。`);
+      }
+      if (!$("#p-revisions-enabled").checked) return null;
+      if (!revisionPolicyAvailable())
+        throw new Error("修改权益需要可重复查看的内容交付，且不能使用一卡一文本或任务编排。请调整处理方式，或关闭修改权益。");
+      const key = $("#p-revision-key").value;
+      if (!key.trim() || key !== key.trim() || key.length > 100 || ["__proto__", "constructor", "prototype"].includes(key))
+        throw new Error("请填写有效的自定义卡密属性键，最多 100 个字符。");
+      const label = parseObject("p-revision-label", "权益显示名称");
+      if (!Object.keys(label).length || Object.keys(label).length > 20 ||
+          Object.entries(label).some(([locale, text]) => !locale || locale.length > 40 || !text.trim() || text.length > 200))
+        throw new Error("权益显示名称需要 1–20 个语言文本，每项最多 200 个字符。");
+      for (const variant of variants) {
+        const allowance = variant.attributes?.[key];
+        if (allowance !== undefined && (!Number.isSafeInteger(allowance) || allowance < 0 || allowance > 1000))
+          throw new Error(`规格“${variant.name}”的 ${key} 必须是非负整数（0–1000）；未填写时为 0。`);
+      }
+      const policy = { attribute_key: key, label };
+      if (!ctx.canConfigure && JSON.stringify(policy) !== JSON.stringify(originalPolicy))
+        throw new Error("修改卡密权益配置需要配置发货权限。");
+      return policy;
     };
     const captureVariants = () => {
       variants = variants.map((variant, index) => {
@@ -569,6 +612,11 @@
           drawVariants();
         }, node)),
       );
+      all("#product-variants textarea").forEach((node) => node.addEventListener("change", () => perform(() => {
+        captureVariants();
+        syncRevisionPolicy();
+      })));
+      syncRevisionPolicy();
     };
     drawVariants();
     const captureProgressSteps = (validate = true) => {
@@ -805,8 +853,11 @@
       previousMode = mode;
       previousDelivery = $("#p-delivery").value;
       drawSchemas();
+      syncRevisionPolicy();
     }
     on("#cancel", "click", () => render(ctx));
+    on("#p-revisions-enabled", "change", syncRevisionPolicy);
+    on("#p-view", "change", syncRevisionPolicy);
     on("#export-saved-product", "click", () => exportProduct(product.id));
     on("#add-progress-step", "click", () => {
       captureProgressSteps(false);
@@ -923,6 +974,7 @@
           progress_steps: mode === "stock" ? [] : progressSteps,
           task_flow: mode === "stock" ? null : taskFlowEditor ? taskFlowEditor.getValue() : product.task_flow || null,
           support_email: $("#p-support-email").value.trim(),
+          revision_policy: captureRevisionPolicy(),
         };
         // Configuration is not part of generic product editing. The existing
         // processor ID remains unchanged for product-scoped managers.

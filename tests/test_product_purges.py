@@ -323,11 +323,11 @@ def test_schema16_only_adds_empty_purge_table_and_preserves_old55(owner, setup_p
                 "SELECT name,sql FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'"
             )
         }
-        assert len(before) == 57
+        assert len(before) == 60
     init()
     init()
     with db() as c:
-        assert c.execute("PRAGMA user_version").fetchone()[0] == 20
+        assert c.execute("PRAGMA user_version").fetchone()[0] == 21
         names = {
             r["name"]
             for r in c.execute(

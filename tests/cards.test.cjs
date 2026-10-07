@@ -69,9 +69,9 @@ function fixture(handler, { language = "zh-CN", batches = [{ id: "fixture-batch"
       return nodes.get(selector);
     }
     querySelectorAll(selector) {
-      if (selector === "input, select, button")
+      if (["input, select, button", "input, select, textarea, button"].includes(selector))
         return [...new Set([...nodes.values(), ...this.children])].filter(
-          (node) => ["input", "select", "button"].includes(node.tagName),
+          (node) => ["input", "select", "textarea", "button"].includes(node.tagName),
         );
       const key = selector
         .match(/^\[data-([a-z-]+)\]$/)?.[1]
@@ -1052,4 +1052,45 @@ test("没有修订的删除预览只显示错误，不提供确认按钮", async
   await settle();
   assert.match(page.nodes.get("#cards-error").textContent, /没有收到批次修订/);
   assert.equal(page.nodes.get("#cards-batch-review").hidden, true);
+});
+
+test("制卡属性为本批覆盖，保留规格默认值且可使用任意商家标量键", async () => {
+  const page = fixture(issueResponse);
+  page.options.products[0].variants = [{ id: "default", name: "强化版", attributes: { edits: 1, tier: "plus" } }];
+  page.options.products[0].revision_policy = { attribute_key: "edits", label: { "zh-CN": "修改次数" } };
+  await page.module.render(page.options);
+  assert.match(page.nodes.get("#cards-variant-attributes").textContent, /"edits": 1/);
+  page.nodes.get("#cards-attributes").value = '{"edits":2,"purpose":"测试","priority":true}';
+  page.nodes.get("#cards-count").value = "1";
+  page.nodes.get("#cards-issue").fire("submit");
+  await settle();
+  const call = page.requests.find((row) => row.method === "POST");
+  assert.deepEqual(JSON.parse(JSON.stringify(call.body.attributes)), { edits: 2, purpose: "测试", priority: true });
+  assert.equal(page.options.products[0].variants[0].attributes.edits, 1);
+});
+
+test("非法属性和非整数修改额度不能发行卡密", async () => {
+  for (const attributes of ['[]', '{"edits":-1}', '{"edits":"1"}', '{"edits":true}', '{"edits":null}', '{"nested":{"a":1}}', '{"__proto__":1}']) {
+    const page = fixture(issueResponse);
+    page.options.products[0].revision_policy = { attribute_key: "edits" };
+    await page.module.render(page.options);
+    page.nodes.get("#cards-attributes").value = attributes;
+    page.nodes.get("#cards-count").value = "1";
+    page.nodes.get("#cards-issue").fire("submit");
+    await settle();
+    assert.equal(page.requests.filter((row) => row.method === "POST").length, 0);
+    assert.ok(page.nodes.get("#cards-error").textContent);
+  }
+});
+
+test("切换制卡规格会清空本批覆盖，展示下一个规格的卡密属性", async () => {
+  const page = fixture(issueResponse);
+  page.options.products[0].variants = [{ id: "default", name: "标准", attributes: { edits: 0 } }, { id: "plus", name: "强化", attributes: { edits: 1 } }];
+  await page.module.render(page.options);
+  page.nodes.get("#cards-attributes").value = '{"edits":7}';
+  page.nodes.get("#cards-issue-variant").value = "plus";
+  page.nodes.get("#cards-issue-variant").fire("change");
+  await settle();
+  assert.equal(page.nodes.get("#cards-attributes").value, "");
+  assert.match(page.nodes.get("#cards-variant-attributes").textContent, /"edits": 1/);
 });

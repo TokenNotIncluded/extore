@@ -13,6 +13,8 @@
 
 顾客多卡验码默认逐卡处理，同一服务器可以包含不同商品，坏码不阻止有效卡。`customer schema --receipt RECEIPT_ID` 按兼容输入返回商品分组；`redeem --group GROUP_ID` 共用文本，`--card-file CARD:FIELD=PATH` 独立绑定各卡附件。查看逐项结果后只修正失败项，已上传文件按卡缓存。单张可用 `exchange --batch`，需要旧同商品整组规则才用 `--atomic`，详见[顾客批量卡密](cli-customer.md#批量卡密)。
 
+**0.10.0** 增加卡级属性覆盖、可配置交付修改额度、历史版本领取和 `customer revise`。字段与幂等恢复见[交付后提出修改](cli-customer.md#交付后提出修改)。
+
 下面介绍 `manage`。每个商品有独立设备授权；店铺流水线申请可一次批准多个商品，客户端逐商品保存并聚合查看，每次操作仍使用其中一个授权，不合并权限。示例中的大写 ID 与路径是占位符，请用当前操作返回的实际值替换。
 
 ## 安装与登录
@@ -137,6 +139,8 @@ extore manage next --all --origin https://extore.example.com --watch
 
 返回的每项包含 `product_id`、`grant_id`、已领取的 `job` 与当前 `execution`。按该项的商品、授权和 `job.attempt` 处理；流程任务还要使用当前 `execution.flow_epoch` 与 `execution.action_id`。`execution` 只提供当前动作所需的输入输出定义和参数，不授权读取未来步骤或其他顾客任务。`next` 已领取任务，无需再 `claim`。
 
+0.10.0 同时返回当前卡属性、权益、交付轮次及最近成功版，修改建议位于 `revision.message`，不改变原 `params`。默认省略完整历史列表；需要时加 `next --detail` 或 `job JOB_ID --product PRODUCT_ID --detail`，不会因此获得交付正文或额外权限。
+
 网络中断或 Ctrl+C 后，保持相同 profile、服务器、范围、`--wait` 和 `--limit`，重复原命令恢复同一次领取结果。本地申请和服务器响应有 10 分钟恢复窗口；如果返回 `stale:true`，先查看原任务状态，不能把旧结果当成新工作。`--new-request` 明确放弃旧申请，可能领取另一项任务；只有核实原任务与租约后才使用，不能用它掩盖丢失的领取结果。
 
 ### 读取与提交当前动作
@@ -223,7 +227,7 @@ extore manage complete JOB_ID --product PRODUCT_ID --file previews=./one.png --f
 | `cards batch` | 同库存过滤，但必须传 `--batch BATCH_ID` |
 | `cards stats` | 商品与规格统计；`--detail` 包含全部统计口径 |
 | `cards history CARD_ID` | 单张卡密的安全时间线 |
-| `cards issue` | `--count`（1–1000，默认 1）、`--variant`（默认 default）、`--label`、`--expires FUTURE_UNIX`；卡密保存到私密 JSON 文件 |
+| `cards issue` | `--count`（1–1000，默认 1）、`--variant`（默认 default）、`--label`、`--expires FUTURE_UNIX`、`--attributes-file` 或 `--attributes-stdin`；卡密保存到私密 JSON 文件 |
 | `cards revoke CARD_ID` | 撤销仍符合服务端规则的卡密 |
 | `links list` | 当前商品有权查看的授权范围与两类额度；`--view active` 默认，history 看失效记录，all 含归档墓碑 |
 | `links create` | `--json-file LINK.json` 或 `--json-stdin`；新链接保存到私密 JSON 文件 |

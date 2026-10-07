@@ -1799,3 +1799,28 @@ th {
 
 .batch-card > .checks { margin-top: 0; }
 .batch-card > .checks label { min-height: 44px; overflow-wrap: anywhere; }
+
+.receipt-revisions {
+  margin-top: 32px;
+  padding-top: 24px;
+  border-top: 1px dashed var(--dashed-line);
+}
+.receipt-revisions h3 { margin: 0; }
+.receipt-revisions .section-head { gap: 16px; flex-wrap: wrap; }
+.receipt-revisions form { margin-top: 20px; }
+.receipt-revisions textarea { min-height: 120px; }
+.revision-feedback p { white-space: pre-wrap; overflow-wrap: anywhere; }
+.receipt-code-attributes { margin: 16px 0 24px; }
+.receipt-code-attributes dl { display: grid; grid-template-columns: minmax(100px, 1fr) minmax(0, 2fr); gap: 8px 16px; }
+.receipt-code-attributes dt, .receipt-code-attributes dd { margin: 0; overflow-wrap: anywhere; }
+.delivery-version-field { margin-top: 24px; max-width: 320px; }
+.card-attributes-editor { margin: 20px 0; }
+.card-attributes-editor > summary { min-height: 44px; cursor: pointer; }
+.card-attributes-editor textarea, #p-revision-label { font-family: ui-monospace, monospace; }
+#cards-variant-attributes { white-space: pre-wrap; overflow-wrap: anywhere; }
+#revision-policy-fields[hidden] { display: none !important; }
+@media (max-width: 760px) {
+  .receipt-revisions textarea, .card-attributes-editor textarea { font-size: 16px; }
+  .delivery-version-field { max-width: none; }
+  .receipt-revisions button { min-height: 44px; }
+}

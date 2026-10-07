@@ -165,7 +165,7 @@ def _work_item(c, row, binding):
     execution = _flow_execution(c, row)
     if execution is None and flow:
         return None
-    details = job_view(c, row, execution is None)
+    details = job_view(c, row, execution is None, include_deliveries=False)
     if execution is None:
         execution = {
             name: details[name] for name in ("params", "parameters", "outputs")
@@ -187,6 +187,9 @@ def _work_item(c, row, binding):
             )
             if name in execution
         }
+    from .card_entitlements import job_context
+
+    execution.update(job_context(c, row, include_deliveries=False))
     return {
         "product_id": row["product_id"],
         "device_id": binding["device_id"],
@@ -203,6 +206,11 @@ def _work_item(c, row, binding):
                 "progress",
                 "steps",
                 "completed_steps",
+                "card_attributes",
+                "entitlements",
+                "revision",
+                "deliveries",
+                "last_delivery",
             )
             if name in details
         },

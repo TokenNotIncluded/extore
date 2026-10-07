@@ -46,6 +46,7 @@ from .models import (
     ProductLinkInput,
     QuickProductInput,
     Redemption,
+    RevisionRequest,
     StaffInput,
     TokenInput,
 )
@@ -332,6 +333,7 @@ def _batch_receipt(c, value):
                     job_product(c, row) if row else card_product(c, card)
                 ),
                 "job": job_view(c, row) if row else None,
+                **_card_entitlement_view(c, card, row),
             }
         )
     first = cards[0]
@@ -407,6 +409,7 @@ def exchange(body: CodeInput, request: Request):
                 "product": public_product(p),
                 "variant": card_variant(c, card),
                 "job": job_view(c, row) if row else None,
+                **_card_entitlement_view(c, card, row),
             }
         c.execute(
             "INSERT INTO receipt_batches VALUES (?,?,?)",
@@ -466,7 +469,24 @@ def receipt(body: TokenInput):
             ),
             "variant": card_variant(c, card),
             "job": job_view(c, row) if row else None,
+            **_card_entitlement_view(c, card, row),
         }
+
+
+def _card_entitlement_view(c, card, row=None):
+    from .card_entitlements import card_view
+
+    return card_view(c, card, row)
+
+
+@app.post("/api/receipt/revisions")
+def request_delivery_revision(body: RevisionRequest, request: Request):
+    rate_limit(request, "revision", 20, 60)
+    from .card_entitlements import request_revision
+
+    with db() as c:
+        card = resolve_customer_card(c, body.token, body.card_id)
+        return job_view(c, request_revision(c, card, body))
 
 
 @app.post("/api/retry")
@@ -487,31 +507,37 @@ def reveal(body: TokenInput):
     with db() as c:
         card = resolve_customer_card(c, body.token, body.card_id)
         row = c.execute("SELECT * FROM jobs WHERE card_id=?", (card["id"],)).fetchone()
-        if not row or row["state"] != "succeeded":
+        if not row:
             fail("尚无可领取内容", 409)
+        from .card_entitlements import delivery_row, mark_revealed, select_delivery
+
+        delivery = select_delivery(c, row, body.revision)
+        selected = delivery_row(row, delivery)
         p = job_product(c, row)
         if p["delivery"] == "service":
             return {"content": None, "output": {}}
-        if p["view_policy"] == "once" and row["revealed"]:
+        if p["view_policy"] == "once" and selected["revealed"]:
             fail("内容已领取，无法再次查看", 410)
-        if not row["content"] and row["result_json"] is None:
+        if not selected["content"] and selected["result_json"] is None:
             fail("内容已销毁", 410)
-        content = row["content"]
+        content = selected["content"]
         output = (
-            json.loads(row["result_json"])
-            if row["result_json"] is not None
+            json.loads(selected["result_json"])
+            if selected["result_json"] is not None
             else {"content": content}
         )
-        files = release_output_files(c, row)
-        c.execute(
-            "UPDATE jobs SET revealed=1,content=?,result_json=?,updated=? WHERE id=?",
-            (
-                None if p["view_policy"] == "once" else content,
-                None if p["view_policy"] == "once" else row["result_json"],
-                time.time(),
-                row["id"],
-            ),
-        )
+        files = release_output_files(c, selected)
+        mark_revealed(c, row, delivery)
+        if delivery["current"]:
+            c.execute(
+                "UPDATE jobs SET revealed=1,content=?,result_json=?,updated=? WHERE id=?",
+                (
+                    None if p["view_policy"] == "once" else content,
+                    None if p["view_policy"] == "once" else selected["result_json"],
+                    time.time(),
+                    row["id"],
+                ),
+            )
         event(c, "delivery.viewed", row["product_id"], job(c, row["id"]))
         if p["view_policy"] == "once":
             from . import task_flow
@@ -520,6 +546,7 @@ def reveal(body: TokenInput):
             task_flow.destroy(c, row)
             discard_assignment(c, card["id"])
         return {
+            "revision": delivery["revision"],
             "content": content,
             "output": output,
             **({"files": files} if files else {}),
@@ -531,7 +558,13 @@ def destroy(body: TokenInput):
     with db() as c:
         card = resolve_customer_card(c, body.token, body.card_id)
         row = c.execute("SELECT * FROM jobs WHERE card_id=?", (card["id"],)).fetchone()
-        if not row or row["state"] not in ("succeeded", "destroyed"):
+        from .card_entitlements import destroy as destroy_history
+        from .card_entitlements import has_previous_delivery
+
+        if not row or (
+            row["state"] not in ("succeeded", "destroyed")
+            and not has_previous_delivery(c, row)
+        ):
             fail("只能销毁已完成的交付", 409)
         if row["state"] == "destroyed":
             return {"ok": True}
@@ -540,9 +573,10 @@ def destroy(body: TokenInput):
         from .text_cards import discard_assignment
 
         task_flow.destroy(c, row)
+        destroy_history(c, row)
         discard_assignment(c, card["id"])
         c.execute(
-            "UPDATE jobs SET state='destroyed',content=NULL,result_json=NULL,params='{}',message='',updated=? WHERE id=?",
+            "UPDATE jobs SET state='destroyed',content=NULL,result_json=NULL,params='{}',message='',claimed_by=NULL,lease=NULL,attempt=attempt+1,updated=? WHERE id=?",
             (time.time(), row["id"]),
         )
         # Scrub queued/history payloads of customer parameters.
@@ -551,6 +585,8 @@ def destroy(body: TokenInput):
         ).fetchall():
             payload = json.loads(e["payload"])
             payload["data"].pop("params", None)
+            if "revision" in payload["data"]:
+                payload["data"]["revision"]["message"] = ""
             c.execute(
                 "UPDATE events SET payload=? WHERE id=?", (json.dumps(payload), e["id"])
             )
@@ -887,6 +923,7 @@ def cards(body: IssueCards, request: Request):
             expires=body.expires,
             variant_id=body.variant_id,
             routed=body.routed,
+            attributes=body.attributes,
         )
         audit(c, management_actor(s), "cards.issue", f"{body.product_id}:{body.count}")
         return {"codes": codes, "batch_id": card_batch_id(c, codes)}
@@ -1238,6 +1275,11 @@ def jobs(
             "can_retry",
             "retry_mode",
             "retry_reason_type",
+            "card_attributes",
+            "entitlements",
+            "revision",
+            "deliveries",
+            "last_delivery",
         )
         for row in rows:
             details = job_view(c, row)
@@ -1281,6 +1323,15 @@ def batch(body: BatchUpdate, request: Request):
             fail("流程身份包含未选择的任务")
         for r in rows:
             jid = r["id"]
+            supplied_attempt = body.flow_scopes.get(jid, {}).get(
+                "attempt", body.attempt
+            )
+            if r["revision_round"] > 0 and supplied_attempt is None:
+                fail("修改轮次操作必须指定当前任务的 attempt", 409)
+            if supplied_attempt is not None and (
+                type(supplied_attempt) is not int or supplied_attempt < 1
+            ):
+                fail("任务尝试标识必须是正整数", 422)
             if body.attempt is not None and body.attempt != r["attempt"]:
                 fail("提交对应的任务尝试已失效", 409)
             scope = body.flow_scopes.get(jid, {})
@@ -1470,9 +1521,22 @@ def edit_managed_product(
                 "processor_id",
                 "processor_config",
                 "task_flow",
+                "revision_policy",
             ):
                 if values[field] != old[field]:
                     fail("修改发货、查看或重试配置需要配置发货权限", 403)
+            if old.get("revision_policy"):
+                key = old["revision_policy"]["attribute_key"]
+                old_counts = {
+                    variant["id"]: variant["attributes"].get(key, 0)
+                    for variant in old["variants"]
+                }
+                if any(
+                    variant["attributes"].get(key, 0)
+                    != old_counts.get(variant["id"], 0)
+                    for variant in values["variants"]
+                ):
+                    fail("修改规格的修改额度需要配置发货权限", 403)
             if field_schema(values["outputs"]) != field_schema(old["outputs"]):
                 fail("修改输出字段架构需要配置发货权限", 403)
         try:
@@ -1511,6 +1575,7 @@ def issue_managed_cards(body: IssueCards, request: Request):
             expires=body.expires,
             variant_id=body.variant_id,
             routed=body.routed,
+            attributes=body.attributes,
         )
         audit(c, management_actor(s), "cards.issue", f"{pid}:{body.count}")
         return {"codes": codes, "batch_id": card_batch_id(c, codes)}
@@ -1733,6 +1798,8 @@ def platform_cards(body: IssueCards, request: Request):
         excluded = {"variant_id"} if body.variant_id == "default" else set()
         if body.routed is None:
             excluded.add("routed")
+        if not body.attributes:
+            excluded.add("attributes")
         if not body.label and body.expires is None:
             excluded.update(("label", "expires"))
         fingerprint = digest(body.model_dump_json(exclude=excluded))
@@ -1762,6 +1829,7 @@ def platform_cards(body: IssueCards, request: Request):
                 expires=body.expires,
                 variant_id=body.variant_id,
                 routed=body.routed,
+                attributes=body.attributes,
             )
         }
         c.execute(

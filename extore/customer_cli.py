@@ -10,6 +10,7 @@ import secrets
 import stat
 import sys
 import time
+import uuid
 from contextlib import contextmanager
 from pathlib import Path
 from urllib.parse import unquote, urlsplit
@@ -481,7 +482,7 @@ def _summary_product(product):
     _product_shape(product)
     result = {
         key: product[key]
-        for key in ("id", "name", "logo", "mode", "delivery")
+        for key in ("id", "name", "logo", "mode", "delivery", "revision_policy")
         if key in product
     }
     if "variants" in product:
@@ -521,6 +522,11 @@ def _summary_job(job):
             "steps",
             "completed_steps",
             "updated",
+            "card_attributes",
+            "entitlements",
+            "revision",
+            "deliveries",
+            "last_delivery",
         )
         if key in job
     }
@@ -536,6 +542,15 @@ def _summary_variant(value):
     _object(value)
     return {
         key: value[key] for key in ("id", "name", "price", "currency") if key in value
+    }
+
+
+def _card_metadata(value):
+    """Keep merchant-owned benefits and delivery history, never raw inputs/output."""
+    return {
+        key: value[key]
+        for key in ("card_attributes", "entitlements", "deliveries", "last_delivery")
+        if key in value
     }
 
 
@@ -575,6 +590,7 @@ def _summary_receipt(value, *, allowed_card_ids=None):
                     variant=_summary_variant(item.get("variant")),
                     job=_summary_job(item.get("job")),
                 )
+                rendered.update(_card_metadata(item))
             result["items"].append(rendered)
         if "results" in value:
             rows = _objects(value["results"])
@@ -649,6 +665,7 @@ def _summary_receipt(value, *, allowed_card_ids=None):
         "product": _summary_product(value["product"]),
         "variant": _summary_variant(value.get("variant")),
         "job": _summary_job(value.get("job")),
+        **_card_metadata(value),
     }
 
 
@@ -767,6 +784,50 @@ def _read_json(path=None):
         raise ManageError(
             "Command input must be valid JSON", code="invalid_input"
         ) from None
+
+
+def _read_revision_message(path=None):
+    source = (
+        getattr(sys.stdin, "buffer", sys.stdin) if path is None else path.open("rb")
+    )
+    try:
+        raw = source.read(40_001)
+    finally:
+        if path is not None:
+            source.close()
+    try:
+        message = raw.decode("utf-8") if isinstance(raw, bytes) else raw
+    except UnicodeError:
+        raise ManageError(
+            "Revision message must be UTF-8 text", code="invalid_input"
+        ) from None
+    if not isinstance(message, str) or not message.strip() or len(message) > 10_000:
+        raise ManageError(
+            "Revision message must contain 1..10000 characters", code="invalid_input"
+        )
+    return message
+
+
+def _revision_number(value):
+    import argparse
+
+    if not re.fullmatch(r"[0-9]+", value) or len(value) > 4 or int(value) > 1000:
+        raise argparse.ArgumentTypeError("revision must be an integer from 0 to 1000")
+    return int(value)
+
+
+def _revision_request_id(value):
+    import argparse
+
+    try:
+        parsed = uuid.UUID(value)
+        if parsed.version != 4 or str(parsed) != value:
+            raise ValueError
+    except (ValueError, AttributeError):
+        raise argparse.ArgumentTypeError(
+            "request ID must be a canonical UUID v4"
+        ) from None
+    return value
 
 
 def _params(value):
@@ -1674,7 +1735,112 @@ class CustomerClient:
                 "No task exists to retry; use customer redeem", code="invalid_state"
             )
 
-    def reveal(self, entry, card_id, target):
+    def revise(
+        self,
+        entry,
+        card_id,
+        message,
+        *,
+        request_id=None,
+        expected_revision=None,
+        new_request=False,
+    ):
+        selected = self.select(self.receipt(entry), card_id)
+        # Save the exact request before transmission. A lost response can then be
+        # replayed even if the server has already queued the new delivery round.
+        key = card_id or "single"
+        pending = entry.setdefault("revision_requests", {})
+        digest = hashlib.sha256(message.encode("utf-8")).hexdigest()
+        saved = pending.get(key)
+        if new_request:
+            pending.pop(key, None)
+            self.persist()
+            saved = None
+        if saved is not None:
+            if (
+                not isinstance(saved, dict)
+                or saved.get("message_sha256") != digest
+                or request_id is not None
+                and saved.get("request_id") != request_id
+                or expected_revision is not None
+                and saved.get("expected_revision") != expected_revision
+            ):
+                raise ManageError(
+                    "A revision request is unresolved; retry the same message and request ID first",
+                    code="revision_pending",
+                )
+            body = {
+                "token": entry["token"],
+                "request_id": saved["request_id"],
+                "expected_revision": saved["expected_revision"],
+                "message": message,
+            }
+        else:
+            if expected_revision is None:
+                revision = (selected.get("job") or {}).get("revision", {})
+                expected_revision = revision.get("current", 0)
+            if (
+                type(expected_revision) is not int
+                or not 0 <= expected_revision <= 2**53 - 1
+            ):
+                raise ManageError(
+                    "Invalid current delivery revision", code="invalid_response"
+                )
+            body = {
+                "token": entry["token"],
+                "request_id": request_id or str(uuid.uuid4()),
+                "expected_revision": expected_revision,
+                "message": message,
+            }
+            pending[key] = {
+                "request_id": body["request_id"],
+                "expected_revision": expected_revision,
+                "message_sha256": digest,
+            }
+            self.persist()
+        if card_id:
+            body["card_id"] = card_id
+        try:
+            result = _summary_job(
+                _object(
+                    self.json(
+                        entry["origin"], "POST", "/api/receipt/revisions", json=body
+                    )
+                )
+            )
+        except ManageError as exc:
+            # A definite rejection did not start a new round. Transport failures
+            # keep the request identity so a rerun cannot spend another credit.
+            if exc.status in (400, 403, 404, 410, 422):
+                pending.pop(key, None)
+                self.persist()
+            raise
+        pending.pop(key, None)
+        status = entry.setdefault("status", {})
+        if card_id:
+            item = next(
+                (
+                    row
+                    for row in status.get("items", [])
+                    if row.get("card_id") == card_id
+                ),
+                None,
+            )
+            if item is not None:
+                item.update(job=result, **_card_metadata(result))
+        else:
+            status.update(job=result, **_card_metadata(result))
+        self.persist()
+        return {
+            "ok": True,
+            "receipt_id": entry["id"],
+            "request_id": body["request_id"],
+            "job": result,
+            **({"card_id": card_id} if card_id else {}),
+            **_card_metadata(result),
+        }
+
+    def reveal(self, entry, card_id, target, revision=None):
         self.select(self.receipt(entry), card_id)
         # Reserve the private output before consuming a single-view delivery.
         fd = _private_output(target)
@@ -1683,6 +1849,8 @@ class CustomerClient:
                 body = {"token": entry["token"]}
                 if card_id:
                     body["card_id"] = card_id
+                if revision is not None:
+                    body["revision"] = revision
                 result = _object(
                     self.json(entry["origin"], "POST", "/api/receipt/reveal", json=body)
                 )
@@ -1695,7 +1863,16 @@ class CustomerClient:
                     )
                 # Persist file IDs before writing content: later downloads do not
                 # need to reveal a single-view delivery a second time.
-                entry.setdefault("files", {})[card_id or "single"] = files
+                key = card_id or "single"
+                entry.setdefault("files", {})[key] = files
+                if "revision" in result:
+                    if type(result["revision"]) is not int or result["revision"] < 0:
+                        raise ManageError(
+                            "Invalid delivery revision", code="invalid_response"
+                        )
+                    entry.setdefault("delivery_files", {}).setdefault(key, {})[
+                        str(result["revision"])
+                    ] = files
                 self.persist()
                 json.dump(
                     result, destination, ensure_ascii=False, separators=(",", ":")
@@ -1711,6 +1888,7 @@ class CustomerClient:
             "ok": True,
             "receipt_id": entry["id"],
             "output": str(target),
+            **({"revision": result["revision"]} if "revision" in result else {}),
             "files": [
                 {
                     key: item[key]
@@ -1721,9 +1899,16 @@ class CustomerClient:
             ],
         }
 
-    def download(self, entry, card_id, file_id, target):
+    def download(self, entry, card_id, file_id, target, revision=None):
         self.select(self.receipt(entry), card_id)
-        files = entry.get("files", {}).get(card_id or "single", [])
+        key = card_id or "single"
+        versions = entry.get("delivery_files", {}).get(key, {})
+        files = (
+            versions.get(str(revision), [])
+            if revision is not None
+            else entry.get("files", {}).get(key, [])
+            + [descriptor for values in versions.values() for descriptor in values]
+        )
         descriptor = next((item for item in files if item.get("id") == file_id), None)
         if descriptor is None or (
             card_id and descriptor.get("card_id") not in (None, card_id)
@@ -1743,6 +1928,8 @@ class CustomerClient:
                 body = {"token": entry["token"], "file_id": file_id}
                 if card_id:
                     body["card_id"] = card_id
+                if revision is not None:
+                    body["revision"] = revision
                 response = self.request(
                     entry["origin"], "POST", "/api/files/download", json=body
                 )
@@ -1932,6 +2119,7 @@ def add_parser(commands):
         ("files", "list cached input and revealed delivery file IDs"),
         ("redeem", "submit defined inputs, optionally uploading file paths"),
         ("retry", "retry with revised inputs or --reuse the stored inputs"),
+        ("revise", "request a new delivery round using the card's remaining benefits"),
         ("upload", "upload an input file without submitting the task"),
         ("reveal", "save delivery content to a new private JSON file"),
         ("download", "download one revealed delivery file"),
@@ -1993,6 +2181,37 @@ def add_parser(commands):
         if name == "upload":
             command.add_argument("--field", required=True)
             command.add_argument("--file", type=Path, required=True)
+        if name == "revise":
+            message = command.add_mutually_exclusive_group(required=True)
+            message.add_argument(
+                "--message-file", type=Path, help="UTF-8 revision request"
+            )
+            message.add_argument(
+                "--message-stdin",
+                action="store_true",
+                help="read the revision request privately from stdin",
+            )
+            command.add_argument(
+                "--request-id",
+                type=_revision_request_id,
+                help="UUID v4; automatically saved and reused after a lost response",
+            )
+            command.add_argument(
+                "--expected-revision",
+                type=_revision_number,
+                help="require this delivered revision; omitted to read the current one",
+            )
+            command.add_argument(
+                "--new-request",
+                action="store_true",
+                help="explicitly discard a pending request after checking the current state",
+            )
+        if name in ("reveal", "download", "files"):
+            command.add_argument(
+                "--revision",
+                type=_revision_number,
+                help="delivery round: 0 is the first draft",
+            )
         if name in ("reveal", "download"):
             command.add_argument(
                 "--output",
@@ -2170,13 +2389,27 @@ def dispatch(client, args):
                 "ok": True,
                 "receipt_id": entry["id"],
                 "product": _schema(selected["product"], args.detail),
+                **_card_metadata(selected),
+                "revision": (selected.get("job") or {}).get("revision"),
             }
         if command == "files":
-            client.select(value, card_id)
+            selected = client.select(value, card_id)
+            key = card_id or "single"
+            revision = args.revision
+            versions = entry.get("delivery_files", {}).get(key, {})
+            files = (
+                versions.get(str(revision), [])
+                if revision is not None
+                else entry.get("files", {}).get(key, [])
+            )
             return {
                 "ok": True,
                 "receipt_id": entry["id"],
                 "cached": True,
+                **_card_metadata(selected),
+                "job": _summary_job(selected.get("job")),
+                "revealed_revisions": sorted(int(number) for number in versions),
+                **({"revision": revision} if revision is not None else {}),
                 "inputs": [
                     descriptor
                     for stored in entry.get("inputs", {})
@@ -2194,7 +2427,7 @@ def dispatch(client, args):
                         for key in ("id", "field_key", "filename", "size")
                         if key in item
                     }
-                    for item in entry.get("files", {}).get(card_id or "single", [])
+                    for item in files
                 ],
             }
         if card_id:
@@ -2204,6 +2437,7 @@ def dispatch(client, args):
                 "receipt_id": entry["id"],
                 "card_id": card_id,
                 "job": _summary_job(selected.get("job")),
+                **_card_metadata(selected),
             }
             if (
                 args.inputs
@@ -2266,10 +2500,21 @@ def dispatch(client, args):
         )
     if command == "upload":
         return client.upload(entry, card_id, args.field, args.file)
+    if command == "revise":
+        return client.revise(
+            entry,
+            card_id,
+            _read_revision_message(args.message_file),
+            request_id=args.request_id,
+            expected_revision=args.expected_revision,
+            new_request=args.new_request,
+        )
     if command == "reveal":
-        return client.reveal(entry, card_id, args.output)
+        return client.reveal(entry, card_id, args.output, revision=args.revision)
     if command == "download":
-        return client.download(entry, card_id, args.file_id, args.output)
+        return client.download(
+            entry, card_id, args.file_id, args.output, revision=args.revision
+        )
     if command == "destroy":
         client.select(client.receipt(entry), card_id)
         body = {"token": entry["token"]}
@@ -2279,6 +2524,7 @@ def dispatch(client, args):
             client.json(entry["origin"], "POST", "/api/receipt/destroy", json=body)
         )
         entry.setdefault("files", {}).pop(card_id or "single", None)
+        entry.setdefault("delivery_files", {}).pop(card_id or "single", None)
         if result.get("ok") is not True:
             raise ManageError("Invalid destroy response", code="invalid_response")
         return {"ok": True, "receipt_id": entry["id"]}

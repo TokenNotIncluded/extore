@@ -47,7 +47,12 @@ def apply_queue_outcome(
     )
     c.execute(
         "UPDATE cards SET state=? WHERE id=?",
-        ("ready" if state == "needs_input" else "rejected", row["card_id"]),
+        (
+            ("used" if row["revision_round"] else "ready")
+            if state == "needs_input"
+            else "rejected",
+            row["card_id"],
+        ),
     )
     updated = job(c, jid)
     event(c, "fulfillment." + state, row["product_id"], updated)

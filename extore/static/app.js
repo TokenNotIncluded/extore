@@ -10,8 +10,12 @@ let lang = preferences.resolved.language,
   currentProduct = null,
   currentJob = null,
   currentVariant = null,
+  currentCardAttributes = {},
+  currentEntitlements = null,
   receiptViewKey = "",
   receiptMotion = null,
+  receiptRevisionRequest = null,
+  deliveryRevealGeneration = 0,
   ownerCliApproval = null,
   deviceCliApproval = null,
   pipelineAuthView = null,
@@ -110,8 +114,19 @@ function receiptCardBody(context, extra = {}) {
   if (context.cardId) body.card_id = context.cardId;
   return body;
 }
+function acceptReceiptCardInfo(value) {
+  currentCardAttributes = value?.card_attributes || value?.job?.card_attributes || {};
+  currentEntitlements = value?.entitlements || value?.job?.entitlements || null;
+}
+function frozenCardInfo(attributes, entitlement, showAllowance = true) {
+  const entries = Object.entries(attributes || {}).filter(([key, value]) => key !== entitlement?.attribute_key &&
+    (value === null || ["string", "number", "boolean"].includes(typeof value))).slice(0, 20);
+  const allowance = showAllowance && entitlement
+    ? `<p class="caption code-entitlement">${esc(localized(entitlement.label) || tr("修改额度", "Revision allowance"))} · ${esc(tr(`剩余 ${entitlement.remaining} / ${entitlement.total}`, `${entitlement.remaining} of ${entitlement.total} remaining`))}</p>` : "";
+  return allowance + (entries.length ? `<details class="receipt-code-attributes"><summary>${tr("卡密绑定属性", "Frozen code attributes")}</summary><dl>${entries.map(([key, value]) => `<dt>${esc(key)}</dt><dd>${esc(value === null ? "—" : typeof value === "boolean" ? value ? tr("是", "Yes") : tr("否", "No") : value)}</dd>`).join("")}</dl></details>` : "");
+}
 function selectBatchCard(cardId = "", retryOnly = false) {
-  if (batchSelection !== cardId || batchRetryOnly !== retryOnly) { receiptGeneration++; clearDeliveryBlobs(); }
+  if (batchSelection !== cardId || batchRetryOnly !== retryOnly) { receiptGeneration++; deliveryRevealGeneration++; receiptRevisionRequest = null; clearDeliveryBlobs(); }
   batchSelection = cardId;
   batchRetryOnly = retryOnly;
 }
@@ -236,6 +251,7 @@ function openBatchCard(item) {
   currentProduct = batchProduct(item);
   currentJob = item.job || null;
   currentVariant = item.variant || item.job?.variant || null;
+  acceptReceiptCardInfo(item);
   if (!item.job) {
     if (currentBatch?.partial && window.ExtoreBatchRedemption?.flowOf(item)?.enabled) {
       stopPoll();
@@ -377,6 +393,13 @@ async function uploadFile(definition, options = {}) {
     if (!active()) throw new Error("文件操作上下文已失效。");
     if (!targetJob.outputs?.some((field) => field.key === definition.field_key && isAttachmentField(field))) throw new Error("当前处理步骤没有这个附件输出字段。");
     const scope = managementFlowScope(targetJob);
+    if (targetJob.revision?.current > 0 && definition.attempt === undefined)
+      throw new Error("修改任务上传必须指定已读取任务的 attempt，请刷新后重新选择。");
+    if (definition.attempt !== undefined && definition.attempt !== targetJob.attempt)
+      throw new Error("任务尝试已改变，请刷新后重新上传。");
+    if (!Number.isSafeInteger(targetJob.attempt) || targetJob.attempt < 1)
+      throw new Error("任务尝试信息无效，请刷新队列。");
+    uploadFields.attempt = definition.attempt ?? targetJob.attempt;
     if (scope) {
       if (definition.flow_epoch !== scope.flow_epoch || definition.action_id !== scope.action_id || definition.attempt !== scope.attempt) throw new Error("处理步骤已改变，请刷新后重新上传。");
       uploadFields = { ...uploadFields, flow_epoch: scope.flow_epoch, action_id: scope.action_id };
@@ -403,7 +426,7 @@ async function uploadFile(definition, options = {}) {
   if (!active()) throw new Error("文件操作上下文已失效。");
   const result = await uploadMultipart(jobScope ? "/manage/files/upload" : "/files/upload", uploadFields, file, { ...options, isCurrent: active });
   if (!active()) throw new Error("页面或流程步骤已切换，文件已上传但尚未提交任务。");
-  if (targetJob?.task_flow) {
+  if (targetJob?.task_flow || targetJob?.revision?.current > 0) {
     const refreshed = await selectedJobForFile(definition, options);
     if (!active() || !sameManagementStep(targetJob, refreshed)) throw new Error("处理步骤已改变，附件尚未提交。");
   }
@@ -585,6 +608,7 @@ async function home() {
   receiptMotion?.dispose();
   receiptMotion = null;
   receiptViewKey = "";
+  receiptRevisionRequest = null;
   currentToken = "";
   currentBatch = null;
   batchSelection = "";
@@ -592,6 +616,8 @@ async function home() {
   currentProduct = null;
   currentJob = null;
   currentVariant = null;
+  currentCardAttributes = {};
+  currentEntitlements = null;
   const list = await api("/products");
   if (generation !== queueLoadId || location.pathname !== pathname || location.hash !== hash) return;
   app.innerHTML = `<section class="intro home-paper-stack"><section class="intro-copy public-card" data-home-paper="products" tabindex="0" aria-label="${tr("公开商品", "Public products")}"><h1>${list.length ? tr("公开商品", "Public products") : tr("暂无公开商品", "No public products")}</h1><div class="paper-divider" aria-hidden="true"></div>${list.length ? `<p class="caption">${tr("选择商品了解详情，兑换需有效卡密。", "Browse the details. A valid code is required to redeem.")}</p><div class="home-product-list" tabindex="0" role="region" aria-label="${tr("公开商品列表，可上下滚动", "Public product list, scroll vertically")}">${list.map((p, i) => `<article class="product-row">${p.logo ? `<img src="${esc(p.logo)}" alt="">` : `<div class="product-icon">${icon}</div>`}<div class="product-info"><h3>${esc(p.name)}</h3><p>${tr(p.delivery === "service" ? "服务兑换" : "商品领取", p.delivery === "service" ? "Service" : "Digital delivery")} · ${tr(p.mode === "manual" ? "队列处理" : "自动处理", p.mode === "manual" ? "Queue processing" : "Automatic")}</p></div><button class="secondary" data-product="${i}">${tr("查看详情", "Details")}</button></article>`).join("")}</div>` : ""}</section><section class="exchange" data-home-paper="redeem" tabindex="0" aria-label="${tr("卡密兑换", "Redeem a code")}"><h2>${tr("开始兑换", "Redeem your code")}</h2><p>${tr("请使用购买商品时获得的卡密。", "Use the code you received with your purchase.")}</p><form id="form"><div class="field"><label for="code">${tr("兑换卡密", "Redemption code")}</label><div class="code-entry"><textarea class="code" id="code" rows="2" placeholder="XXXXXXXX-XXXXXXXX-XXXXXXXX-XXXXXXXX" required autocomplete="off" spellcheck="false" maxlength="8000"></textarea><button id="paste-code" class="secondary paste-code" type="button">${tr("粘贴", "Paste")}</button></div><p id="code-count" class="caption"></p><p class="caption">${tr("多张卡密请换行，或用空格、逗号分开。验证后仍得到一个领取链接。", "Separate extra codes with new lines, spaces, or commas. You still get one receipt link.")}</p></div><button type="submit" class="full">${tr("验证并继续", "Verify and continue")} →</button><div id="error" class="error" role="alert"></div></form><div class="footnote">${tr("已有领取链接？直接打开即可查看处理进度。", "Already have a receipt link? Open it to check progress.")}</div></section></section>`;
@@ -645,6 +671,7 @@ function openBatch(data) {
       currentProduct = batchProduct(item);
       currentJob = item.job;
       currentVariant = item.variant || item.job.variant || null;
+      acceptReceiptCardInfo(item);
       renderReceipt(item.job);
       return;
     }
@@ -652,6 +679,7 @@ function openBatch(data) {
       currentProduct = batchProduct(item);
       currentJob = item.job || null;
       currentVariant = item.variant || item.job?.variant || null;
+      acceptReceiptCardInfo(item);
       redemptionForm();
       return;
     }
@@ -698,6 +726,7 @@ async function exchangeCode(code, options = {}) {
     currentProduct = data.product;
     currentJob = data.job || null;
     currentVariant = data.variant || data.job?.variant || data.items?.[0]?.variant || null;
+    acceptReceiptCardInfo(data);
     currentBatch = data.batch ? data : null;
     batchSelection = "";
     batchRetryOnly = false;
@@ -781,6 +810,7 @@ async function readReceipt(options = {}) {
     currentProduct = result.product;
     currentJob = result.job || null;
     currentVariant = result.variant || result.job?.variant || result.items?.[0]?.variant || null;
+    acceptReceiptCardInfo(result);
     if (result.batch) {
       currentBatch = result;
       openBatch(result);
@@ -795,15 +825,16 @@ async function readReceipt(options = {}) {
 }
 async function revealReceipt(options = {}) {
   const context = receiptRequestContext(options);
+  const revealGeneration = ++deliveryRevealGeneration;
   const viewPolicy = currentProduct?.view_policy;
   const fields = currentProduct?.outputs || [];
   const result = await api(
     "/receipt/reveal",
-    receiptCardBody(context),
+    receiptCardBody(context, options.revision === undefined ? {} : { revision: options.revision }),
     "POST",
     options,
   );
-  if (context.active()) {
+  if (context.active() && revealGeneration === deliveryRevealGeneration) {
     const content = $("#content");
     if (content) {
       const output = result.output || { content: result.content };
@@ -830,6 +861,54 @@ async function revealReceipt(options = {}) {
   }
   return result;
 }
+async function requestReceiptRevision(message, options = {}) {
+  const context = receiptRequestContext(options);
+  const job = currentJob;
+  const text = String(message || "").trim();
+  const revision = job?.revision?.current ?? 0;
+  if (!context.token || !job?.entitlements?.can_request || job.state !== "succeeded")
+    throw new Error(tr("当前交付不能申请修改，请刷新领取状态。", "This delivery cannot request a revision. Refresh its status."));
+  if (!text || text.length > 10000)
+    throw new Error(tr("请填写修改建议，最多 10000 个字符。", "Enter revision feedback, up to 10,000 characters."));
+  if (options.expected_revision !== undefined && options.expected_revision !== revision)
+    throw new Error(tr("交付轮次已改变，请刷新后再提交。", "The delivery revision changed. Refresh before submitting."));
+  const key = JSON.stringify([context.token, context.cardId, revision]);
+  if (receiptRevisionRequest?.key !== key) receiptRevisionRequest = null;
+  if (receiptRevisionRequest?.promise) {
+    if (receiptRevisionRequest.message !== text)
+      throw new Error(tr("修改建议正在提交，请稍候。", "Revision feedback is being submitted. Please wait."));
+    return receiptRevisionRequest.promise;
+  }
+  if (!receiptRevisionRequest || receiptRevisionRequest.message !== text) {
+    if (!globalThis.crypto?.randomUUID)
+      throw new Error(tr("浏览器无法生成安全的请求标识，请更新浏览器。", "This browser cannot generate a secure request ID. Update your browser."));
+    receiptRevisionRequest = { key, message: text, id: globalThis.crypto.randomUUID(), promise: null };
+  }
+  const request = receiptRevisionRequest;
+  request.promise = (async () => {
+    const result = await api("/receipt/revisions", receiptCardBody(context, {
+      request_id: request.id, expected_revision: revision, message: text,
+    }), "POST", options);
+    if (context.active()) {
+      if (receiptRevisionRequest === request) receiptRevisionRequest = null;
+      const nextJob = result.job || result;
+      if (nextJob.id === job.id && typeof nextJob.state === "string") {
+        if (currentBatch && context.cardId) {
+          const item = currentBatch.items.find((entry) => entry.card_id === context.cardId);
+          if (item) item.job = nextJob;
+        }
+        renderReceipt(nextJob);
+      }
+      try { await readReceipt(options); }
+      catch {
+        if (context.active()) toast(tr("修改申请已提交，状态刷新失败，请刷新页面。", "Revision requested. Refresh the page to reload its status."));
+      }
+    }
+    return result;
+  })();
+  try { return await request.promise; }
+  finally { request.promise = null; }
+}
 async function destroyReceipt(options = {}) {
   const context = receiptRequestContext(options);
   const result = await api(
@@ -841,6 +920,8 @@ async function destroyReceipt(options = {}) {
   if (context.active()) {
     // Invalidate responses issued before deletion, even on this same receipt.
     receiptGeneration++;
+    deliveryRevealGeneration++;
+    receiptRevisionRequest = null;
     clearDeliveryBlobs();
     const destroyedContext = receiptRequestContext(options);
     const content = $("#content");
@@ -959,7 +1040,7 @@ function redemptionForm() {
           ? `<button type="button" class="secondary" id="copy-params">${tr("填到其余卡密", "Copy to the other codes")}</button>`
           : "";
         const saved = item.job?.state === "needs_input" ? item.job.params || {} : {};
-        return `<section class="batch-card"><h3>${tr("卡密", "Code")} ···${esc(item.suffix || "")}${variant}</h3>${item.job?.state === "needs_input" ? `<p class="error">${esc(item.job.message)}</p>` : ""}${copy}${itemProduct.parameters.map((field) => parameterFields(`param-${item.card_id}-`, field, saved[field.key] || "")).join("")}</section>`;
+        return `<section class="batch-card"><h3>${tr("卡密", "Code")} ···${esc(item.suffix || "")}${variant}</h3>${item.job?.state === "needs_input" ? `<p class="error">${esc(item.job.message)}</p>` : ""}${frozenCardInfo(item.card_attributes || item.job?.card_attributes, item.entitlements || item.job?.entitlements)}${copy}${itemProduct.parameters.map((field) => parameterFields(`param-${item.card_id}-`, field, saved[field.key] || "")).join("")}</section>`;
       }).join("")
     : p.parameters.map((field) => parameterFields(`param-`, field, currentJob?.state === "needs_input" ? currentJob.params?.[field.key] || "" : "")).join("");
   const started = currentBatch
@@ -971,7 +1052,7 @@ function redemptionForm() {
   const countNote = pending
     ? `<p class="caption">${tr(`一次提交 ${pending.length} 张卡密。文件需要分别上传，其余内容可以从第一张复制。`, `Submit ${pending.length} codes together. Upload each file separately; other fields can be copied from the first code.`)}</p>`
     : `<p class="caption">${tr("提交后会创建兑换任务，请保存领取链接。", "Save your receipt link after submitting.")}</p>`;
-  app.innerHTML = `<div class="narrow">${back}<h1>${esc(p.name)}</h1><div class="steps"><div class="step active">${tr("卡密已验证", "Code verified")}</div><div class="step active">${tr("填写信息", "Your details")}</div><div class="step">${tr("领取商品", "Collect")}</div></div>${p.image ? `<img class="product-cover" src="${esc(p.image)}" alt="">` : ""}<div class="markdown">${md(p.description)}</div><div class="panel"><h2>${tr("确认兑换信息", "Confirm your details")}</h2><form id="form">${fields}<button type="submit" class="full">${tr("确认兑换", "Confirm redemption")}</button>${countNote}<div id="error" class="error" role="alert"></div></form>${started.length ? `<div class="batch-started"><h3>${tr("已开始处理", "Already started")}</h3><div class="batch-list">${started.map(batchItemButton).join("")}</div></div>` : ""}</div></div>`;
+  app.innerHTML = `<div class="narrow">${back}<h1>${esc(p.name)}</h1><div class="steps"><div class="step active">${tr("卡密已验证", "Code verified")}</div><div class="step active">${tr("填写信息", "Your details")}</div><div class="step">${tr("领取商品", "Collect")}</div></div>${p.image ? `<img class="product-cover" src="${esc(p.image)}" alt="">` : ""}<div class="markdown">${md(p.description)}</div>${pending ? "" : frozenCardInfo(currentCardAttributes, currentEntitlements)}<div class="panel"><h2>${tr("确认兑换信息", "Confirm your details")}</h2><form id="form">${fields}<button type="submit" class="full">${tr("确认兑换", "Confirm redemption")}</button>${countNote}<div id="error" class="error" role="alert"></div></form>${started.length ? `<div class="batch-started"><h3>${tr("已开始处理", "Already started")}</h3><div class="batch-list">${started.map(batchItemButton).join("")}</div></div>` : ""}</div></div>`;
   on("#batch-back", () => {
     selectBatchCard();
     openBatch(currentBatch);
@@ -1113,15 +1194,48 @@ function renderBatch(data) {
   });
   pollBatch(data);
 }
+function hasReceiptDelivery(job) {
+  return job.state !== "destroyed" && job.delivery === "content" &&
+    (job.state === "succeeded" || Boolean(job.last_delivery));
+}
+function revisionUnavailableReason(reason, remaining) {
+  const reasons = {
+    revoked: ["卡密已撤销，不能申请修改。", "This code was revoked. Revisions are unavailable."],
+    rejected: ["任务已拒绝处理，不能申请修改。", "This task was rejected. Revisions are unavailable."],
+    destroyed: ["交付内容已销毁。", "The delivery was destroyed."],
+    expired: ["卡密已过期，不能申请修改。", "This code expired. Revisions are unavailable."],
+    shop_disabled: ["店铺暂停服务，暂时不能申请修改。", "The shop is paused. Revisions are unavailable."],
+    exhausted: ["修改额度已用完，仍可查看已交付内容。", "No revisions remain. Existing deliveries remain available."],
+    in_progress: ["修改正在处理中，之前的交付仍可查看。", "A revision is in progress. Previous deliveries remain available."],
+    not_delivered: ["本轮完成后可提交修改建议。", "You can request a revision after this round finishes."],
+  };
+  const value = Object.hasOwn(reasons, reason) ? reasons[reason] : reasons[remaining === 0 ? "exhausted" : "not_delivered"];
+  return tr(...value);
+}
+function receiptRevisionMarkup(job) {
+  const allowance = job.entitlements;
+  if (!allowance || job.state === "destroyed") return "";
+  const label = localized(allowance.label) || tr("修改额度", "Revision allowance");
+  const round = Number.isSafeInteger(job.revision?.current) ? job.revision.current : 0;
+  return `<section class="receipt-revisions"><div class="section-head"><h3>${esc(label)}</h3><span class="caption">${esc(tr(`剩余 ${allowance.remaining} / ${allowance.total}`, `${allowance.remaining} of ${allowance.total} remaining`))}</span></div>${round ? `<p class="caption">${tr(`第 ${round} 轮修改`, `Revision ${round}`)}</p>` : ""}${job.revision?.is_revision && job.revision.message ? `<details class="revision-feedback"><summary>${tr("本轮修改建议", "Current revision feedback")}</summary><p>${esc(job.revision.message)}</p></details>` : ""}${allowance.can_request ? `<form id="receipt-revision-form"><div class="field"><label for="revision-message">${tr("需要修改什么？", "What would you like changed?")}</label><textarea id="revision-message" required maxlength="10000" rows="4" placeholder="${tr("说明需要调整的内容，保留原有需求与本次修改的区别。", "Describe what should change from the delivered result.")}"></textarea></div><p class="caption">${tr("提交后扣除 1 次修改额度，并重新进入处理队列。等待期间仍可查看之前的交付。", "Submitting uses one revision and returns the task to the queue. Previous deliveries remain available while you wait.")}</p><button id="request-revision" type="submit">${tr("提交修改建议", "Request a revision")}</button></form>` : `<p class="caption">${esc(revisionUnavailableReason(allowance.reason, allowance.remaining))}</p>`}</section>`;
+}
+function receiptDeliveryVersions(job) {
+  const versions = (job.deliveries || []).filter((value) => Number.isSafeInteger(value.revision) && value.revision >= 0);
+  if (!hasReceiptDelivery(job) || versions.length < 2) return "";
+  const latest = job.last_delivery?.revision ?? versions[versions.length - 1].revision;
+  return `<div class="field delivery-version-field"><label for="delivery-revision">${tr("交付版本", "Delivery version")}</label><select id="delivery-revision">${versions.map((version) => `<option value="${version.revision}" ${version.revision === latest ? "selected" : ""}>${version.revision === 0 ? tr("初次交付", "Original delivery") : tr(`第 ${version.revision} 轮修改`, `Revision ${version.revision}`)}${version.revision === latest ? tr(" · 最新", " · Latest") : ""}</option>`).join("")}</select></div>`;
+}
 function renderReceipt(j) {
   currentJob = j;
+  currentCardAttributes = j.card_attributes || currentCardAttributes;
+  currentEntitlements = j.entitlements || null;
   stopPoll();
   if (renderTaskFlow(j)) return;
   window.ExtoreTaskFlow?.dispose(app);
   window.ExtoreWebMCP?.refresh();
   const p = currentProduct;
   const waiting = ["processing", "queued"].includes(j.state);
-  const viewKey = JSON.stringify([currentToken, j.id, j.state, j.can_retry, j.retry_mode, j.delivery, j.view_policy, p.name, j.support_email || p.support_email, lang, j.variant || currentVariant]);
+  const viewKey = JSON.stringify([currentToken, j.id, j.state, j.can_retry, j.retry_mode, j.delivery, j.view_policy, p.name, j.support_email || p.support_email, lang, j.variant || currentVariant, j.entitlements, j.revision, j.deliveries, j.last_delivery]);
   if (receiptViewKey === viewKey) {
     updateReceiptView(j);
     pollReceipt(j);
@@ -1134,7 +1248,7 @@ function renderReceipt(j) {
   const batchItem = currentBatch?.items?.find((item) => item.card_id === batchSelection);
   const batchBack = batchItem ? `<button id="batch-back" class="secondary" type="button">← ${tr("全部卡密", "All codes")}</button>` : "";
   const suffixLine = batchItem ? `<p class="caption">${tr("卡密尾号", "Code ending")} ···${esc(batchItem.suffix || "")}</p>` : "";
-  app.innerHTML = `<div class="narrow ${waiting ? "receipt-waiting" : ""}">${batchBack}<h1>${esc(p.name)}</h1>${suffixLine}${variant?.name ? `<p class="caption">${tr("规格：", "Variant: ")}${esc(variant.name)}</p>` : ""}<div class="steps"><div class="step active">${tr("卡密已验证", "Code verified")}</div><div class="step active">${tr("信息已提交", "Details submitted")}</div><div class="step ${j.state === "succeeded" ? "active" : ""}">${tr("领取商品", "Collect")}</div></div><section class="panel receipt-panel">${waiting ? '<div class="paper-divider waiting-top" aria-hidden="true"></div>' : ""}<div class="section-head"><h2>${tr("兑换进度", "Redemption progress")}</h2>${status(j)}</div><p id="customer-message"></p><p id="queue-position" class="caption"></p><div id="fulfillment-steps"></div>${waiting ? `<div class="progress" role="progressbar" aria-label="${tr("处理进度", "Processing progress")}" aria-valuemin="0" aria-valuemax="100" aria-valuenow="${j.progress}"><span></span></div><p id="progress-label" class="caption"></p>${window.ExtoreMotion?.waitingMarkup(lang) || ""}<button id="motion-toggle" class="secondary motion-toggle" aria-pressed="${waitingAnimationPaused}">${waitingAnimationPaused ? tr("播放动画", "Play animation") : tr("暂停动画", "Pause animation")}</button>${reminderMarkup(j)}` : ""}<div id="content"></div><div class="actions">${j.state === "succeeded" && j.delivery === "content" ? `<button id="reveal">${tr(j.view_policy === "once" ? "领取内容（仅一次）" : "查看交付内容", j.view_policy === "once" ? "Reveal once" : "View your goods")}</button>` : ""}${j.can_retry ? `<button id="retry">${tr(j.state === "needs_input" && j.retry_mode === "reuse" ? "使用原资料重试" : "检查信息并重试", j.state === "needs_input" && j.retry_mode === "reuse" ? "Retry with original details" : "Review details and retry")}</button>` : ""}${j.state === "succeeded" ? `<button id="destroy" class="danger">${tr("立即销毁", "Destroy now")}</button>` : ""}</div><div id="error" class="error" role="alert"></div>${j.state === "destroyed" ? `<p class="caption">${tr("内容已永久删除，此链接无法再领取。", "The content has been deleted. This link can no longer reveal it.")}</p>` : ""}${waiting ? '<div class="paper-divider waiting-bottom" aria-hidden="true"></div>' : ""}</section><div class="receipt-link"><strong>${tr("保存领取链接", "Save your receipt link")}</strong><p>${esc(location.origin + "/receipt#" + currentToken)}</p><button id="copy" class="secondary">${tr("复制链接", "Copy link")}</button><p class="caption">${batchItem ? tr("这个链接包含全部卡密，有效期 30 天，请勿转发给他人。", "This link covers every code. Valid for 30 days. Do not forward it.") : tr("有效期 30 天。链接是领取凭证，请勿转发给他人。", "Valid for 30 days. Anyone with this link can access the receipt.")}</p></div></div>`;
+  app.innerHTML = `<div class="narrow ${waiting ? "receipt-waiting" : ""}">${batchBack}<h1>${esc(p.name)}</h1>${suffixLine}${variant?.name ? `<p class="caption">${tr("规格：", "Variant: ")}${esc(variant.name)}</p>` : ""}${frozenCardInfo(currentCardAttributes, currentEntitlements, false)}<div class="steps"><div class="step active">${tr("卡密已验证", "Code verified")}</div><div class="step active">${tr("信息已提交", "Details submitted")}</div><div class="step ${j.state === "succeeded" ? "active" : ""}">${tr("领取商品", "Collect")}</div></div><section class="panel receipt-panel">${waiting ? '<div class="paper-divider waiting-top" aria-hidden="true"></div>' : ""}<div class="section-head"><h2>${tr("兑换进度", "Redemption progress")}</h2>${status(j)}</div><p id="customer-message"></p><p id="queue-position" class="caption"></p><div id="fulfillment-steps"></div>${waiting ? `<div class="progress" role="progressbar" aria-label="${tr("处理进度", "Processing progress")}" aria-valuemin="0" aria-valuemax="100" aria-valuenow="${j.progress}"><span></span></div><p id="progress-label" class="caption"></p>${window.ExtoreMotion?.waitingMarkup(lang) || ""}<button id="motion-toggle" class="secondary motion-toggle" aria-pressed="${waitingAnimationPaused}">${waitingAnimationPaused ? tr("播放动画", "Play animation") : tr("暂停动画", "Pause animation")}</button>${reminderMarkup(j)}` : ""}${receiptDeliveryVersions(j)}<div id="content"></div><div class="actions">${hasReceiptDelivery(j) ? `<button id="reveal">${tr(j.view_policy === "once" ? "领取内容（仅一次）" : "查看交付内容", j.view_policy === "once" ? "Reveal once" : "View your goods")}</button>` : ""}${j.can_retry ? `<button id="retry">${tr(j.state === "needs_input" && j.retry_mode === "reuse" ? "使用原资料重试" : "检查信息并重试", j.state === "needs_input" && j.retry_mode === "reuse" ? "Retry with original details" : "Review details and retry")}</button>` : ""}${hasReceiptDelivery(j) || j.state === "succeeded" ? `<button id="destroy" class="danger">${tr("立即销毁", "Destroy now")}</button>` : ""}</div>${receiptRevisionMarkup(j)}<div id="error" class="error" role="alert"></div>${j.state === "destroyed" ? `<p class="caption">${tr("内容已永久删除，此链接无法再领取。", "The content has been deleted. This link can no longer reveal it.")}</p>` : ""}${waiting ? '<div class="paper-divider waiting-bottom" aria-hidden="true"></div>' : ""}</section><div class="receipt-link"><strong>${tr("保存领取链接", "Save your receipt link")}</strong><p>${esc(location.origin + "/receipt#" + currentToken)}</p><button id="copy" class="secondary">${tr("复制链接", "Copy link")}</button><p class="caption">${batchItem ? tr("这个链接包含全部卡密，有效期 30 天，请勿转发给他人。", "This link covers every code. Valid for 30 days. Do not forward it.") : tr("有效期 30 天。链接是领取凭证，请勿转发给他人。", "Valid for 30 days. Anyone with this link can access the receipt.")}</p></div></div>`;
   updateReceiptView(j);
   if (waiting && window.ExtoreMotion) {
     receiptMotion = window.ExtoreMotion.mount(app);
@@ -1148,12 +1262,26 @@ function renderReceipt(j) {
   });
   on("#reveal", async () => {
     if (j.view_policy === "once" && !confirm(tr("内容只能打开一次，打开后请自行保存。继续领取？", "This content can only be revealed once. Save it after opening. Continue?"))) return;
-    await revealReceipt();
+    const revision = $("#delivery-revision")?.value;
+    await revealReceipt(revision === undefined || revision === "" ? {} : { revision: Number(revision) });
   });
   on("#destroy", async () => {
-    if (!confirm(tr("永久删除交付内容并关闭领取。继续销毁？", "Permanently delete the delivery and disable access?"))) return;
+    if (!confirm(tr("永久删除所有版本的交付内容并关闭领取。继续销毁？", "Permanently delete every delivery version and disable access?"))) return;
     await destroyReceipt();
   });
+  on("#delivery-revision", () => {
+    deliveryRevealGeneration++;
+    clearDeliveryBlobs();
+    const content = $("#content");
+    if (content) content.innerHTML = "";
+  }, "change");
+  on("#receipt-revision-form", async () => {
+    const button = $("#request-revision");
+    if (button?.disabled) return;
+    if (button) button.disabled = true;
+    try { await requestReceiptRevision($("#revision-message").value); }
+    finally { if (button?.isConnected) button.disabled = false; }
+  }, "submit");
   on("#batch-back", () => {
     selectBatchCard();
     openBatch(currentBatch);
@@ -1575,7 +1703,7 @@ async function renderJobs(filter = "", requestedProductId = queueProductId, requ
   let batchDialogGeneration = 0;
   const dialogCurrent = (generation) => active() && generation === batchDialogGeneration;
   const closeBatchDialog = () => { batchDialogGeneration++; $("#batch-form").innerHTML = ""; };
-  const taskInputs = (j) => `<details class="queue-input"><summary>${tr("查看需求与附件", "View requirements and attachments")}${queueInputFiles(j).length ? ` · ${queueInputFiles(j).length}` : ""}</summary><pre>${esc(JSON.stringify(queueVisibleParams(j), null, 2))}</pre>${queueInputFiles(j).map((file) => `<p class="queue-input-file"><button type="button" class="secondary" data-management-download="${esc(file.id)}">${esc(file.filename)}</button><span class="caption">${Math.ceil(file.size / 1024)} KiB</span></p>`).join("")}</details>`;
+  const taskInputs = (j) => `<details class="queue-input"><summary>${tr("查看需求与附件", "View requirements and attachments")}${queueInputFiles(j).length ? ` · ${queueInputFiles(j).length}` : ""}</summary>${j.revision?.is_revision ? `<div class="revision-feedback"><h4>${tr(`第 ${j.revision.current} 轮修改建议`, `Feedback for revision ${j.revision.current}`)}</h4><p>${esc(j.revision.message || "")}</p></div>` : ""}${j.card_attributes && Object.keys(j.card_attributes).length ? `<details><summary>${tr("卡密绑定属性", "Frozen code attributes")}</summary><pre>${esc(JSON.stringify(j.card_attributes, null, 2))}</pre></details>` : ""}<pre>${esc(JSON.stringify(queueVisibleParams(j), null, 2))}</pre>${queueInputFiles(j).map((file) => `<p class="queue-input-file"><button type="button" class="secondary" data-management-download="${esc(file.id)}">${esc(file.filename)}</button><span class="caption">${Math.ceil(file.size / 1024)} KiB</span></p>`).join("")}</details>`;
   const taskWorker = (j) => j.processing_worker && window.ExtoreWorkerIdentity ? window.ExtoreWorkerIdentity.markup(j.processing_worker, { language: lang, compact: true }) : "";
   $("#workspace").innerHTML = `<section class="queue-workspace">
     <header class="queue-page-heading"><div><h2>${tr("处理队列", "Processing queue")}</h2><p class="caption">${manual ? tr("先领取任务，再更新进度或交付。", "Claim a task before updating progress or delivering results.") : tr("商品处理器自动执行；这里查看处理记录。", "The product processor runs automatically. View its activity here.")}</p></div><button id="copy-queue-ai" class="secondary">${tr("复制 AI 提示词", "Copy AI prompt")}</button></header>
@@ -1631,8 +1759,8 @@ async function renderJobs(filter = "", requestedProductId = queueProductId, requ
     if (!active()) throw new Error("商品队列已切换，请重新选择任务。");
     const selected = body.ids.map((id) => snapshots.find((row) => row.id === id && row.product_id === productId));
     if (selected.some((row) => !row)) throw new Error("任务不属于当前商品队列，请刷新后重新选择。");
-    const flowScopes = Object.fromEntries(selected.filter((row) => row.task_flow).map((row) => {
-      if (body.action === "retry") {
+    const flowScopes = Object.fromEntries(selected.filter((row) => row.task_flow || row.revision?.current > 0).map((row) => {
+      if (body.action === "retry" || !row.task_flow) {
         if (!Number.isSafeInteger(row.attempt) || row.attempt < 1) throw new Error("任务尝试信息无效，请刷新队列。");
         return [row.id, { attempt: row.attempt }];
       }
@@ -1746,7 +1874,8 @@ async function renderJobs(filter = "", requestedProductId = queueProductId, requ
               throw new Error("附件不属于此任务、字段或当前尝试，请刷新后重新选择。");
             const retained = definition.type === "images" ? JSON.stringify(existing) : existing[0] || "";
             const flowScope = managementFlowScope(selectedRows[0]);
-            output[definition.key] = await uploadFieldFiles(input, definition, retained, "/manage/files/upload", { job_id: selected[0], ...(flowScope ? { flow_epoch: flowScope.flow_epoch, action_id: flowScope.action_id } : {}) }, { ...requestOptions, isCurrent: () => dialogCurrent(generation) });
+            if (!Number.isSafeInteger(selectedRows[0].attempt) || selectedRows[0].attempt < 1) throw new Error("任务尝试信息无效，请刷新队列。");
+            output[definition.key] = await uploadFieldFiles(input, definition, retained, "/manage/files/upload", { job_id: selected[0], attempt: selectedRows[0].attempt, ...(flowScope ? { flow_epoch: flowScope.flow_epoch, action_id: flowScope.action_id } : {}) }, { ...requestOptions, isCurrent: () => dialogCurrent(generation) });
           } else output[definition.key] = input.value;
           if (!dialogCurrent(generation)) return;
         }
@@ -2120,6 +2249,8 @@ async function start() {
   pipelineAuthView?.dispose();
   pipelineAuthView = null;
   receiptGeneration++;
+  deliveryRevealGeneration++;
+  receiptRevisionRequest = null;
   receiptMotion?.dispose();
   window.ExtoreMotion?.disposeHome?.(app);
   receiptMotion = null;
@@ -2145,6 +2276,8 @@ async function start() {
       currentProduct = null;
       currentJob = null;
       currentVariant = null;
+      currentCardAttributes = {};
+      currentEntitlements = null;
       queueProduct = null;
       $("#header-context").textContent = tr("商家 CLI 授权", "Merchant CLI approval");
       ownerCliApproval = window.ExtoreOwnerCli.mount({ root: app, requestId: hash.slice(1), api, language: () => lang });
@@ -2249,6 +2382,7 @@ window.ExtoreWebMCP?.configure({
     flow: flowAction,
     retryOriginal: retryOriginalReceipt,
     reveal: revealReceipt,
+    requestRevision: requestReceiptRevision,
     destroy: destroyReceipt,
     navigate,
     selectQueue: async (productId, options = {}) => {

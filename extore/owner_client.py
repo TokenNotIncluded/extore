@@ -741,11 +741,16 @@ def add_parser(commands):
     ):
         parser = sub.add_parser(name, aliases=["succeed"] if name == "complete" else [])
         _scope(parser, product=True)
+        if name == "job":
+            parser.add_argument(
+                "--detail",
+                action="store_true",
+                help="also include delivery history metadata",
+            )
         if name not in ("jobs", "job", "files", "download"):
             parser.add_argument("--flow-epoch", type=remote._flow_epoch)
             parser.add_argument("--action-id", type=remote._action_id)
-            if name != "upload":
-                parser.add_argument("--attempt", type=remote._attempt)
+            parser.add_argument("--attempt", type=remote._attempt)
         if name != "jobs":
             parser.add_argument("job_id", nargs="+" if name == "claim" else None)
         if name in ("progress", "complete", "fail"):

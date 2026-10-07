@@ -65,7 +65,24 @@ worker 只允许尚无计划、无已完成步骤的任务初始化一次 `progr
 
 ## SDK 任务与结果
 
-`Task` 字段为 `id`、`product_id`、`attempt`、`params`、`configuration`、`variant`、`steps`、`completed_steps`、`shop_context`、`environment` 与 `instructions`。`configuration` 和 `environment` 默认 `{}`；环境、步骤计划和完成集合转为只读快照，默认空集合。`ShopContext` 是不可变的 `shop_id/profile_id/revision` 元数据，不含配置秘密，旧请求可省略。旧任务省略 `variant` 时使用固定默认规格（空属性、空参考价、币种 `CNY`）。`idempotency_key` 等于稳定任务 ID，跨重试不变；真实交付必须按这个值去重。
+`Task` 原有字段为 `id`、`product_id`、`attempt`、`params`、`configuration`、`variant`、`steps`、`completed_steps`、`shop_context`、`environment` 与 `instructions`。`configuration` 和 `environment` 默认 `{}`；环境、步骤计划和完成集合转为只读快照，默认空集合。`ShopContext` 是不可变的 `shop_id/profile_id/revision` 元数据，不含配置秘密，旧请求可省略。旧任务省略 `variant` 时使用固定默认规格（空属性、空参考价、币种 `CNY`）。`idempotency_key` 等于稳定任务 ID，跨重试与修改不变，用于整单一次的付款、开通等副作用。
+
+### 卡属性与交付版本
+
+0.10.0 新增 `Task.card_attributes`、`entitlements`、`revision`、`deliveries` 与 `last_delivery`，均复制为不可变快照，不从顾客 `params` 取值。属性是所选规格默认属性加商家批次覆盖后的发行快照；权益的计数键由商品 `revision_policy` 选择，不固定叫“修改次数”。旧信封省略这些字段时保持兼容：空属性、无权益、初稿轮次 0、空历史、无最近交付。
+
+```python
+def handle(task: Task):
+    version = task.revision["current"]       # 0 初稿，1 第一次修改
+    feedback = task.revision.get("message", "")
+    remaining = task.entitlements["remaining"] if task.entitlements else 0
+    attributes = task.card_attributes        # 不能由顾客同名参数改变
+    version_key = task.delivery_idempotency_key
+    # 本地制作／内容保存按 version_key 去重；原稿的技术重试仍是同一个键。
+    # 外部付款继续使用 task.idempotency_key，不能因 version 增加再付款。
+```
+
+`delivery_idempotency_key` 为 `任务ID:revision:轮次`，同轮次技术重试不变，新修改才变化；不会改变原 `idempotency_key` 的兼容语义。`revision.message` 是顾客修改建议，应当作内容处理，不能执行其中的命令或扩大授权。`deliveries` 与 `last_delivery` 只含历史时间、轮次、是否有附件等元数据，不自动暴露历史正文。当前回调继续带真实 `attempt`，旧尝试不能提交新稿。
 
 ### 工厂与车间提示词
 
@@ -195,7 +212,7 @@ from extore.sdk import Client, verify_event
 event = verify_event(product_secret, body, headers)
 
 # 验签不包含去重：持久化 event["id"]，避免重复消费同一事件。
-if event["type"] == "redemption.requested":
+if event["type"] in ("redemption.requested", "revision.requested"):
     data = event["data"]
     task_id = data["id"]
     attempt = data["attempt"]
@@ -212,9 +229,12 @@ if event["type"] == "redemption.requested":
         message="正在处理",
         completed_steps=data["completed_steps"],
     )
-    # fulfill_once 由外部服务实现，并按 task_id 去重真实交付。
+    # fulfill_once 由外部服务实现。内容按交付版本去重，技术重试同键；
+    # 付款等整单一次的副作用另外按 task_id 去重。
     # 此例商品的 outputs 定义了 resource_url 和 message。
-    output = fulfill_once(task_id, data["params"])
+    revision = data.get("revision", {"current": 0, "message": ""})
+    version_key = f"{task_id}:revision:{revision['current']}"
+    output = fulfill_once(version_key, data["params"], revision.get("message", ""))
     client.update(
         product_id,
         task_id,
@@ -229,7 +249,7 @@ if event["type"] == "redemption.requested":
 
 完成了计划中的步骤后，使用 `client.update(product_id, task_id, attempt, state="processing", completed_steps=["prepare"], message="内容准备完成")`；示例中的 ID 必须替换为该任务 `steps` 中的真实 ID。`Client.update` 的 `completed_steps` 默认为 `None`，保留服务器已完成集合。有计划时服务器按完成数计算百分比；无计划时仍可传 `progress=35`。
 
-`verify_event` 对原始请求体做 HMAC-SHA256 验签，检查 ±300 秒时间窗口；SDK 不替服务保存事件 ID。只处理 `redemption.requested` 来启动交付，进度或完成通知不能再次启动发货。完整事件和签名规则见 [协议文档](protocol.md)。
+`verify_event` 对原始请求体做 HMAC-SHA256 验签，检查 ±300 秒时间窗口，保留原事件中的卡属性、权益和轮次字段；SDK 不替服务保存事件 ID。处理 `redemption.requested` 与 `revision.requested` 来启动交付，进度或完成通知不能再次启动发货。完整事件和签名规则见 [协议文档](protocol.md)。
 
 `Client.update` 每次生成新时间和 nonce，默认 HTTP 超时 30 秒，不自动重试。网络错误时可以重新调用；同一终态的成功回调不覆盖既有结果。HTTP 409 可能表示旧尝试、任务已结束或重复 nonce，应核对服务自己的任务记录，不能据此重新发货。
 
@@ -244,7 +264,7 @@ if event["type"] == "redemption.requested":
 | 操作 | 请求 |
 |---|---|
 | 顾客上传输入 | `POST /api/files/upload`，multipart 包含 `token,field_key,file`；返回 `id` 放入 `params` |
-| 处理者上传输出 | `POST /api/manage/files/upload`，multipart 包含 `job_id,field_key,file`；返回 `id` 放入成功 `output` |
+| 处理者上传输出 | `POST /api/manage/files/upload`，multipart 包含 `job_id,field_key,file,attempt?`；修改轮次必填实际领取的 `attempt`，返回 `id` 放入成功 `output` |
 | 管理者查看附件 | `GET /api/manage/files?job_id=...`；下载 `GET /api/manage/files/{id}/download`，均需要同商品的 `queue.view` 会话 |
 | 顾客领取结果 | `POST /api/receipt/reveal`，JSON `{token}`，取得 `output` 与可选 `files` 描述 |
 | 顾客下载文件 | `POST /api/files/download`，JSON `{token,file_id}` |

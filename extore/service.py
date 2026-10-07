@@ -24,6 +24,7 @@ def product(c, pid):
     config.setdefault("processor_id", "")
     config.setdefault("processor_config", {})
     config.setdefault("task_flow", None)
+    config.setdefault("revision_policy", None)
     # Old products predate explicit result schemas. Keep their existing receipts
     # and callbacks compatible without rewriting stored merchant configuration.
     config.setdefault(
@@ -91,6 +92,9 @@ def card_product(c, card):
             "task_flow": snapshot["definition"],
         }
     p = product(c, card["product_id"])
+    from .card_entitlements import frozen_policy
+
+    p["revision_policy"] = frozen_policy(c, card["id"])
     # An old card must not acquire a flow merely because its product was edited.
     p["task_flow"] = None
     frozen = text_cards.card_definition(c, card["id"])
@@ -100,7 +104,14 @@ def card_product(c, card):
 
 
 def issue_cards(
-    c, pid, count, label="", expires=None, variant_id="default", routed=None
+    c,
+    pid,
+    count,
+    label="",
+    expires=None,
+    variant_id="default",
+    routed=None,
+    attributes=None,
 ):
     from .proxy_routes import default_issuer_route, wrap_issued_codes
     from .shops import require_enabled_product
@@ -118,6 +129,14 @@ def issue_cards(
         fail("商品规格不存在", 400)
     if not variant["enabled"]:
         fail("商品规格已停用，不能发行新卡密", 409)
+    from .card_entitlements import validate_capacity
+    from .variants import validate_attributes
+
+    try:
+        effective = validate_attributes({**variant["attributes"], **(attributes or {})})
+        validate_capacity(effective, p.get("revision_policy"))
+    except ValueError as error:
+        fail(str(error))
     if p["mode"] == "script":
         from .processor_profiles import freeze_card_binding, issue_configuration
 
@@ -145,6 +164,7 @@ def issue_cards(
         expires=expires,
         variant_id=variant_id,
         variant_snapshot=variant,
+        attributes=attributes,
     )
     return wrap_issued_codes(c, codes, route)
 
@@ -375,7 +395,7 @@ def bootstrap_progress_plan(c, row, steps):
     )
 
 
-def job_view(c, row, staff=False):
+def job_view(c, row, staff=False, *, include_deliveries=True):
     p = job_product(c, row)
     result = {
         k: row[k]
@@ -413,7 +433,7 @@ def job_view(c, row, staff=False):
                 row["state"] == "failed"
                 and row["retryable"]
                 and p["allow_retry"]
-                and row["attempt"] < p["max_attempts"]
+                and _round_attempt(row) < p["max_attempts"]
             )
         )
         and not card_expired(c, row["card_id"])
@@ -456,6 +476,9 @@ def job_view(c, row, staff=False):
         from .files import listfiles
 
         result["files"] = listfiles(c, row)
+    from .card_entitlements import job_context
+
+    result.update(job_context(c, row, include_deliveries=include_deliveries))
     from . import task_flow
 
     if task_flow.is_flow(c, row):
@@ -485,6 +508,12 @@ def job_view(c, row, staff=False):
                 result["action_id"] = execution["action_id"]
                 result["protected_fields"] = sorted(protected)
     return result
+
+
+def _round_attempt(row):
+    from .card_entitlements import round_attempt
+
+    return round_attempt(row)
 
 
 def submit(c, card, params):
@@ -518,7 +547,7 @@ def submit(c, card, params):
         if row["state"] == "failed" and (
             not row["retryable"]
             or not p["allow_retry"]
-            or row["attempt"] >= p["max_attempts"]
+            or _round_attempt(row) >= p["max_attempts"]
         ):
             fail("此任务不能自动重试，请联系商家", 409)
         progress_snapshot(c, row)
@@ -527,7 +556,15 @@ def submit(c, card, params):
             "UPDATE jobs SET state='queued',params=?,content=NULL,result_json=NULL,message='',progress=0,completed_steps='[]',attempt=attempt+1,retryable=0,claimed_by=NULL,lease=NULL,updated=? WHERE id=?",
             (json.dumps(clean), time.time(), row["id"]),
         )
-        c.execute("UPDATE cards SET state='reserved' WHERE id=?", (card["id"],))
+        c.execute(
+            "UPDATE cards SET state=? WHERE id=?",
+            (
+                "used"
+                if "revision_round" in row.keys() and row["revision_round"]
+                else "reserved",
+                card["id"],
+            ),
+        )
         jid = row["id"]
     else:
         if card["state"] != "ready":
@@ -635,6 +672,24 @@ def _apply_simple_update(c, jid, update: JobUpdate, *, product_override=None):
     if not plan and update.state == "processing" and progress < row["progress"]:
         fail("进度不能倒退", 409)
     content = output_content(p, output) if output is not None else None
+    if output is not None and row["revision_round"] > 0:
+        from .card_entitlements import allocated_bytes
+        from .files import MAX_CARD_BYTES
+        from .storage import check_storage_quota
+
+        extra = len((content or "").encode("utf-8")) + len(
+            json.dumps(output, ensure_ascii=False).encode("utf-8")
+        )
+        stored_files = c.execute(
+            "SELECT COALESCE(SUM(size),0) FROM job_files WHERE card_id=? AND content IS NOT NULL",
+            (row["card_id"],),
+        ).fetchone()[0]
+        if (
+            stored_files + allocated_bytes(c, card_id=row["card_id"]) + extra
+            > MAX_CARD_BYTES
+        ):
+            fail("此卡密的交付历史和文件总量已达到容量上限", 413)
+        check_storage_quota(c, extra, product_id=row["product_id"])
     progress = 100 if update.state == "succeeded" else progress
     c.execute(
         "UPDATE jobs SET state=?,progress=?,message=?,content=?,result_json=?,completed_steps=?,retryable=?,updated=?,lease=? WHERE id=?",

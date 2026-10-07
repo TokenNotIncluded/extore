@@ -719,6 +719,9 @@ async def deliver_v2(context, *, recheck=None):
     }
     if context.get("instructions") is not None:
         payload["instructions"] = context["instructions"]
+    for key in ("card_attributes", "entitlements", "revision", "last_delivery"):
+        if key in context:
+            payload[key] = context[key]
     raw = _json(payload)
     if len(raw) > MAX_RESULT_BYTES:
         raise ValueError("私有处理器任务输入过大")

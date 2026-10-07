@@ -63,6 +63,12 @@ CLI 在发请求前把请求编号和范围存入私有 profile。响应丢失�
 
 后续操作使用 `next` 返回的 `product_id`、`grant_id`、任务 ID 和 `job.attempt`。流程任务同时携带返回的 `flow_epoch` 和 `action_id`，避免旧尝试或旧节点的结果覆盖当前任务。
 
+0.10.0 的 `job` 与 `execution` 还保留 `card_attributes`、`entitlements`、`revision` 和 `last_delivery`；完整 `deliveries` 历史只在 `next --detail` 或 `job --detail` 返回，避免每轮把历史列表重复交给模型。初稿的 `revision.current=0`；顾客消耗已发行的修改权益后，同一任务以新的交付轮次重新进入队列。先读取 `revision.message` 与最近交付元数据，再处理原 `params` 和本轮输出定义；属性由商家冻结，不能相信顾客参数里同名的计数。技术重试增加 `attempt`，不会再扣权益或增加交付轮次。每个写操作仍携带本次领取的最新 `attempt`；旧轮次的结果不能覆盖新稿。
+
+涉及内容版本的本地去重可以使用 `(job.id, revision.current)`，技术重试保持同键；外部付款等只执行一次的副作用继续使用稳定任务 ID，不因修改再付款。`next --watch` 同样等待后续修改任务，无需把已处理任务全量读取到模型，也不自动扫描其他商品或未来授权范围。
+
+修改轮次的所有处理写入都需携带领取时的 `--attempt`，包括独立的 `upload`；`complete --file` 会将同一个明确尝试同时传给上传与完成。漏传或使用旧尝试在上传前拒绝，服务器还会在文件写入完成时再次核对，防止上传期间轮次改变。CLI 不自动用最新尝试替换调用者持有的旧尝试。
+
 ```sh
 extore manage progress JOB_ID --product PRODUCT_ID --grant GRANT_ID \
   --attempt ATTEMPT --flow-epoch EPOCH --action-id ACTION_ID \

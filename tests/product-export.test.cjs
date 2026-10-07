@@ -510,3 +510,13 @@ test("text-stock delivery mode remains visible in safe external listing metadata
   assert.equal(result.product.mode, "stock");
   assert.deepEqual(plain(result.product.parameters), []);
 });
+
+test("商品导出保留通用卡密权益策略和规格额度，不导出额外私密字段", () => {
+  const api = exported();
+  const p = product({ view_policy: "repeat", revision_policy: { attribute_key: "custom_edit_quota", label: { "zh-CN": "修改次数", en: "Revisions" }, secret: "SECRET-NOT-EXPORT" }, variants: [{ id: "basic", name: "标准版", attributes: { custom_edit_quota: 0 } }, { id: "plus", name: "强化版", attributes: { custom_edit_quota: 1, password: "SECRET-NOT-EXPORT" } }] });
+  const result = plain(api.data(p));
+  assert.deepEqual(result.product.revision_policy, { attribute_key: "custom_edit_quota", label: { "zh-CN": "修改次数", en: "Revisions" } });
+  assert.equal(result.variants[1].attributes.custom_edit_quota, 1);
+  assert.equal(JSON.stringify(result).includes("SECRET-NOT-EXPORT"), false);
+  assert.match(api.prompt(p), /不要把技术失败重试当作付费修改/);
+});

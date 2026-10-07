@@ -83,6 +83,8 @@ def _base(index, suffix, status="invalid", *, error=None, http_status=None):
 
 
 def _view(c, card, index, suffix="", *, screening=False):
+    from .card_entitlements import card_view
+
     if screening:
         # Local import avoids importing app while its router list is constructed.
         from .app import _screen_exchange_card
@@ -115,6 +117,7 @@ def _view(c, card, index, suffix="", *, screening=False):
         "product": service.public_product(p),
         "variant": card_variant(c, card),
         "job": rendered,
+        **card_view(c, card, row),
     }
 
 

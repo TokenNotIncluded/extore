@@ -2,6 +2,8 @@
 
 Webhook v1 的 `Client`、`verify_event` 保持兼容。流程 Worker 使用 `FlowScope`、`PrivateWorkerClient` 和 `verify_flow_event`。
 
+0.10.0 的验签结果保留服务端提供的卡属性、权益和交付上下文，不把这些字段混入顾客 `params`。交付后修改政策用于普通可重复领取的内容商品，不与本页多步 `task_flow` 的节点修订号混用。普通 Webhook 的 `revision.requested` 与内容版本去重见 [Python SDK](python-sdk.md#卡属性与交付版本)和[事件接入](events.md)。
+
 ```python
 from extore.sdk import FlowScope, PrivateWorkerClient, verify_flow_event
 

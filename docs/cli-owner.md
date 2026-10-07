@@ -65,13 +65,26 @@ extore admin complete JOB_ID --product PRODUCT_ID --output-file result.json
 
 上传不会自动标记成功。当前店主入口用 `request-changes JOB_ID --product PRODUCT_ID --reason …` 要求顾客修改后重提，用 `reject --reason` 拒绝；两者要求自己已领取的 processing 队列任务，顾客能看到原因，自动处理任务仍不能由队列操作覆盖。需细分 `customer_input/external/processor` 与 `revise/reuse` 时，使用单独授权的[商品处理 CLI](cli.md#要求重试拒绝与失败) `request-retry`。
 
-0.8 的原子等待 `next --watch`、当前流程动作的 `--attempt/--flow-epoch/--action-id` 与 `complete --file FIELD=PATH` 属于 `extore manage`；当前 `admin` 快捷命令没有这些选项。店主身份与商品处理设备分开授权，不能把全店设备凭证替代成商品设备或拼接权限。AI 执行流水线时，先申请对应商品范围，再按 [当前动作](cli.md#读取与提交当前动作)处理。
+原子等待 `next --watch` 属于 `extore manage`。店主的处理命令也支持当前尝试／流程的 `--attempt/--flow-epoch/--action-id` 和 `complete --file FIELD=PATH`。0.10.0 的 `upload --attempt ATTEMPT` 把明确领取的尝试绑定到上传，新修改轮次不接受省略它，不能查询最新任务后把旧稿偷偷升级为新稿。店主身份与商品处理设备分开授权，不能把全店设备凭证替代成商品设备或拼接权限。AI 执行流水线时，先申请对应商品范围，再按 [当前动作](cli.md#读取与提交当前动作)处理。
 
 富类型交付可通过店主现有 `upload` 上传真实文件，再在 `complete --output-file` 中填写返回 ID。值仍是字符串：`select` 写定义中的选项代码、`boolean` 写 `"true"` / `"false"`、`image` 写单个文件 ID、`images` 写 JSON 数组的字符串。文件必须属于当前任务的字段；多张图片每张分别上传，数量服从 `max_items`。图片支持 PNG、JPEG、WebP；不能用图片 URL 或 Base64 代替附件。
 
 ## 全店命令
 
 除以下新增操作外，`admin product get/update/schema/prompt`、`cards`、`links`、`events`、`sessions`、`devices`、`audit`、`processors`、`source` 与 `api` 沿用 [manage 命令](cli.md#商品卡密与授权管理)的主要参数。店主有全店权限，但按商品写入仍使用 `--product`。
+
+0.10.0 制卡可用 `--attributes-file attributes.json` 或 `--attributes-stdin` 指定本批次卡属性；同名值覆盖所选规格默认属性，其他属性继承，合并结果和商品修改政策在发行时冻结。例如商品 `revision_policy.attribute_key="edit_passes"`，规格默认 1 次，本批可单独设为 2 次：
+
+```json
+{"edit_passes":2,"layout":"compact"}
+```
+
+```sh
+extore admin cards issue --product PRODUCT_ID --variant enhanced \
+  --count 10 --attributes-file ./attributes.json --output ./private-cards.json
+```
+
+属性仅允许有界标量 JSON，不能嵌套对象、数组或非有限数字。顾客不能设置或改变卡属性；修改商品属性不会追改旧卡。省略属性或传 `{}` 保持原制卡请求行为和幂等匹配。完整规则见[卡密属性与修改权益](protocol.md#卡密属性与修改权益)。
 
 | 命令 | 用途 |
 | --- | --- |

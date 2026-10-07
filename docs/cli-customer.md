@@ -4,6 +4,8 @@
 
 `extore customer` 使用卡密或已有领取链接完成兑换，不需要商家管理权限。普通命令要求 0.6.0 及以上，跨商品批量兑换、多步流程、富类型字段和签名路由要求 0.8.0 及以上，安装方式见 [CLI 总览](cli.md#安装与登录)。大写 ID 和路径是占位符。
 
+卡密属性、交付后修改和历史版本领取要求 **0.10.0 及以上**。`receipt` 的 `card_attributes` 是商家发行时冻结的有效属性；`entitlements` 给出配置的计数属性名、名称、总额、已用和剩余次数，不从顾客输入推算权益。
+
 ## 验码与准备参数
 
 ```sh
@@ -60,7 +62,7 @@ extore customer receipt RECEIPT_ID
 | `needs_input` | 阅读原因与 `retry_mode`：`revise` 修改后重提，`reuse` 使用原资料重试 |
 | `failed` | 只有 `can_retry=true` 时可按商品规则重试，否则联系商家 |
 | `rejected` | 查看拒绝原因；卡密已禁用，不能重提或领取 |
-| `succeeded` | 按查看规则领取、下载或销毁 |
+| `succeeded` | 按查看规则领取、下载或销毁；`entitlements.can_request=true` 时可提出修改 |
 | `destroyed` | 内容已经关闭，不能恢复 |
 
 要求重试不受发货失败的 `allow_retry` / `max_attempts` 限制，但卡密过期、撤销或店铺停用后仍不能重提。状态中的 `retry_reason_type` 区分 `customer_input`（顾客资料）、`external`（外部服务）、`processor`（处理程序），不代表所有问题都需要顾客改资料。
@@ -83,6 +85,41 @@ extore customer retry RECEIPT_ID --reuse --card CARD_ID
 `--reuse` 不需要参数文件，也不能与 `--params-file`、`--params-stdin`、`--items-file`、`--group`、`--file` 或 `--card-file` 混用。它只适用于处理者明确允许原资料重试的 `needs_input` 任务；不能代替修改后重提，也不能绕过拒绝、过期或撤销。无需重新选文件或取出私密原参数。
 
 两种新尝试都保留任务 ID、输入输出定义、规格和计划，`attempt` 增加，完成步骤与进度归零。卡密仍归原顾客任务，不会生成新的销售库存。
+
+## 交付后提出修改
+
+修改额度属于卡密属性，商品选择哪个属性计数，系统没有固定的“修改次数”参数名。查看 `entitlements.attribute_key/total/used/remaining/can_request` 和 `job.revision.current`，在首次成功交付后提出明确建议：
+
+```sh
+extore customer receipt RECEIPT_ID
+extore customer revise RECEIPT_ID --message-file ./revision-request.txt
+# 或从标准输入读取；批量领取记录明确选择一张卡
+extore customer revise RECEIPT_ID --card CARD_ID --message-stdin < ./revision-request.txt
+```
+
+建议是 1–10000 字符的 UTF-8 文本。原需求及其附件保留，修改建议单独进入 `job.revision.message`，不能覆盖发行时属性或增加额度。每次成功受理修改只扣一次额度，任务回到本商品队列；`revision.current=0` 是初稿，1 是第一次修改。正在排队、处理、失败或待补充的轮次不能再开一轮修改；这轮的技术失败和补充重试使用 `retry`，不再次扣修改额度。首次制作的重试也不消耗修改额度。没有配置权益、额度已用完、凭证失效或任务被拒绝／销毁时，由服务端拒绝并返回当前状态。
+
+CLI 在发送前将 UUID v4 请求编号、原轮次和建议摘要保存到 0600 profile。网络中断或响应丢失后重复**同一条命令与同一份建议**，会复用原请求；即使服务器已经进入下一轮，也不会再扣一次。尚有未确认请求时不能换建议或轮次。正常成功后可使用新的建议提出下一轮。需要跨客户端精确重放时显式指定：
+
+```sh
+extore customer revise RECEIPT_ID --message-file ./revision-request.txt \
+  --request-id 550e8400-e29b-41d4-a716-446655440000 --expected-revision 0
+```
+
+相同请求编号和正文返回原结果；相同编号换正文返回 409，CLI 不会替你换编号绕过冲突。`--expected-revision` 是交付轮次，与多步任务流程的节点修订号不同。`revise` 不接收 `--params-file`，也不重新验码或创建新订单。
+
+409 和网络错误都保留原请求，重复命令仍使用相同编号。先用 `receipt` 核对是否已受理、当前轮次及余额；确认要放弃原请求并提出新的建议时，显式使用 `revise --new-request --message-file ...`。该选项会丢弃本地待确认身份并创建新操作，不可当作自动网络重试。
+
+状态和文件列表保留 `deliveries` 与 `last_delivery` 的轮次、尝试次数和时间，不打印历史交付正文。修改制作期间仍可领取最近成功的一版；需要明确某版时：
+
+```sh
+extore customer reveal RECEIPT_ID --revision 0 --output ./first-delivery.json
+extore customer reveal RECEIPT_ID --revision 1 --output ./updated-delivery.json
+extore customer files RECEIPT_ID --revision 0
+extore customer download RECEIPT_ID --revision 0 --file-id FILE_ID --output ./first.docx
+```
+
+省略 `--revision` 领取当前或最近成功版。每版领取的文件 ID 分别保存在私密 profile，新版不会覆盖旧版的下载记录；下载省略版本时由文件 ID 定位已经领取的版本。属性额度不等于新增销售库存，全部历史文件仍受单卡、店铺和全站容量限制。`destroy` 永久关闭这张卡的全部交付版本与附件。
 
 ## 多步兑换：开始、回答与确认
 

@@ -1574,6 +1574,7 @@ class ManageClient:
         wait=25,
         limit=1,
         new_request=False,
+        detail=False,
     ):
         if (
             (all_products and (product or grant_id))
@@ -1824,8 +1825,13 @@ class ManageClient:
                             "progress",
                             "steps",
                             "completed_steps",
+                            "card_attributes",
+                            "entitlements",
+                            "revision",
+                            "deliveries",
+                            "last_delivery",
                         )
-                        if key in job
+                        if key in job and (detail or key != "deliveries")
                     },
                     "execution": {
                         key: item["execution"][key]
@@ -1839,8 +1845,13 @@ class ManageClient:
                             "deadline",
                             "attempt",
                             "mode",
+                            "card_attributes",
+                            "entitlements",
+                            "revision",
+                            "deliveries",
+                            "last_delivery",
                         )
-                        if key in item["execution"]
+                        if key in item["execution"] and (detail or key != "deliveries")
                     },
                 }
             )
@@ -2169,11 +2180,7 @@ class ManageClient:
         attempt=None,
     ):
         current = self.job(grant, job_id)
-        if attempt is not None and attempt != current.get("attempt"):
-            raise ManageError(
-                "The task attempt changed; fetch the current task before uploading",
-                code="stale_task",
-            )
+        self._upload_attempt(current, attempt)
         epoch = self._upload_epoch(current, flow_epoch)
         if epoch is not None and (
             not isinstance(current.get("action_id"), str) or not current["action_id"]
@@ -2236,6 +2243,7 @@ class ManageClient:
                     action_id=action_id,
                     job_checked=True,
                     upload_limit=upload_limit,
+                    attempt=attempt,
                 )
             )
             fid = uploaded.get("id")
@@ -2307,6 +2315,28 @@ class ManageClient:
             )
         return epoch
 
+    @staticmethod
+    def _upload_attempt(current, requested):
+        revision = current.get("revision") or {"current": 0}
+        if (
+            not isinstance(revision, dict)
+            or type(revision.get("current")) is not int
+            or not 0 <= revision["current"] <= 1000
+        ):
+            raise ManageError("Invalid delivery revision", code="invalid_response")
+        if revision["current"] > 0 and requested is None:
+            raise ManageError(
+                "Revision uploads require --attempt from the claimed task; do not reuse an old delivery",
+                code="invalid_input",
+            )
+        if requested is not None and (
+            type(requested) is not int or requested != current.get("attempt")
+        ):
+            raise ManageError(
+                "The task attempt changed; fetch the current task before uploading",
+                code="stale_task",
+            )
+
     def upload(
         self,
         grant,
@@ -2318,9 +2348,11 @@ class ManageClient:
         action_id=None,
         job_checked=False,
         upload_limit=None,
+        attempt=None,
     ):
         if not job_checked:
             current = self.job(grant, job_id)
+            self._upload_attempt(current, attempt)
             flow_epoch = self._upload_epoch(current, flow_epoch)
             current_action = (
                 current.get("action_id") if flow_epoch is not None else None
@@ -2338,6 +2370,8 @@ class ManageClient:
         limit = upload_limit if upload_limit is not None else self._upload_limit(grant)
         self._validate_upload(source, limit)
         values = {"job_id": job_id, "field_key": field}
+        if attempt is not None:
+            values["attempt"] = str(attempt)
         if flow_epoch is not None:
             values["flow_epoch"] = str(flow_epoch)
         if action_id is not None:
@@ -2449,6 +2483,10 @@ def compact_job(job):
             "completed_steps",
             "queue_position",
             "attachments",
+            "card_attributes",
+            "entitlements",
+            "revision",
+            "last_delivery",
         )
         if key in job
     }
@@ -2714,6 +2752,9 @@ def add_parser(commands):
         "next", help="wait once and atomically claim current work on one server"
     )
     next_command.add_argument(
+        "--detail", action="store_true", help="also include delivery history metadata"
+    )
+    next_command.add_argument(
         "--all", action="store_true", help="use all currently approved product grants"
     )
     next_command.add_argument("--product", help="select one approved product")
@@ -2762,6 +2803,12 @@ def add_parser(commands):
         )
         command.add_argument("--origin", help="select a saved server origin")
         command.add_argument("--grant", help="select an individual saved device grant")
+        if name == "job":
+            command.add_argument(
+                "--detail",
+                action="store_true",
+                help="also include delivery history metadata",
+            )
         if name not in ("instructions", "jobs", "job", "files", "download", "upload"):
             command.add_argument(
                 "--attempt", type=_attempt, help="current task attempt from next/job"
@@ -2773,6 +2820,11 @@ def add_parser(commands):
                 "--action-id", type=_action_id, help="current flow action token"
             )
         if name == "upload":
+            command.add_argument(
+                "--attempt",
+                type=_attempt,
+                help="attempt from the claimed task; required for revision uploads",
+            )
             command.add_argument(
                 "--flow-epoch", type=_flow_epoch, help="expected current flow epoch"
             )
@@ -3043,6 +3095,7 @@ def dispatch(client, args, command, origin):
                 wait=args.wait,
                 limit=args.limit,
                 new_request=new_request,
+                detail=args.detail,
             )
             if not args.watch or result["items"]:
                 return result
@@ -3247,7 +3300,10 @@ def dispatch(client, args, command, origin):
             "jobs": [compact_job(item) for item in jobs],
         }
     if command == "job":
-        return {"ok": True, "job": client.job(grant, args.job_id)}
+        job = client.job(grant, args.job_id)
+        if not getattr(args, "detail", False):
+            job.pop("deliveries", None)
+        return {"ok": True, "job": job}
     if command == "files":
         return {"ok": True, "files": client.files(grant, args.job_id)}
     if command == "download":
@@ -3262,6 +3318,7 @@ def dispatch(client, args, command, origin):
                 args.file,
                 flow_epoch=getattr(args, "flow_epoch", None),
                 action_id=getattr(args, "action_id", None),
+                attempt=getattr(args, "attempt", None),
             ),
         }
     ids = args.job_id if command == "claim" else [args.job_id]

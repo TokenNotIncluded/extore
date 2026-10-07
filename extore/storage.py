@@ -94,6 +94,7 @@ def _flow_allocated(c, shop_id=None):
 
 
 def _totals(c):
+    from .card_entitlements import allocated_bytes as revision_bytes
     from .text_cards import allocated_bytes
 
     stored = c.execute(
@@ -102,7 +103,7 @@ def _totals(c):
     pending = c.execute(
         "SELECT COALESCE(SUM(size),0) FROM upload_reservations"
     ).fetchone()[0]
-    return stored + allocated_bytes(c) + _flow_allocated(c), pending
+    return stored + allocated_bytes(c) + _flow_allocated(c) + revision_bytes(c), pending
 
 
 def _product_shop(c, product_id):
@@ -117,6 +118,7 @@ def _product_shop(c, product_id):
 
 
 def _shop_totals(c, shop_id):
+    from .card_entitlements import allocated_bytes as revision_bytes
     from .text_cards import allocated_bytes
 
     stored = c.execute(
@@ -129,7 +131,9 @@ def _shop_totals(c, shop_id):
         "SELECT COALESCE(SUM(size),0) FROM upload_reservations WHERE shop_id=?",
         (shop_id,),
     ).fetchone()[0]
-    return stored + allocated_bytes(c, shop_id) + _flow_allocated(c, shop_id), pending
+    return stored + allocated_bytes(c, shop_id) + _flow_allocated(
+        c, shop_id
+    ) + revision_bytes(c, shop_id), pending
 
 
 def check_storage_quota(c, additional, *, reservation_id=None, product_id=None):

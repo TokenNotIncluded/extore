@@ -316,12 +316,17 @@ def _validated_context(c, dispatch, *, state=None):
         != dispatch["payload_digest"]
     ):
         raise DispatchInvalid("流程回调已失效")
+    from .card_entitlements import job_context
+    from .service import job
     from .work_instructions import instructions
 
     # Keep the encrypted execution/fingerprint unchanged for pending historical
     # dispatches. Attach live merchant configuration only after scope validation.
     try:
         context["instructions"] = instructions(c, dispatch["product_id"])
+        context.update(
+            job_context(c, job(c, dispatch["job_id"]), include_deliveries=False)
+        )
     except HTTPException:
         raise DispatchInvalid("流程回调已失效") from None
     return context

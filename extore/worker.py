@@ -125,6 +125,19 @@ def _check_event_authority(row):
             ).fetchone()
             if enabled is None or not enabled["enabled"]:
                 raise ValueError("店铺已停用，不能发起处理")
+            payload = json.loads(row["payload"])
+            if payload["type"] in ("redemption.requested", "revision.requested"):
+                current = c.execute(
+                    "SELECT jobs.state,jobs.attempt,cards.state AS card_state FROM jobs JOIN cards ON cards.id=jobs.card_id WHERE jobs.id=? AND jobs.product_id=?",
+                    (payload["data"]["id"], payload["product_id"]),
+                ).fetchone()
+                if (
+                    current is None
+                    or current["state"] not in ("queued", "processing")
+                    or current["attempt"] != payload["data"]["attempt"]
+                    or current["card_state"] in ("revoked", "rejected")
+                ):
+                    raise ValueError("Webhook 对应的任务尝试已失效")
 
 
 async def deliver_event(row):
@@ -189,7 +202,7 @@ async def outbox_once():
                 (time.time(), row["id"]),
             )
             return True
-        if payload["type"] == "redemption.requested":
+        if payload["type"] in ("redemption.requested", "revision.requested"):
             r = c.execute(
                 "SELECT state,attempt,card_id FROM jobs WHERE id=?",
                 (payload["data"]["id"],),
@@ -288,6 +301,9 @@ async def execute_script(row, p, task_flow_epoch=None):
             c, trusted_job, p["processor_id"]
         )
         row["variant"] = card_variant(c, trusted_job)
+        from .card_entitlements import job_context
+
+        row.update(job_context(c, trusted_job, include_deliveries=False))
         row["steps"], row["completed_steps"] = progress_view(c, trusted_job)
         from .work_instructions import instructions
 
@@ -326,6 +342,8 @@ async def _execute_processor(row, p, processor_package):
     check = row.get("_check_execution", lambda **kwargs: None)
     limits = workflow["runtime"]
     payload = {
+        "job_id": row["id"],
+        "attempt": row["attempt"],
         **(
             {"instructions": row["instructions"], "product_id": row["product_id"]}
             if "instructions" in row
@@ -334,6 +352,17 @@ async def _execute_processor(row, p, processor_package):
         "params": json.loads(row["params"]),
         "configuration": p["processor_config"],
         "variant": row["variant"],
+        **{
+            key: row[key]
+            for key in (
+                "card_attributes",
+                "entitlements",
+                "revision",
+                "deliveries",
+                "last_delivery",
+            )
+            if key in row
+        },
         "steps": [{"id": step["id"], "label": step["label"]} for step in row["steps"]],
         "completed_steps": row.get("completed_steps", []),
         "shop_context": row["shop_context"],

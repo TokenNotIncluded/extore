@@ -228,6 +228,28 @@ class ProductVariant(BaseModel):
         return validate_attributes(value)
 
 
+class RevisionPolicy(BaseModel):
+    """A merchant chooses which immutable card attribute buys another revision."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    attribute_key: str = Field(min_length=1, max_length=100, strict=True)
+    label: dict[str, str] = Field(min_length=1, max_length=20)
+
+    @model_validator(mode="after")
+    def names(self):
+        if (
+            not self.attribute_key.strip()
+            or self.attribute_key != self.attribute_key.strip()
+        ):
+            raise ValueError("修改额度属性名不能为空或包含首尾空白")
+        if any(not key.strip() or len(key) > 40 for key in self.label):
+            raise ValueError("修改额度语言代码无效")
+        if any(not value.strip() or len(value) > 200 for value in self.label.values()):
+            raise ValueError("请填写修改额度显示名称，最多二百字符")
+        return self
+
+
 class Product(BaseModel):
     name: str = Field(min_length=1, max_length=120)
     description: str = Field(default="", max_length=20000)
@@ -264,6 +286,7 @@ class Product(BaseModel):
     processor_id: str = Field(default="", max_length=100, pattern=r"^[a-zA-Z0-9_-]*$")
     processor_config: dict[str, str] = Field(default_factory=dict, max_length=30)
     task_flow: dict | None = None
+    revision_policy: RevisionPolicy | None = None
 
     @field_validator("workshop_slogan")
     @classmethod
@@ -371,6 +394,20 @@ class Product(BaseModel):
             from .task_flow_definition import validate_definition
 
             self.task_flow = validate_definition(self.task_flow, self.model_dump())
+        if self.revision_policy is not None:
+            if (
+                self.view_policy != "repeat"
+                or self.delivery != "content"
+                or self.mode == "stock"
+                or self.task_flow is not None
+            ):
+                raise ValueError(
+                    "交付后修改需要可重复领取的内容商品；一卡一文本、服务和多步骤交互流程暂不支持"
+                )
+            from .card_entitlements import validate_capacity
+
+            for variant in self.variants:
+                validate_capacity(variant.attributes, self.revision_policy.model_dump())
         return self
 
 
@@ -400,6 +437,46 @@ class Redemption(BaseModel):
 class TokenInput(BaseModel):
     token: str = Field(max_length=100)
     card_id: str | None = Field(default=None, max_length=80)
+    revision: int | None = Field(default=None, strict=True, ge=0, le=1000)
+
+
+class RevisionRequest(TokenInput):
+    model_config = ConfigDict(extra="forbid")
+
+    request_id: str = Field(min_length=36, max_length=36, strict=True)
+    expected_revision: int = Field(strict=True, ge=0, le=1000)
+    message: str = Field(min_length=1, max_length=10000, strict=True)
+
+    @field_validator("request_id")
+    @classmethod
+    def random_request_id(cls, value):
+        import uuid
+
+        try:
+            parsed = uuid.UUID(value)
+        except ValueError:
+            raise ValueError("修改请求编号必须是随机 UUID v4") from None
+        if parsed.version != 4 or str(parsed) != value:
+            raise ValueError("修改请求编号必须是规范的随机 UUID v4")
+        return value
+
+    @field_validator("message")
+    @classmethod
+    def requested_changes(cls, value):
+        value = value.strip()
+        if not value:
+            raise ValueError("请填写修改建议")
+        try:
+            value.encode("utf-8")
+        except UnicodeError:
+            raise ValueError("修改建议包含无效字符") from None
+        return value
+
+    @model_validator(mode="after")
+    def no_delivery_selector(self):
+        if self.revision is not None:
+            raise ValueError("修改请求请使用 expected_revision 指定当前轮次")
+        return self
 
 
 class IssueCards(BaseModel):
@@ -409,6 +486,12 @@ class IssueCards(BaseModel):
     label: str = Field(default="", max_length=100)
     expires: float | None = Field(default=None, allow_inf_nan=False)
     routed: bool | None = None
+    attributes: dict[str, Any] = Field(default_factory=dict)
+
+    @field_validator("attributes", mode="before")
+    @classmethod
+    def card_attributes(cls, value):
+        return validate_attributes(value)
 
 
 class JobUpdate(BaseModel):

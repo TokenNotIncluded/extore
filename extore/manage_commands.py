@@ -540,6 +540,17 @@ def add_commands(subcommands):
     cards["issue"].add_argument(
         "--expires", type=float, help="future Unix timestamp, omitted for no expiry"
     )
+    attributes = cards["issue"].add_mutually_exclusive_group()
+    attributes.add_argument(
+        "--attributes-file",
+        type=Path,
+        help="merchant-owned scalar JSON attributes overriding the selected variant",
+    )
+    attributes.add_argument(
+        "--attributes-stdin",
+        action="store_true",
+        help="read merchant-owned card attributes from stdin",
+    )
     text_import = cards["import-text"]
     text_source = text_import.add_mutually_exclusive_group(required=True)
     text_source.add_argument(
@@ -1474,6 +1485,26 @@ def cards_command(client, grant, args):
         )
         return {"ok": True, "cards": items}
     if operation == "issue":
+        attributes = {}
+        if args.attributes_file or args.attributes_stdin:
+            from argparse import Namespace
+
+            from .variants import validate_attributes
+
+            try:
+                attributes = validate_attributes(
+                    read_json(
+                        Namespace(
+                            json_file=args.attributes_file,
+                            json_stdin=args.attributes_stdin,
+                        )
+                    )
+                )
+            except ValueError:
+                raise ManageError(
+                    "Card attributes must be a bounded JSON object of scalar values",
+                    code="invalid_input",
+                ) from None
         with OutputFile(args, "cards") as output:
             result = _object(
                 client.request(
@@ -1486,6 +1517,7 @@ def cards_command(client, grant, args):
                         "variant_id": args.variant,
                         "label": args.label,
                         "expires": args.expires,
+                        **({"attributes": attributes} if attributes else {}),
                     },
                 )
             )

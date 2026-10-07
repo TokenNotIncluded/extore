@@ -1170,3 +1170,75 @@ test("workshop slogans are readable and editable without delivery configuration 
   p.leave(); p.requests[1].resolve(value); await flush();
   assert.equal(p.saved.length, 0);
 });
+
+test("修改权益使用商家选择的任意属性键，保存多语言显示名并允许缺失额度为零", async () => {
+  const value = product({ variants: [{ id: "default", name: "标准", price: "25", currency: "CNY", attributes: {}, enabled: true }, { id: "plus", name: "加强", price: "50", currency: "CNY", attributes: { document_edits: 1 }, enabled: true }] });
+  const p = page({ products: [value] });
+  await editProduct(p, value);
+  p.node("#p-revisions-enabled").checked = true;
+  await p.node("#p-revisions-enabled").emit("change");
+  assert.equal(p.node("#revision-policy-fields").hidden, false);
+  p.node("#p-revision-key").value = "document_edits";
+  p.node("#p-revision-label").value = '{"zh-CN":"成品修改机会","en":"Included edits"}';
+  p.node("#product-form").emit("submit");
+  const body = JSON.parse(JSON.stringify(p.requests[1].body));
+  assert.deepEqual(body.revision_policy, { attribute_key: "document_edits", label: { "zh-CN": "成品修改机会", en: "Included edits" } });
+  assert.deepEqual(body.variants[0].attributes, {});
+  assert.deepEqual(body.variants[1].attributes, { document_edits: 1 });
+});
+
+test("修改权益拒绝负数、字符串、布尔值、null 和小数额度", async () => {
+  for (const allowance of [-1, "1", true, null, 1.5]) {
+    const value = product({ revision_policy: { attribute_key: "custom_quota", label: { "zh-CN": "额度" } }, variants: [{ id: "default", name: "基础", attributes: { custom_quota: allowance } }] });
+    const p = page();
+    await editProduct(p, value);
+    await p.node("#product-form").emit("submit");
+    await flush();
+    assert.equal(p.requests.length, 1);
+    assert.match(p.node("#error").textContent, /必须是非负整数/);
+  }
+});
+
+test("关闭修改权益提交 null，不能给单次查看或服务交付启用权益", async () => {
+  const value = product({ revision_policy: { attribute_key: "custom_quota", label: { "zh-CN": "额度" } } });
+  const p = page();
+  await editProduct(p, value);
+  p.node("#p-revisions-enabled").checked = false;
+  await p.node("#p-revisions-enabled").emit("change");
+  assert.equal(p.node("#revision-policy-fields").hidden, true);
+  p.node("#product-form").emit("submit");
+  assert.equal(p.requests[1].body.revision_policy, null);
+  for (const mode of [{ view_policy: "once" }, { delivery: "service", outputs: [] }, { mode: "stock", parameters: [] }]) {
+    const other = page();
+    await editProduct(other, { ...value, ...mode });
+    await other.node("#product-form").emit("submit");
+    await flush();
+    assert.equal(other.requests.length, 1);
+    assert.match(other.node("#error").textContent, /修改权益需要可重复查看/);
+  }
+});
+
+test("缺少发货配置权限的商品管理页面不允许编辑修改策略", async () => {
+  const p = page({ role: "staff", canConfigure: false });
+  await editProduct(p, product({ revision_policy: { attribute_key: "edits", label: { "zh-CN": "修改次数" } } }));
+  assert.equal(p.node("#p-revisions-enabled").disabled, true);
+  assert.equal(p.node("#p-revision-key").disabled, true);
+  assert.equal(p.node("#p-revision-label").disabled, true);
+});
+
+test("纯商品编辑权限可改展示属性，但不能改变策略选中的修改额度", async () => {
+  const value = product({ revision_policy: { attribute_key: "edit_allowance", label: { "zh-CN": "修改次数" } }, variants: [{ id: "default", name: "强化版", attributes: { edit_allowance: 1, style: "simple" } }] });
+  const allowed = page({ role: "staff", canConfigure: false });
+  await editProduct(allowed, value);
+  allowed.node("#v-attributes-0").value = '{"edit_allowance":1,"style":"professional"}';
+  allowed.node("#product-form").emit("submit");
+  assert.equal(allowed.requests[1].body.variants[0].attributes.style, "professional");
+  const denied = page({ role: "staff", canConfigure: false });
+  await editProduct(denied, value);
+  denied.node("#v-attributes-0").value = '{"edit_allowance":2,"style":"professional"}';
+  await denied.node("#product-form").emit("submit");
+  await flush();
+  assert.equal(denied.requests.length, 1);
+  assert.match(denied.node("#error").textContent, /修改卡密属性 edit_allowance 的额度需要配置发货权限/);
+  assert.equal(denied.node("#v-attributes-0").value, '{"edit_allowance":2,"style":"professional"}');
+});

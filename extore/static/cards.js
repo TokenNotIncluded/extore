@@ -129,7 +129,7 @@
         products.length
           ? `<div id="cards-stats" aria-live="polite"></div>
       <div id="cards-text-import"></div><details id="cards-regular-issue" class="panel"><summary>发行一批卡密</summary><p class="caption">卡密原文只在本次生成时显示。离开页面后不能找回，请立即下载保存。</p>
-        <form id="cards-issue"><div class="grid"><div class="field"><label for="cards-issue-variant">${tr("制卡规格", "Variant to issue")}</label><select id="cards-issue-variant" required></select><p id="cards-issue-help" class="caption"></p></div><div class="field"><label for="cards-count">数量</label><input id="cards-count" type="number" min="1" max="1000" step="1" value="10" required></div><div class="field"><label for="cards-label">批次标签（可选）</label><input id="cards-label" maxlength="100" placeholder="例如：十月活动"></div><div class="field"><label for="cards-expires">兑换截止时间（可选，本地时间）</label><input id="cards-expires" type="datetime-local"></div></div><button id="cards-issue-submit" type="submit" class="full">生成卡密</button></form>
+        <form id="cards-issue"><div class="grid"><div class="field"><label for="cards-issue-variant">${tr("制卡规格", "Variant to issue")}</label><select id="cards-issue-variant" required></select><p id="cards-issue-help" class="caption"></p></div><div class="field"><label for="cards-count">数量</label><input id="cards-count" type="number" min="1" max="1000" step="1" value="10" required></div><div class="field"><label for="cards-label">批次标签（可选）</label><input id="cards-label" maxlength="100" placeholder="例如：十月活动"></div><div class="field"><label for="cards-expires">兑换截止时间（可选，本地时间）</label><input id="cards-expires" type="datetime-local"></div></div><details class="card-attributes-editor"><summary>${tr("本批卡密属性（可选）", "Attributes for this batch (optional)")}</summary><div class="field"><label for="cards-attributes">${tr("属性覆盖（JSON）", "Attribute overrides (JSON)")}</label><textarea id="cards-attributes" rows="4" spellcheck="false" placeholder='{"included_revisions": 1}'></textarea><p class="caption">${tr("留空或 {} 使用规格属性。只覆盖此批次，制卡后固定，不改变已发行卡密。可设置自定义文字、数字、布尔值或 null；修改额度对应的属性须为非负整数。", "Leave blank or use {} to keep variant attributes. Overrides apply only to this batch and are frozen on issuance. Custom values may be text, numbers, booleans or null; the revision allowance must be an integer from 0 to 1000.")}</p><pre id="cards-variant-attributes" class="caption"></pre></div></details><button id="cards-issue-submit" type="submit" class="full">生成卡密</button></form>
       </details><div id="cards-codes" class="secret-output"></div>
       <div class="cards-library"><div class="cards-library-heading"><div><h3 id="cards-library-title">${tr("卡密批次", "Code batches")}</h3><p id="cards-library-note" class="caption">${tr("按发行批次整理，打开文件夹查看卡密。", "Organized by issue batch. Open a folder to view its codes.")}</p></div><div class="actions"><button id="cards-back" class="secondary" hidden>${tr("返回批次", "Back to batches")}</button><button id="cards-folder-action" class="danger" hidden>${tr("删除批次", "Delete batch")}</button></div></div><form id="cards-filter"><div class="cards-filter-grid"><div class="field"><label for="cards-view">${tr("批次视图", "Batch view")}</label><select id="cards-view"><option value="active">${tr("有效批次", "Active batches")}</option><option value="deleted">${tr("回收站", "Trash")}</option></select></div><div class="field"><label for="cards-variant">${tr("查看规格", "Filter by variant")}</label><select id="cards-variant"></select></div><div id="cards-status-field" class="field" hidden><label for="cards-status">${tr("状态", "Status")}</label><select id="cards-status"><option value="">${tr("全部状态", "All statuses")}</option>${Object.entries(
         labels,
@@ -149,7 +149,7 @@
     };
     const setBusy = (value) => {
       busy = value;
-      workspace.querySelectorAll("input, select, button").forEach((element) => {
+      workspace.querySelectorAll("input, select, textarea, button").forEach((element) => {
         if (value) {
           if (element.dataset.cardsDisabled === undefined)
             element.dataset.cardsDisabled = String(element.disabled);
@@ -191,8 +191,10 @@
       const canIssue = !deleted && enabled.length > 0;
       disable(issueSelect, !canIssue);
       disable(node("#cards-issue-submit"), !canIssue);
-      for (const selector of ["#cards-count", "#cards-label", "#cards-expires"])
+      for (const selector of ["#cards-count", "#cards-label", "#cards-expires", "#cards-attributes"])
         disable(node(selector), !canIssue);
+      const variant = enabled.find((item) => item.id === issueVariant);
+      node("#cards-variant-attributes").textContent = JSON.stringify(variant?.attributes || {}, null, 2);
       node("#cards-product-notice").textContent = deleted
         ? tr("此商品已删除。已有卡密、统计与使用记录仍可查看，不能再发行卡密或补充库存。", "This product was deleted. Existing codes, statistics and usage history remain available. Issuing codes and adding stock are disabled.")
         : "";
@@ -542,6 +544,7 @@
       selectedBatch = null;
       batchView = "active";
       node("#cards-view").value = batchView;
+      node("#cards-attributes").value = "";
       variantControls();
       drawTextImport();
       offset = 0;
@@ -586,9 +589,11 @@
       )
         return;
       issueVariant = value;
+      node("#cards-attributes").value = "";
+      variantControls();
       clearCodes();
     });
-    for (const selector of ["#cards-count", "#cards-label", "#cards-expires"]) {
+    for (const selector of ["#cards-count", "#cards-label", "#cards-expires", "#cards-attributes"]) {
       listen(selector, "input", clearCodes);
       listen(selector, "change", clearCodes);
     }
@@ -641,6 +646,23 @@
             tr("请选择启用的制卡规格", "Choose an enabled variant"),
           );
         issueVariant = requestedVariant;
+        let attributes = {};
+        try {
+          attributes = JSON.parse(node("#cards-attributes").value.trim() || "{}");
+          if (!attributes || typeof attributes !== "object" || Array.isArray(attributes) ||
+              Object.keys(attributes).length > 20 ||
+              Object.keys(attributes).some((key) => !key.trim() || key.length > 100 || ["__proto__", "constructor", "prototype"].includes(key)) ||
+              Object.values(attributes).some((value) => value !== null && typeof value !== "boolean" &&
+                !(typeof value === "string" && value.length <= 1000) &&
+                !(typeof value === "number" && Number.isFinite(value) && (!Number.isInteger(value) || Number.isSafeInteger(value)))))
+            throw new Error("invalid attributes");
+        } catch {
+          throw new Error(tr("卡密属性需要 JSON 对象，最多 20 项；值为文字、数字、布尔值或 null。", "Code attributes must be a JSON object with up to 20 text, number, boolean or null values."));
+        }
+        const allowanceKey = selectedProduct()?.revision_policy?.attribute_key;
+        const allowance = allowanceKey && (Object.hasOwn(attributes, allowanceKey) ? attributes[allowanceKey] : variant.attributes?.[allowanceKey]);
+        if (allowanceKey && allowance !== undefined && (!Number.isSafeInteger(allowance) || allowance < 0 || allowance > 1000))
+          throw new Error(tr(`属性 ${allowanceKey} 的修改额度必须是非负整数（0–1000）。`, `The revision allowance attribute ${allowanceKey} must be an integer from 0 to 1000.`));
         const input = node("#cards-expires").value;
         const expires = input
           ? Math.floor(new Date(input).getTime() / 1000)
@@ -659,6 +681,7 @@
             count: Number(node("#cards-count").value),
             label: node("#cards-label").value.trim(),
             expires,
+            attributes,
           },
           "POST",
           { signal: lifetime.signal },

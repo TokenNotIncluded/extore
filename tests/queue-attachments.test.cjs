@@ -138,3 +138,54 @@ test("a delayed fresh-file snapshot cannot render after changing queue views", a
   await opening;
   assert.equal(page.node("#batch-form").innerHTML, "New queue view");
 });
+
+const revisionTask = (overrides = {}) => ({ ...task(), revision: { current: 1, message: "revise", is_revision: true }, ...overrides });
+
+test("修改任务的网页文件上传携带打开表单时的 attempt，交付沿用该轮快照", async () => {
+  const current = revisionTask();
+  const page = await queue(current);
+  await open(page, current);
+  page.node("#batch-output-0").files = [new File(["revision document"], "revision.pdf")];
+  const submitting = page.node("#batch-submit").emit("click");
+  await flush();
+  assert.equal(page.requests[3].url, "/api/manage/files/upload");
+  assert.equal(page.requests[3].body.attempt, "2");
+  page.requests[3].respond({ id: "revision-file", attempt: 2 });
+  await flush();
+  assert.deepEqual(page.requests[4].body.flow_scopes, { "job-A": { attempt: 2 } });
+  page.requests[4].reject(new Error("stale attempt rejected by server"));
+  await submitting;
+  assert.match(page.node("#error").textContent, /stale attempt rejected/);
+  assert.equal(page.requests.length, 5, "a stale operation must not fetch a new task and auto-upgrade its fence");
+});
+
+test("迟到的旧文件操作不升级到最新修改轮次，也不发送上传", async () => {
+  const page = await queue(revisionTask({ attempt: 3, revision: { current: 2, is_revision: true } }));
+  const uploading = page.context.uploadFile({ scope: "job", product_id: "product", job_id: "job-A", field_key: "document", attempt: 2, filename: "old.pdf", base64: "aGVsbG8=" });
+  page.requests[2].respond([revisionTask({ attempt: 3, revision: { current: 2, is_revision: true } })]);
+  await assert.rejects(uploading, /任务尝试已改变/);
+  assert.equal(page.requests.length, 3);
+  assert.equal(page.requests.some((row) => row.url.includes("/files/upload")), false);
+});
+
+test("修改文件在传输过程中进入下一轮，上传后检查拒绝交付这个旧文件", async () => {
+  const current = revisionTask();
+  const page = await queue(current);
+  const uploading = page.context.uploadFile({ scope: "job", product_id: "product", job_id: "job-A", field_key: "document", attempt: 2, filename: "revision.pdf", base64: "aGVsbG8=" });
+  page.requests[2].respond([current]);
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(page.requests[3].body.attempt, "2");
+  page.requests[3].respond({ id: "old-file", attempt: 2 });
+  await new Promise((resolve) => setImmediate(resolve));
+  page.requests[4].respond([revisionTask({ attempt: 3, revision: { current: 2, is_revision: true } })]);
+  await assert.rejects(uploading, /处理步骤已改变/);
+  assert.equal(page.requests.some((row) => row.url === "/api/manage/batch"), false);
+});
+
+test("未携带 attempt 的旧式文件调用不能用于修改任务", async () => {
+  const page = await queue(revisionTask());
+  const uploading = page.context.uploadFile({ scope: "job", product_id: "product", job_id: "job-A", field_key: "document", filename: "revision.pdf", base64: "aGVsbG8=" });
+  page.requests[2].respond([revisionTask()]);
+  await assert.rejects(uploading, /修改任务上传必须指定/);
+  assert.equal(page.requests.length, 3);
+});

@@ -3801,3 +3801,157 @@ test("board responses are withdrawn when visible filters change while the read i
   resolve(progressBoardFixture());
   rejected(await pending, "stale_context");
 });
+
+const revisionReceiptJob = (overrides = {}) => ({
+  id: "j1", product_id: "p1", state: "succeeded", delivery: "content", view_policy: "repeat",
+  revision: { current: 0, message: "", is_revision: false },
+  card_attributes: { custom_edit_quota: 1 },
+  entitlements: { attribute_key: "custom_edit_quota", label: { en: "Edits" }, total: 1, used: 0, remaining: 1, can_request: true, reason: "", secret: "ENTITLEMENT-SECRET" },
+  deliveries: [{ revision: 0, attempt: 1, created: 10, revealed: false, has_files: true, output: "HISTORY-CONTENT-SECRET" }],
+  last_delivery: { revision: 0, attempt: 1, created: 10, secret: "LAST-SECRET" },
+  ...overrides,
+});
+
+test("native receipt exposes frozen card attributes and bounded revision metadata without past outputs", async (t) => {
+  const p = product();
+  const h = await harness(t, { context: { page: "receipt", currentToken: "private", product: p }, receipt: { product: p, job: revisionReceiptJob(), card_attributes: { custom_edit_quota: 1 }, entitlements: revisionReceiptJob().entitlements } });
+  const result = await h.call("receipt_status", {});
+  assert.equal(result.ok, true);
+  assert.deepEqual(plain(result.data.card_attributes), { custom_edit_quota: 1 });
+  assert.equal(result.data.job.entitlements.remaining, 1);
+  assert.equal(result.data.entitlements.remaining, 1);
+  assert.deepEqual(plain(result.data.job.deliveries), [{ revision: 0, attempt: 1, created: 10, revealed: false, has_files: true }]);
+  for (const secret of ["ENTITLEMENT-SECRET", "HISTORY-CONTENT-SECRET", "LAST-SECRET", "private"])
+    assert.equal(JSON.stringify(result).includes(secret), false);
+});
+
+test("native revision requests need confirmation, a fresh matching round and remaining entitlement", async (t) => {
+  const p = product();
+  const job = revisionReceiptJob();
+  const h = await harness(t, { context: { page: "receipt", currentToken: "private", product: p }, receipt: { product: p, job }, actions: { requestRevision: async (_message, options) => {
+    assert.equal(options.expected_revision, 0);
+    return { ...job, state: "queued", revision: { current: 1, message: "Improve table", is_revision: true }, entitlements: { ...job.entitlements, remaining: 0, used: 1, can_request: false }, output: "SHOULD-NOT-RETURN" };
+  } } });
+  const args = { message: "Improve table", expected_revision: 0, confirm: true };
+  rejected(await h.call("receipt_request_revision", { ...args, confirm: false }));
+  rejected(await h.call("receipt_request_revision", { ...args, message: "   " }));
+  rejected(await h.call("receipt_request_revision", { ...args, expected_revision: 1 }), "stale_context");
+  assert.equal(h.calls.some((call) => call.name === "requestRevision"), false);
+  const result = await h.call("receipt_request_revision", args);
+  assert.equal(result.ok, true);
+  assert.equal(result.data.job.state, "queued");
+  assert.equal(result.data.job.revision.current, 1);
+  assert.equal(JSON.stringify(result).includes("SHOULD-NOT-RETURN"), false);
+  h.setReceipt({ product: p, job: { ...job, entitlements: { ...job.entitlements, can_request: false } } });
+  rejected(await h.call("receipt_request_revision", args), "invalid_state");
+});
+
+test("native historical reveal and destroy support existing deliveries while a revision is queued", async (t) => {
+  const p = product();
+  let revealedOptions;
+  const h = await harness(t, { context: { page: "receipt", currentToken: "private", product: p }, receipt: { product: p, job: revisionReceiptJob({ state: "queued", revision: { current: 2 }, deliveries: [{ revision: 0 }, { revision: 1 }], last_delivery: { revision: 1 } }) }, actions: { reveal: async (options) => { revealedOptions = options; return { revision: options.revision, content: "original delivery" }; } } });
+  rejected(await h.call("receipt_reveal", { revision: 9, confirm: true }));
+  const result = await h.call("receipt_reveal", { revision: 0, confirm: true });
+  assert.equal(result.ok, true);
+  assert.equal(revealedOptions.revision, 0);
+  assert.equal(result.data.content, "original delivery");
+  assert.equal((await h.call("receipt_destroy", { confirm: true })).ok, true);
+  h.setReceipt({ product: p, job: revisionReceiptJob({ state: "destroyed" }) });
+  rejected(await h.call("receipt_reveal", { confirm: true }), "invalid_state");
+});
+
+test("native card issuance forwards generic attribute overrides and strictly validates revision counts", async (t) => {
+  const p = product({ revision_policy: { attribute_key: "my_edits", label: { en: "Edits" } }, variants: [productVariant("default", { attributes: { my_edits: 1 } })] });
+  const h = await harness(t, { context: staffContext({ tab: "cards", permissions: ["cards.manage"] }), products: [p] });
+  const args = { product_id: "p1", count: 2, attributes: { my_edits: 2, size: "short", priority: true }, confirm: true };
+  assert.equal((await h.call("cards_issue", args)).ok, true);
+  assert.deepEqual(mutations(h)[0].body.attributes, args.attributes);
+  for (const my_edits of [-1, null, true, "2", 0.5])
+    rejected(await h.call("cards_issue", { ...args, attributes: { my_edits } }));
+  rejected(await h.call("cards_issue", { ...args, attributes: { nested: {} } }));
+  rejected(await h.call("cards_issue", { ...args, attributes: { integer: Number.MAX_SAFE_INTEGER + 1 } }));
+  assert.equal(mutations(h).length, 1);
+});
+
+test("native product revision policy uses arbitrary merchant attributes and requires fulfillment authority", async (t) => {
+  const p = product({ variants: [productVariant("default", { attributes: { document_edits: 1 } })] });
+  const policy = { attribute_key: "document_edits", label: { en: "Document edits" } };
+  const h = await harness(t, { context: { page: "admin", role: "admin", tab: "products" }, products: [p] });
+  assert.equal((await h.call("product_update", { product_id: "p1", changes: { revision_policy: policy }, confirm: true })).ok, true);
+  assert.deepEqual(mutations(h)[0].body.revision_policy, policy);
+  for (const allowance of [-1, true, null, "1", 0.25]) {
+    rejected(await h.call("product_update", { product_id: "p1", changes: { revision_policy: policy, variants: [productVariant("default", { attributes: { document_edits: allowance } })] }, confirm: true }));
+  }
+  for (const changes of [{ view_policy: "once" }, { delivery: "service" }, { mode: "stock" }])
+    rejected(await h.call("product_update", { product_id: "p1", changes: { ...changes, revision_policy: policy }, confirm: true }));
+  const scoped = await harness(t, { context: staffContext({ tab: "products", permissions: ["product.edit"] }), products: [p] });
+  rejected(await scoped.call("product_update", { product_id: "p1", changes: { revision_policy: policy }, confirm: true }), "forbidden");
+  assert.equal(mutations(scoped).length, 0);
+});
+
+test("native revision output uploads require the caller's observed attempt and reject stale uploads before writing", async (t) => {
+  const job = { ...revisionReceiptJob({ state: "processing" }), attempt: 3, revision: { current: 2 }, claimed_by: "owner", outputs: [outputField("document", { type: "file" })] };
+  let uploaded = 0;
+  const h = await harness(t, { context: { page: "admin", role: "admin", tab: "jobs", queueProductId: "p1" }, jobs: [job], actions: { uploadFile: async (definition) => {
+    uploaded++;
+    assert.equal(definition.attempt, 3);
+    return attachment({ kind: "output", field_key: "document", attempt: 3 });
+  } } });
+  const args = { product_id: "p1", job_id: "j1", field_key: "document", filename: "revision.txt", base64: "aGVsbG8=", confirm: true };
+  rejected(await h.call("jobs_file_upload", args));
+  rejected(await h.call("jobs_file_upload", { ...args, attempt: 2 }), "stale_context");
+  assert.equal(uploaded, 0);
+  assert.equal((await h.call("jobs_file_upload", { ...args, attempt: 3 })).ok, true);
+  assert.equal(uploaded, 1);
+});
+
+test("native revision batch operations require an explicit matching attempt for every target", async (t) => {
+  const row = { ...revisionReceiptJob({ state: "processing" }), attempt: 3, revision: { current: 2 }, claimed_by: "owner", outputs: [outputField("content", { type: "textarea" })] };
+  const h = await harness(t, { context: { page: "admin", role: "admin", tab: "jobs", queueProductId: "p1" }, jobs: [row] });
+  const examples = [
+    ["jobs_claim", {}], ["jobs_progress", { progress: 30 }],
+    ["jobs_complete", { output: { content: "revised output" } }], ["jobs_fail", { message: "failed", retryable: true }],
+    ["jobs_request_retry", { reason: "needs work" }], ["jobs_request_changes", { reason: "needs work" }],
+    ["jobs_reject", { reason: "unsupported" }], ["jobs_allow_retry", {}],
+  ];
+  for (const [name, extra] of examples) {
+    const args = { product_id: "p1", ids: ["j1"], ...extra, confirm: true };
+    const count = mutations(h).length;
+    rejected(await h.call(name, args));
+    rejected(await h.call(name, { ...args, attempt: 2 }), "stale_context");
+    assert.equal(mutations(h).length, count);
+    assert.equal((await h.call(name, { ...args, flow_scopes: { j1: { attempt: 3 } } })).ok, true);
+    assert.deepEqual(mutations(h).at(-1).body.flow_scopes, { j1: { attempt: 3 } });
+  }
+});
+
+test("native completion keeps its supplied old fence if the task changes after snapshot validation", async (t) => {
+  let taskReads = 0;
+  let currentAttempt = 2;
+  const row = { ...revisionReceiptJob({ state: "processing" }), attempt: 2, revision: { current: 1 }, outputs: [outputField("content", { type: "textarea" })] };
+  let written;
+  const h = await harness(t, { context: { page: "admin", role: "admin", tab: "jobs", queueProductId: "p1" }, api: async (url, body) => {
+    if (url === "/auth/status") return { role: "admin" };
+    if (url.startsWith("/manage/jobs")) { taskReads++; const snapshot = { ...row, attempt: currentAttempt }; currentAttempt = 3; return [snapshot]; }
+    if (url === "/manage/batch") { written = plain(body); throw new Error("stale attempt rejected"); }
+    assert.fail("Unexpected fetch: " + url);
+  } });
+  const result = await h.call("jobs_complete", { product_id: "p1", ids: ["j1"], output: { content: "old revision output" }, attempt: 2, confirm: true });
+  assert.equal(result.ok, false);
+  assert.equal(taskReads, 1);
+  assert.equal(written.attempt, 2);
+  assert.equal(written.flow_scopes.j1.attempt, 2);
+  assert.equal(currentAttempt, 3);
+});
+
+test("native product editors may update ordinary variant metadata but cannot increase selected revision capacity", async (t) => {
+  const p = product({ revision_policy: { attribute_key: "edit_allowance", label: { en: "Revisions" } }, variants: [productVariant("default", { attributes: { edit_allowance: 1, style: "simple" } })] });
+  const h = await harness(t, { context: staffContext({ tab: "products", permissions: ["product.edit"] }), products: [p] });
+  const metadata = [productVariant("default", { attributes: { edit_allowance: 1, style: "professional" } })];
+  assert.equal((await h.call("product_update", { product_id: "p1", changes: { variants: metadata }, confirm: true })).ok, true);
+  const changed = [productVariant("default", { attributes: { edit_allowance: 2, style: "professional" } })];
+  rejected(await h.call("product_update", { product_id: "p1", changes: { variants: changed }, confirm: true }), "forbidden");
+  const added = [...metadata, productVariant("new", { attributes: { edit_allowance: 1 } })];
+  rejected(await h.call("product_update", { product_id: "p1", changes: { variants: added }, confirm: true }), "forbidden");
+  assert.equal(mutations(h).length, 1);
+});

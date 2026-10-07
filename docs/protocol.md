@@ -46,11 +46,12 @@ stateDiagram-v2
   processing --> rejected: 拒绝并说明原因
   failed --> queued: 允许重试且未超过次数
   succeeded --> destroyed: 顾客销毁
+  succeeded --> queued: 配置的交付修改权益仍有余额
 ```
 
 `waiting` 用于流程的待开始、顾客输入和展示确认，不能作为商品队列的可领取任务。顾客等待状态不等于处理者在运行。流程中的一个处理节点成功也不等于整单交付，正常成功路径须到成功结束节点才交付；取消、拒绝、处理超时及不可安全继续的失败可直接终止，不必走到配置的 end；详细状态与 `flow_epoch` / `revision` 规则见[任务流程](task-flow.md)。
 
-任务 ID 在失败重试或退回补充后保持不变，`attempt` 从 1 递增。平台必须以稳定任务 ID 去重外部交付，以 `(task_id, attempt)` 区分状态回调。旧尝试的回调 HTTP 409。终态不能覆盖；外部回调重复报告相同的成功或失败终态时返回当前结果，不修改内容。有步骤计划时，进度由已完成步骤计算，处理中最高 99%，成功强制为 100%；没有步骤计划时保留原来的百分比接口，处理中进度不能倒退。
+任务 ID 在失败重试、退回补充和交付后修改时保持不变，`attempt` 从 1 递增。整单一次的外部副作用以稳定任务 ID 去重，内容交付版本使用 `(task_id,revision.current)`，状态回调使用 `(task_id,attempt)`。旧尝试的回调 HTTP 409。同轮次终态不能覆盖；外部回调重复报告相同的成功或失败终态时返回当前结果，不修改内容。有步骤计划时，进度由已完成步骤计算，处理中最高 99%，成功强制为 100%；没有步骤计划时保留原来的百分比接口，处理中进度不能倒退。
 
 商品规则 `allow_retry`、`max_attempts` 与失败结果 `retryable` 必须同时满足，才能重试。没有确认未交付的失败不能标记为可重试。Webhook 或队列超过 1 小时未更新，以及自动处理器中断，都会进入不可自动重试的失败状态；商家在核实后可放行。过期尝试的待投递 `redemption.requested` 会取消，不继续启动旧任务。
 
@@ -72,6 +73,8 @@ Content-Type: application/json
 响应 `{"codes":["XXXXXXXX-XXXXXXXX-XXXXXXXX-XXXXXXXX"]}`。数量 1–1000。幂等键长 8–200 字符。同键同请求返回原卡密，不再生成；同键不同请求 HTTP 409。响应加密持久化用于平台恢复，密钥位于 `EXTORE_DATA/issuance.key`；该接口持钥者可读取同幂等键原响应，不向顾客暴露该密钥。幂等记录永久保留，防止旧订单重新发行。轮换平台 Key 不清理记录。
 
 发行请求也可传 `label` 批次名称（最多 100 字符）和 `expires`（未来的 Unix 秒，省略或 `null` 表示不到期）。它们同样参与幂等请求匹配；已有未带这些字段的请求保持兼容。
+
+0.10.0 可传 `attributes` 标量对象，对该批次所有卡应用同样的属性覆盖。合并顺序为发行规格的 `attributes`，再覆盖请求的同名属性；有效属性和修改政策一起冻结。非空覆盖参与幂等匹配，省略与 `{}` 保持旧请求指纹，不因版本升级重新制卡。
 
 `variant_id` 指定本商品的规格，省略等同于 `"default"`。非默认规格参与幂等匹配；省略与显式默认规格保留旧请求的匹配方式。不存在的规格返回 400，已停用规格的新发行返回 409；已经成功的幂等请求仍返回原响应，不因后来停用而重新制卡。每张卡密保存发行时的规格快照，不能由顾客在兑换时换规格。
 
@@ -98,11 +101,11 @@ Content-Type: application/json
 | 字段 | 含义 |
 |---|---|
 | `total` | 已发行总数 |
-| `remaining` | 未到期、未撤销的 `unused` 加 `needs_input`；退回补充计回剩余 |
-| `available` | `remaining` 加符合重试条件的失败卡密；已有任务的卡密仍归原顾客使用 |
-| `used` | 已有任务且任务不处于 `needs_input` 的卡密数；退回补充会减回，重提后计入 |
+| `remaining` | 未到期、未撤销的 `unused` 加尚未成功交付的 `needs_input`；已交付后修改不计回剩余 |
+| `available` | `remaining` 加尚未成功交付且符合重试条件的失败卡密；已有成功交付的修改任务不计回可用 |
+| `used` | 已有任务且不属于初次制作待补充的卡密数；曾成功交付的卡即使修改轮次处于 `needs_input` 仍计为已使用 |
 | `verified` | 已记录至少一次成功验码的卡密数 |
-| `viewed` | 至少领取过一次内容的卡密数 |
+| `viewed` | 当前稿或任一历史交付版至少领取过一次内容的卡密数 |
 | `in_progress` | 排队或处理中的卡密数 |
 | `completed` | 已成功或已销毁的卡密数 |
 | `failed` | 当前失败任务的卡密数，不含退回补充或拒绝 |
@@ -110,7 +113,7 @@ Content-Type: application/json
 
 `summary.states` 的状态互斥：`unused`、`needs_input`、`queued`、`processing`、`succeeded`、`failed_retryable`、`failed_terminal`、`destroyed`、`revoked`、`expired`、`rejected`，可作为库存 `status` 筛选值。库存响应的 `summary` 始终统计整个权限范围，不随状态、批次或搜索过滤改变；`total` 是筛选后的条数。
 
-`expired` 表示未提交或退回补充且已到期；失败任务到期后归入 `failed_terminal`。已拒绝的任务到期后仍为 `rejected`，撤销状态优先。`needs_input` 虽计回剩余，仍绑定原任务，不能当作从未使用的卡密再次销售。一次领取只增加领取记录，任务仍为 `succeeded`，不会自动变成 `destroyed`。
+`expired` 表示未提交或退回补充且已到期；失败任务到期后归入 `failed_terminal`。已拒绝的任务到期后仍为 `rejected`，撤销状态优先。首次交付前的 `needs_input` 虽计回剩余，仍绑定原任务，不能当作从未使用的卡密再次销售；已经成功交付的卡在修改、待补充或技术失败期间一直视为已使用，不恢复未兑换数量。一次领取只增加领取记录，任务仍为 `succeeded`，不会自动变成 `destroyed`；进入修改轮次也不会清除历史版的已领取统计。
 
 到期限制尚未兑换卡密的新提交、失败重试及退回补充后的重提；已经成功的交付仍按查看规则领取，到期不会销毁已有结果。历史包含发行、验码、提交、重试、进度、成功、失败、退回补充、拒绝、领取、销毁与撤销记录，不返回参数、消息、交付结果、私密领取链接、原卡密或摘要。
 
@@ -142,6 +145,40 @@ Content-Type: application/json
 `id` 匹配 `[a-z0-9][a-z0-9_-]{0,39}`；`name` 去除首尾空白后为 1–120 字符，`description` 默认为空、最多 10000 字符。`price` 是参考价，以非负十进制**字符串**或 `null` 保存，文本匹配 `[0-9]+(?:\.[0-9]{1,6})?`、最多 100 字符，规范化后最多 12 位整数；不接受指数、正负号或 JSON 数字，多余的前导零和小数尾零会规范化。`currency` 为 3–5 个大写字母，默认 `CNY`。参考价仅供外部商城配置参考，实际售价由商家在商城确定。Extore 只负责兑换与交付，不计算订单金额或收款。字段名 `price`、十进制数值与 `currency` 币种保持兼容。
 
 `attributes` 最多 20 项，属性名非空、最多 100 字符，值只能是文本（最多 1000 字符）、有限数字、布尔值或 `null`；整数绝对值不得超过 `9007199254740991`，大整数用文本表示。不能嵌套数组或对象。`enabled` 默认 `true`。
+
+### 卡密属性与修改权益
+
+普通内容商品可选 `revision_policy`，默认 `null`；需使用 `view_policy="repeat"`，不能是 `stock` 或启用多步 `task_flow` 的商品。配置只选择商家定义的一个计数属性和名称，不硬编码权益的代码名：
+
+```json
+{
+  "revision_policy": {
+    "attribute_key": "edit_passes",
+    "label": {"zh-CN": "修改次数", "en": "Included revisions"}
+  },
+  "variants": [
+    {"id":"standard","name":"标准版","price":"25","attributes":{"edit_passes":0}},
+    {"id":"enhanced","name":"强化版","price":"50","attributes":{"edit_passes":1}}
+  ]
+}
+```
+
+`attribute_key` 是非空字符串、最多 100 字符；名称为 1–20 种语言的文本，每个名称最多 200 字符。卡级 `attributes` 覆盖后，所选计数须是 0–1000 的整数，缺少时视为 0；`null`、浮点、布尔或文本不能作为这个计数。顾客不能通过参数或请求体增减额度。旧卡没有政策快照时没有修改权益，也不会继承商家后来添加的属性。商品或规格后续更新只影响新卡。服务型商品不使用交付修改政策。
+
+验码、领取状态和批量的每个有效项新增 `card_attributes` 及 `entitlements`。后者为 `null` 或 `{attribute_key,label,total,used,remaining,can_request,reason}`；`can_request` 是当前可否开新一轮，不是仅看余额。任务新增 `revision:{current,message,is_revision}`，初稿为 0；`deliveries` 只包含 `{revision,attempt,created,revealed,has_files}`，`last_delivery` 为最近成功版的 `{revision,attempt,created}` 或 `null`，不会随状态查询泄漏历史正文。
+
+```http
+POST /api/receipt/revisions
+Content-Type: application/json
+
+{"token":"领取凭证","request_id":"550e8400-e29b-41d4-a716-446655440000","expected_revision":0,"message":"请调整结果表的说明"}
+```
+
+批量领取记录需另传明确的 `card_id`。`request_id` 是规范 UUID v4，`expected_revision` 严格为非负整数，`message` 为非空文本、最多 10000 字符。服务端仅在当前轮次成功、凭证和卡密仍有效、权益余额充足时受理；原参数、输入附件、规格和步骤计划保留，建议单独进入 `revision.message`。受理与额度扣减、轮次／尝试递增、入队在同一事务完成，返回新的 `job_view`。同编号同正文幂等返回原受理结果，异正文返回 409；并发或旧轮次冲突不能额外扣次数。首次制作及每轮内部的技术失败／补充重试不消耗修改额度。修改额度不会把已兑换卡密变为未售库存。
+
+`reveal` 可传 `revision`，0 是初稿；不传时领取当前或最近成功的一版，修改排队期间已有成功版仍可领取。`files/download` 也可明确版本，省略时根据已揭示的文件 ID 确定版本，不把新版权限套在旧版文件上。单次查看和下载按各版的既有策略执行；销毁、撤销及店铺停用仍在服务器校验，不能靠历史版本绕过。保存历史版本的附件共用单卡、店铺及全站容量上限。
+
+修改轮次的管理批处理必须明确携带领取时的 `attempt`，多项流程使用各自的 `flow_scopes[].attempt`。输出上传的 multipart 同样带 `attempt`；服务端在预检与提交附件时各验证一次。原稿允许既有客户端省略，修改轮次则拒绝省略或旧尝试，不依据当前任务自动升级旧结果。相同 attempt 内的流程还须匹配节点 epoch 与 action_id。
 
 未配置规格的旧商品默认采用 `{id:"default",name:"默认规格",description:"",price:null,currency:"CNY",attributes:{},enabled:true}`。旧卡缺少快照时也使用这个固定默认值，不继承后来修改的属性。发行过任意卡密的规格不能删除（409），可以停用或修改展示、参考价和属性；这些修改只影响后续发行。现有卡密仍按原快照兑换，停用不会使旧卡失效。
 
@@ -271,7 +308,7 @@ Content-Type: application/json
 
 本节是兼容的 v1 通知。流程私有执行内容走加密的独立派发记录，普通事件、事件查询和重投不携带该执行信封或短期敏感值。只有按当前节点授权的私有 Worker v2 能取得该节点明确映射的输入，见[私有 Worker 协议](private-worker.md)。
 
-商品配置 `webhook_url` 和 `webhook_secret`（至少 32 字符）。所有处理方式都可配置通知 URL；只有 `webhook` 处理方式接受外部状态回调。交付内容不写入事件；用户参数仅在 `redemption.requested` 携带。
+商品配置 `webhook_url` 和 `webhook_secret`（至少 32 字符）。所有处理方式都可配置通知 URL；只有 `webhook` 处理方式接受外部状态回调。交付内容不写入事件；用户参数仅在 `redemption.requested` 与 `revision.requested` 携带。
 
 ```json
 {
@@ -298,16 +335,17 @@ Content-Type: application/json
 
 | type | 触发时机 | data |
 |---|---|---|
-| `redemption.requested` | 首次提交、合规失败重试或补充后重提 | 任务状态字段及 `params` |
+| `redemption.requested` | 首次提交、合规失败重试或补充后重提 | 任务状态字段、`params`、`card_attributes` 及当前 `revision.message` |
+| `revision.requested` | 成功受理一次交付后修改 | 任务状态字段、原 `params`、独立的 `revision.message` 与剩余权益 |
 | `fulfillment.progress` | 领取任务、自动处理开始、进度更新 | 任务状态字段 |
-| `fulfillment.succeeded` | 首次成功交付 | 任务状态字段 |
+| `fulfillment.succeeded` | 每一轮成功交付 | 任务状态字段 |
 | `fulfillment.failed` | 明确失败、超时或中断 | 任务状态字段 |
 | `fulfillment.needs_input` | 已领取的队列任务要求重试 | 任务状态字段，`message` 为原因，含 `retry_mode` 与 `retry_reason_type` |
 | `fulfillment.rejected` | 已领取的队列任务被拒绝 | 任务状态字段，`message` 为原因 |
 | `delivery.viewed` | 内容成功领取，每次重复查看也产生事件 | 任务状态字段 |
 | `delivery.destroyed` | 顾客首次销毁 | 任务状态字段，`state=destroyed` |
 
-上述任务状态字段都带服务端保存的规格 `variant`、步骤快照 `steps`（每项含 `done`）与 `completed_steps`。它们是任务元数据，独立于顾客 `params`；顾客或回调不能改写规格及既有计划。事件不包含交付 `output` 或文件内容。
+上述任务状态字段都带服务端保存的规格 `variant`、步骤快照 `steps`（每项含 `done`）与 `completed_steps`；0.10.0 还带 `entitlements`、当前交付轮次和 `last_delivery` 最近成功版指针。只有 `redemption.requested` 与 `revision.requested` 两个启动事件携带完整 `card_attributes` 和 `revision.message`；其他通知的 `revision` 只含 `current/is_revision`，不反复投递顾客的长修改建议。所有事件都省略完整 `deliveries` 历史列表，也不包含交付 `output` 或文件内容。需要历史元数据时读取授权的 receipt 或 job 详情，不能把进度通知当作全文快照。卡属性、权益和轮次独立于顾客 `params`；顾客或回调不能改写属性、规格、计数及既有计划。
 
 事件与任务变更同一 SQLite 事务提交。外部平台应快速校验、入队并返回 2xx；随后异步执行。签名字段：
 
@@ -323,7 +361,7 @@ Content-Type: application/json
 
 投递保证为**至少一次**。重试使用相同事件 ID、新时间和新 nonce。接收端需持久化事件 ID 防止重复消费；SDK 只验签，不替你存储去重状态。一次 HTTP 投递 15 秒超时，最多 8 次，间隔 `min(3600, 2^attempts * 5)` 秒。只认可 2xx，不跟随重定向。投递失败记为 `dead` 后由商家重投；过期请求记为 `cancelled`。
 
-不同任务不保证全局顺序；顾客状态以 API 为准。超时重试可能重复到达，另一平台必须以任务 ID 做发货去重，不能只依赖事件 ID。收到了非 `redemption.requested` 的通知时不要启动发货。
+不同任务不保证全局顺序；顾客状态以 API 为准。超时重试可能重复到达，接收端先按事件 ID 去重，再按 `(task_id,attempt)` 识别当前执行；内容版本按 `(task_id,revision.current)` 去重，技术重试保留同一版。付款或开通等整单一次的副作用继续按稳定任务 ID 去重，不能因修改再执行。只监听 `redemption.requested` 与 `revision.requested` 启动处理，其他通知不启动交付；修改轮次和旧尝试过期时不能再处理旧派发。
 
 ## 签名回调
 
@@ -372,8 +410,9 @@ Worker 使用 `POST /api/callbacks/v2/{product_id}/{job_id}/result` 回调，JSO
 | `POST /api/exchange` | `{code}` | 30 天兑换凭证、指定商品、发行规格 `variant`、已有任务 |
 | `POST /api/redeem` | `{token,params}` | 创建、合规失败重试或补充后重提任务，返回状态 |
 | `POST /api/retry` | `{token,card_id?}` | 仅 `needs_input/reuse` 且 `can_retry=true`：沿用保存的原参数和输入附件重试 |
+| `POST /api/receipt/revisions` | `{token,card_id?,request_id,expected_revision,message}` | 使用冻结的卡密权益申请新交付轮次，幂等返回 job_view |
 | `POST /api/receipt` | `{token}` | 商品、发行规格 `variant` 与状态；退回补充时包含原 `params` 供顾客修改，不返回交付结果 |
-| `POST /api/receipt/reveal` | `{token,card_id?}` | 显式领取 `{output,content,files?}`；`content` 为兼容可读文本，一次领取原子消费 |
+| `POST /api/receipt/reveal` | `{token,card_id?,revision?}` | 显式领取 `{revision,output,content,files?}`；`content` 为兼容可读文本，一次领取原子消费 |
 | `POST /api/receipt/destroy` | `{token,card_id?}` | 永久关闭应用内交付内容 |
 | `POST /api/task-flow/start` | `{token,card_id?,flow_epoch,expected_revision}` | 明确开始当前 input 或初始 display，返回当前 job_view；开始前不展示输入题目或计时 |
 | `POST /api/task-flow/answer` | 同上，另加 `values` 字符串对象 | 提交当前输入，按冻结路径进入下一步 |

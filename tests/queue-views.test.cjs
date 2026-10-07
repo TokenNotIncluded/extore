@@ -93,3 +93,16 @@ test("an earlier batch completion cannot reopen a different product or view", as
   assert.equal(page.getContext().queueView, "processed");
   assert.equal(page.node("#workspace").innerHTML, markup);
 });
+
+test("修改重新进入商品队列，显示本轮建议与卡密冻结属性并转义用户文本", async () => {
+  const page = queue();
+  const row = { ...job("job-revision", "queued"), product_id: "A", params: { request: "original request" }, files: [], revision: { current: 1, is_revision: true, message: '<img src=x onerror="evil()">修改摘要' }, card_attributes: { included_edits: 1, note: "<script>unsafe<\/script>" } };
+  await load(page, { rows: [row] });
+  const html = page.node("#workspace").innerHTML;
+  assert.match(html, /第 1 轮修改建议/);
+  assert.match(html, /卡密绑定属性/);
+  assert.match(html, /included_edits/);
+  assert.match(html, /&lt;img src=x/);
+  assert.match(html, /&lt;script&gt;unsafe/);
+  assert.doesNotMatch(html, /<img src=x|<script>unsafe/);
+});

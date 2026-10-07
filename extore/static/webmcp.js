@@ -38,6 +38,7 @@
     "max_attempts",
     "processor_id",
     "processor_config",
+    "revision_policy",
   ];
   const permissionDependencies = {
     "queue.process": "queue.view",
@@ -175,6 +176,17 @@
     },
     ["key", "label"],
   );
+  const attributesSchema = {
+    type: "object", maxProperties: 20,
+    propertyNames: { ...string(100, 1), pattern: "\\S" },
+    additionalProperties: { type: ["string", "number", "boolean", "null"], maxLength: 1000 },
+  };
+  const revisionPolicySchema = { ...object({
+    attribute_key: { ...string(100, 1), pattern: "\\S" },
+    label: { ...localized(200, true), maxProperties: 20,
+      propertyNames: { ...string(40, 1), pattern: "\\S" },
+      additionalProperties: { ...string(200, 1), pattern: "\\S" } },
+  }, ["attribute_key", "label"]), type: ["object", "null"] };
   const variantSchema = object(
     {
       id: variantId,
@@ -187,15 +199,7 @@
         pattern: "^\\d+(?:\\.\\d{1,6})?$",
       },
       currency: { ...string(5, 3), pattern: "^[A-Z]{3,5}$" },
-      attributes: {
-        type: "object",
-        maxProperties: 20,
-        propertyNames: { ...string(100, 1), pattern: "\\S" },
-        additionalProperties: {
-          type: ["string", "number", "boolean", "null"],
-          maxLength: 1000,
-        },
-      },
+      attributes: attributesSchema,
       enabled: boolean,
     },
     ["id", "name"],
@@ -213,6 +217,12 @@
   const completedStepsSchema = {
     type: "array", items: variantId, maxItems: 30, uniqueItems: true,
   };
+  const attemptSchema = integer(1, Number.MAX_SAFE_INTEGER);
+  const operationFences = {
+    attempt: attemptSchema,
+    flow_scopes: { type: "object", maxProperties: 100, propertyNames: id,
+      additionalProperties: object({ attempt: attemptSchema, flow_epoch: attemptSchema, action_id: string(100, 1) }, ["attempt"]) },
+  };
   const productFields = {
     name: string(120, 1),
     description: string(20000),
@@ -224,6 +234,7 @@
     mode: choice(["manual", "webhook", "script", "stock"]),
     delivery: choice(["content", "service"]),
     view_policy: choice(["repeat", "once"]),
+    revision_policy: revisionPolicySchema,
     allow_retry: boolean,
     max_attempts: integer(1, 20),
     parameters: { type: "array", items: parameterSchema, maxItems: 30 },
@@ -877,6 +888,19 @@
     if (p.support_email?.trim() && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(p.support_email.trim()))
       throw new ToolError("invalid_arguments", "The support email address is invalid.");
     const variants = p.variants || [];
+    if (p.revision_policy != null) {
+      validate(revisionPolicySchema, p.revision_policy);
+      if (p.mode === "stock" || p.delivery !== "content" || p.view_policy !== "repeat" || p.task_flow)
+        throw new ToolError("invalid_arguments", "Revision allowances require repeatable content delivery without stock mode or task flows.");
+      if (p.revision_policy.attribute_key !== p.revision_policy.attribute_key.trim() ||
+          ["__proto__", "constructor", "prototype"].includes(p.revision_policy.attribute_key))
+        throw new ToolError("invalid_arguments", "The revision allowance uses a forbidden attribute key.");
+      for (const variant of variants) {
+        const count = variant.attributes?.[p.revision_policy.attribute_key];
+        if (count !== undefined && (!Number.isSafeInteger(count) || count < 0 || count > 1000))
+          throw new ToolError("invalid_arguments", "Each variant's revision allowance must be an integer from 0 to 1000; missing means zero.");
+      }
+    }
     if (new Set(variants.map((variant) => variant.id)).size !== variants.length)
       throw new ToolError(
         "invalid_arguments",
@@ -1027,6 +1051,9 @@
     "revealed",
     "used_at",
     "updated",
+    "attributes",
+    "card_attributes",
+    "entitlements",
   ];
   const summaryFields = [
     "total",
@@ -1153,14 +1180,14 @@
         product: safeReceiptStatus({ product: value.product }).product,
         items: value.items.map((item) => ({
           ...project(item, ["card_id", "suffix", "accepted", "status", "error", "http_status", "index", "duplicate_of"]),
-          ...safeReceiptStatus({ product: item.product, variant: item.variant, job: item.job }),
+          ...safeReceiptStatus({ product: item.product, variant: item.variant, job: item.job, card_attributes: item.card_attributes, entitlements: item.entitlements }),
         })),
       };
     }
     const product = project(value.product, [
       "id", "name", "description", "logo", "image", "public", "variants", "progress_steps",
       "support_email", "mode", "delivery", "view_policy", "allow_retry", "max_attempts",
-      "parameters", "outputs", "processor_id",
+      "parameters", "outputs", "processor_id", "revision_policy",
     ]);
     const variant = (item) => project(item, [
       "id", "name", "description", "price", "currency", "attributes", "enabled",
@@ -1171,11 +1198,19 @@
     const result = { product, job: value.job ? project(value.job, [
       "id", "product_id", "product_name", "state", "message", "progress", "attempt", "created",
       "updated", "revealed", "delivery", "view_policy", "can_retry", "queue_ahead", "queue_position",
-      "completed_steps", "support_email", "retry_mode", "retry_reason_type",
+      "completed_steps", "support_email", "retry_mode", "retry_reason_type", "card_attributes",
     ]) : null };
     if (value.variant) result.variant = variant(value.variant);
     if (value.job?.variant) result.job.variant = variant(value.job.variant);
     if (value.job?.steps) result.job.steps = steps(value.job.steps);
+    for (const name of ["card_attributes", "entitlements"])
+      if (own(value, name)) result[name] = name === "entitlements" ? safeEntitlements(value[name]) : value[name];
+    if (value.job) {
+      if (own(value.job, "entitlements")) result.job.entitlements = safeEntitlements(value.job.entitlements);
+      if (value.job.revision) result.job.revision = project(value.job.revision, ["current", "message", "is_revision"]);
+      if (value.job.deliveries) result.job.deliveries = value.job.deliveries.map((item) => project(item, ["revision", "attempt", "created", "revealed", "has_files"]));
+      if (own(value.job, "last_delivery")) result.job.last_delivery = value.job.last_delivery ? project(value.job.last_delivery, ["revision", "attempt", "created"]) : null;
+    }
     if (receiptFlow(value)) {
       if (result.job) result.job.task_flow = safeFlow(receiptFlow(value));
       else product.task_flow_view = safeFlow(receiptFlow(value));
@@ -1184,6 +1219,9 @@
       if (own(value, name)) result[name] = value[name];
     if (value.steps) result.steps = steps(value.steps);
     return result;
+  }
+  function safeEntitlements(value) {
+    return value == null ? null : project(value, ["attribute_key", "label", "total", "used", "remaining", "can_request", "reason"]);
   }
   function selectedReceipt(receipt, captured) {
     if (!receipt.batch) return receipt;
@@ -1195,7 +1233,7 @@
     return item;
   }
   function safeFileDescriptor(value) {
-    return project(value, ["id", "job_id", "field_key", "kind", "filename", "content_type", "size", "created", "consumed", "flow_epoch", "node_id"]);
+    return project(value, ["id", "job_id", "field_key", "kind", "filename", "content_type", "size", "created", "consumed", "flow_epoch", "node_id", "attempt"]);
   }
   function uploadedDescriptor(value, input, jobId = null, kind = jobId === null ? "input" : "output") {
     if (!value || typeof value.id !== "string" || !new RegExp(fileId.pattern).test(value.id) ||
@@ -1660,23 +1698,46 @@
       );
       }
       add(
+        "receipt_request_revision",
+        "提交修改建议",
+        "Request a paid delivery revision using this card's frozen allowance. Read receipt_status first and use its job.revision.current as expected_revision. Only available after a successful delivery when entitlements.can_request is true. Submitting consumes one revision and returns the task to its product queue; previous deliveries remain available. The UI retains the request ID for network retries. Explicit confirm:true is required.",
+        object({ message: string(10000, 1), expected_revision: integer(0, 1000), confirm: confirmed }, ["message", "expected_revision", "confirm"]),
+        async (input, signal) => {
+          const value = await action("receipt", [], signal);
+          checkInvocation(signal);
+          const receipt = selectedReceipt(value, c);
+          if (receipt.job?.state !== "succeeded" || !receipt.job.entitlements?.can_request)
+            throw new ToolError("invalid_state", "This delivery has no available revision allowance.");
+          if (receipt.job.revision?.current !== input.expected_revision)
+            throw new ToolError("stale_context", "The current delivery revision changed. Read receipt_status again.");
+          if (!input.message.trim())
+            throw new ToolError("invalid_arguments", "Revision feedback must not be empty.");
+          const data = await action("requestRevision", [input.message], signal, { expected_revision: input.expected_revision });
+          await refresh();
+          return safeReceiptStatus({ product: receipt.product, job: data.job || data });
+        },
+        write,
+      );
+      add(
         "receipt_reveal",
         "领取交付内容",
-        "Deliberately reveal delivery content to the agent and visible UI. In a batch, select the desired card in the page first. Once-only delivery is consumed by opening; save it immediately. Explicit confirm:true is always required.",
-        object({ confirm: confirmed }, ["confirm"]),
-        async (_, signal) => {
+        "Deliberately reveal delivery content to the agent and visible UI. revision optionally chooses one previously completed version; omitting it reveals the latest successful delivery, even while a revision is queued. In a batch, select the desired card in the page first. Once-only delivery is consumed by opening; save it immediately. Explicit confirm:true is always required.",
+        object({ revision: integer(0, 1000), confirm: confirmed }, ["confirm"]),
+        async (input, signal) => {
           const value = await action("receipt", [], signal);
           checkInvocation(signal);
           const receipt = selectedReceipt(value, c);
           if (
-            receipt.job?.state !== "succeeded" ||
+            (receipt.job?.state !== "succeeded" && !receipt.job?.last_delivery || receipt.job?.state === "destroyed") ||
             receipt.job.delivery !== "content"
           )
             throw new ToolError(
               "invalid_state",
               "No completed content delivery is available.",
             );
-          const data = await action("reveal", [], signal);
+          if (input.revision !== undefined && !(receipt.job.deliveries || []).some((delivery) => delivery.revision === input.revision))
+            throw new ToolError("invalid_arguments", "This receipt does not contain that completed delivery revision.");
+          const data = await action("reveal", [], signal, input.revision === undefined ? {} : { revision: input.revision });
           await refresh();
           return data;
         },
@@ -1685,13 +1746,13 @@
       add(
         "receipt_destroy",
         "永久销毁交付",
-        "Permanently delete this completed delivery and disable access through its receipt. In a batch, select the desired card in the page first; other cards are not destroyed. Irreversible; explicit confirm:true is required.",
+        "Permanently delete every version of this delivery and disable access through its receipt, including while a revision is queued. In a batch, select the desired card in the page first; other cards are not destroyed. Irreversible; explicit confirm:true is required.",
         object({ confirm: confirmed }, ["confirm"]),
         async (_, signal) => {
           const value = await action("receipt", [], signal);
           checkInvocation(signal);
           const receipt = selectedReceipt(value, c);
-          if (!["succeeded", "destroyed"].includes(receipt.job?.state))
+          if (!["succeeded", "destroyed"].includes(receipt.job?.state) && !receipt.job?.last_delivery)
             throw new ToolError(
               "invalid_state",
               "Only a completed delivery can be destroyed.",
@@ -2100,6 +2161,14 @@
           assertActiveProduct(old);
           const { id: ignored, deleted: ignoredDeleted, deleted_at: ignoredDeletedAt, ...config } = old;
           const product = { ...config, ...input.changes };
+          if (scoped && !signal.auth?.permissions?.includes("fulfillment.configure") &&
+              own(input.changes, "variants") && old.revision_policy) {
+            const key = old.revision_policy.attribute_key;
+            const originals = old.variants || [];
+            if (input.changes.variants.some((variant) => (variant.attributes?.[key] ?? 0) !==
+                (originals.find((value) => value.id === variant.id)?.attributes?.[key] ?? 0)))
+              throw new ToolError("forbidden", "Changing the selected revision allowance requires fulfillment.configure; other display attributes remain editable.");
+          }
           if (
             own(input.changes, "outputs") &&
             JSON.stringify(outputStructure(input.changes.outputs)) !==
@@ -2253,7 +2322,7 @@
       if (!scopedProductDeleted) add(
         "cards_issue",
         "发行卡密",
-        "Issue new card codes for a product. Deliberately returns sensitive plaintext codes only once; save them securely. Explicit confirm:true is required.",
+        "Issue new card codes for a product. Optional attributes override the chosen variant's scalar attributes only for this batch; attributes and any revision allowance are frozen on issuance. The configured allowance attribute must be an integer from 0 to 1000. Deliberately returns sensitive plaintext codes only once; save them securely. Explicit confirm:true is required.",
         object(
           {
             product_id: id,
@@ -2261,6 +2330,7 @@
             variant_id: { ...variantId, default: "default" },
             label: string(100),
             expires: { type: ["number", "null"], exclusiveMinimum: 0 },
+            attributes: attributesSchema,
             confirm: confirmed,
           },
           ["product_id", "count", "confirm"],
@@ -2273,7 +2343,15 @@
               "Card expiry must be a future Unix timestamp.",
             );
           const { confirm: ignored, ...body } = input;
-          await activeManagementProduct(input, signal);
+          const product = await activeManagementProduct(input, signal);
+          if (Object.values(input.attributes || {}).some((value) =>
+              typeof value === "number" && Number.isInteger(value) && !Number.isSafeInteger(value)))
+            throw new ToolError("invalid_arguments", "Large integer code attributes must be supplied as strings.");
+          const allowanceKey = product.revision_policy?.attribute_key;
+          const variant = product.variants?.find((entry) => entry.id === (input.variant_id || "default"));
+          const count = allowanceKey && (own(input.attributes || {}, allowanceKey) ? input.attributes[allowanceKey] : variant?.attributes?.[allowanceKey]);
+          if (allowanceKey && count !== undefined && (!Number.isSafeInteger(count) || count < 0 || count > 1000))
+            throw new ToolError("invalid_arguments", "The code's revision allowance must be an integer from 0 to 1000.");
           const data = await request(cardsPath, body, "POST", signal);
           await updateUI();
           return data;
@@ -2502,7 +2580,8 @@
         }
         const files = await request(query("/manage/files", input, ["job_id"]), undefined, "GET", signal);
         checkInvocation(signal);
-        return files.filter((file) => file.job_id === input.job_id && (!flowScope ||
+        return files.filter((file) => file.job_id === input.job_id &&
+          (!(job.revision?.current > 0) || file.kind !== "output" || file.attempt === job.attempt) && (!flowScope ||
           file.kind === "input" && inputIds.has(file.id) ||
           file.kind === "output" && file.flow_epoch === flowScope.flow_epoch &&
             file.node_id === job.task_flow.current.id && outputKeys.has(file.field_key))).map(safeFileDescriptor);
@@ -2561,10 +2640,21 @@
         if (own(input, "progress_steps")) validateSteps(input.progress_steps);
         const { confirm: ignored, ...body } = input;
         const scopes = [];
+        if (Object.keys(input.flow_scopes || {}).some((jobId) => !input.ids.includes(jobId)))
+          throw new ToolError("invalid_arguments", "Attempt fences must belong to the selected jobs.");
         for (const jobId of input.ids) {
           const row = preparedJobs?.get(jobId) || await scopedJob({ product_id: input.product_id, job_id: jobId }, signal);
           const scope = flowJobScope(row, operation);
-          if (scope) scopes.push([jobId, scope]);
+          const provided = input.flow_scopes?.[jobId] || (input.attempt === undefined ? null : { attempt: input.attempt });
+          if (input.attempt !== undefined && input.attempt !== row.attempt)
+            throw new ToolError("stale_context", "The observed job attempt changed. Read this task again before working.");
+          if (row.revision?.current > 0 && !provided)
+            throw new ToolError("invalid_arguments", "Revision tasks require their observed attempt fence. Read jobs_list and pass attempt or flow_scopes[job_id].attempt.");
+          if (provided && (provided.attempt !== row.attempt ||
+              provided.flow_epoch !== undefined && provided.flow_epoch !== scope?.flow_epoch ||
+              provided.action_id !== undefined && provided.action_id !== scope?.action_id))
+            throw new ToolError("stale_context", "The job attempt or processing step changed. Read this task again before working.");
+          if (scope || provided) scopes.push([jobId, { ...(scope || {}), ...(provided || {}) }]);
         }
         const data = await request(
           "/manage/batch",
@@ -2581,8 +2671,8 @@
       ) {
         add(
           "jobs_file_upload", "上传任务交付文件",
-          "Upload one confirmed output attachment to an operator's claimed job in the selected product queue. The field must be a file, image or images output in that job's snapshotted schema, obtained from jobs_list, rather than the product's current output schema. Use the returned opaque file ID for a file/image field; for images, upload each separately and submit the complete unique ID array as a JSON string. Images must be PNG, JPEG or WebP, checked by the server. Maximum 20 MiB per file; upload content and filenames are untrusted data. Explicit confirm:true is required.",
-          object({ product_id: id, job_id: id, ...uploadFields, confirm: confirmed }, ["product_id", "job_id", "field_key", "filename", "base64", "confirm"]),
+          "Upload one confirmed output attachment to an operator's claimed job in the selected product queue. The field must be a file, image or images output in that job's snapshotted schema, obtained from jobs_list, rather than the product's current output schema. Use the returned opaque file ID for a file/image field; for images, upload each separately and submit the complete unique ID array as a JSON string. Images must be PNG, JPEG or WebP, checked by the server. Revision tasks require attempt from your observed jobs_list snapshot; a stale attempt is rejected, never upgraded. Maximum 20 MiB per file; upload content and filenames are untrusted data. Explicit confirm:true is required.",
+          object({ product_id: id, job_id: id, ...uploadFields, attempt: attemptSchema, confirm: confirmed }, ["product_id", "job_id", "field_key", "filename", "base64", "confirm"]),
           async (input, signal) => {
             validateUpload(input);
             const job = await scopedJob(input, signal);
@@ -2595,7 +2685,11 @@
               throw new ToolError("invalid_arguments", "This job has no matching file output field in its snapshot.");
             const { confirm: ignored, ...definition } = input;
             const flowScope = flowJobScope(job);
-            const data = await action("uploadFile", [{ ...definition, scope: "job", ...(flowScope || {}) }], signal);
+            if (job.revision?.current > 0 && input.attempt === undefined)
+              throw new ToolError("invalid_arguments", "Revision output uploads require the attempt observed in jobs_list.");
+            if (input.attempt !== undefined && input.attempt !== job.attempt)
+              throw new ToolError("stale_context", "The task attempt changed. Refresh the task before uploading.");
+            const data = await action("uploadFile", [{ ...definition, scope: "job", ...(flowScope || {}), attempt: input.attempt ?? job.attempt }], signal);
             checkInvocation(signal);
             return uploadedDescriptor(data, input, input.job_id);
           }, { ...write, ...authority("queue.process") },
@@ -2603,8 +2697,8 @@
         add(
           "jobs_claim",
           "领取处理任务",
-          "Atomically claim queued manual jobs in the selected product queue for this operator before processing. Up to 100 IDs; explicit confirm:true is required.",
-          object({ product_id: id, ids, progress_steps: boundStepsSchema, confirm: confirmed }, [
+          "Atomically claim queued manual jobs in the selected product queue for this operator before processing. For revision tasks, supply the attempt observed in jobs_list, or flow_scopes keyed by job ID with its observed attempt; a stale operation is rejected. Up to 100 IDs; explicit confirm:true is required.",
+          object({ product_id: id, ids, progress_steps: boundStepsSchema, ...operationFences, confirm: confirmed }, [
             "product_id",
             "ids",
             "confirm",
@@ -2615,11 +2709,12 @@
         add(
           "jobs_progress",
           "更新处理进度",
-          "Update claimed jobs in one selected product queue. Completed IDs refer to each job's snapshotted steps from jobs_list, not the product's current default plan. Omitted completed_steps preserves existing completion; completion cannot regress within one attempt. A progress_steps plan may be bound once to a job without a plan or completed steps. Step progress is calculated by the server; legacy percent progress remains optional. Does not finish jobs. Explicit confirm:true is required.",
+          "Update claimed jobs in one selected product queue. For revision tasks, supply the attempt observed in jobs_list, or flow_scopes keyed by job ID with its observed attempt; a stale operation is rejected. Completed IDs refer to each job's snapshotted steps from jobs_list, not the product's current default plan. Omitted completed_steps preserves existing completion; completion cannot regress within one attempt. A progress_steps plan may be bound once to a job without a plan or completed steps. Step progress is calculated by the server; legacy percent progress remains optional. Does not finish jobs. Explicit confirm:true is required.",
           object(
             {
               product_id: id,
               ids,
+              ...operationFences,
               progress: integer(0, 99),
               progress_steps: boundStepsSchema,
               completed_steps: completedStepsSchema,
@@ -2634,6 +2729,7 @@
         const completionProperties = {
           product_id: id,
           ids,
+          ...operationFences,
           message: string(1000),
           progress_steps: boundStepsSchema,
           output: {
@@ -2647,7 +2743,7 @@
         add(
           "jobs_complete",
           "完成任务并交付",
-          "Complete claimed jobs in the selected product queue. Read each task's outputs from jobs_list: execution fetches every target job and strictly validates its snapshotted required fields and types, never the product's current schema. Output accepts at most 30 code keys with string values, totalling at most 100000 characters. Select fields take declared option values; boolean fields take true/false strings. File/image fields take opaque uploaded IDs; images takes a JSON string array of unique uploaded IDs, never URLs or base64. Attachment deliveries must be completed individually. All selected jobs must have the same delivery and output structure and receive identical results. Only a legacy single content snapshot accepts content; services return status only. The server completes all steps automatically. Explicit confirm:true is required.",
+          "Complete claimed jobs in the selected product queue. For revision tasks, supply the attempt observed in jobs_list, or flow_scopes keyed by job ID with its observed attempt; a stale operation is rejected. Read each task's outputs from jobs_list: execution fetches every target job and strictly validates its snapshotted required fields and types, never the product's current schema. Output accepts at most 30 code keys with string values, totalling at most 100000 characters. Select fields take declared option values; boolean fields take true/false strings. File/image fields take opaque uploaded IDs; images takes a JSON string array of unique uploaded IDs, never URLs or base64. Attachment deliveries must be completed individually. All selected jobs must have the same delivery and output structure and receive identical results. Only a legacy single content snapshot accepts content; services return status only. The server completes all steps automatically. Explicit confirm:true is required.",
           object(completionProperties, completionRequired),
           async (input, signal) => {
             if (own(input, "output") && Object.values(input.output).reduce((size, value) => size + value.length, 0) > 100000)
@@ -2704,11 +2800,12 @@
         add(
           "jobs_fail",
           "标记任务失败",
-          "Fail claimed manual jobs in one selected product queue. Set retryable:true only after verifying that no fulfillment occurred, to avoid duplicate delivery. Explicit confirm:true is required.",
+          "Fail claimed manual jobs in one selected product queue. For revision tasks, supply the attempt observed in jobs_list, or flow_scopes keyed by job ID with its observed attempt; a stale operation is rejected. Set retryable:true only after verifying that no fulfillment occurred, to avoid duplicate delivery. Explicit confirm:true is required.",
           object(
             {
               product_id: id,
               ids,
+              ...operationFences,
               message: string(1000),
               progress_steps: boundStepsSchema,
               retryable: boolean,
@@ -2720,12 +2817,12 @@
           { ...write, ...authority("queue.process") },
         );
         for (const [operation, title, description] of [
-          ["request_retry", "需要重试", "Return a claimed job for retry with a customer-visible reason. Missing input, external factors and processor problems are supported. retry_mode revise requires updated input; reuse permits the same stored input, without executing external work automatically. A meaningful reason of at most 1000 characters and explicit confirm:true are required."],
-          ["request_changes", "需要重试（兼容）", "Compatibility alias for a retry requiring revised inputs. A meaningful customer-visible reason and confirm:true are required."],
-          ["reject", "拒绝处理任务", "Reject claimed jobs in the selected product queue with an explanation visible to the customer. This is terminal and does not authorize another fulfillment attempt. A meaningful reason of at most 1000 characters and explicit confirm:true are required."],
+          ["request_retry", "需要重试", "Return a claimed job for retry with a customer-visible reason. For revision tasks, supply the attempt observed in jobs_list, or flow_scopes keyed by job ID with its observed attempt; a stale operation is rejected. Missing input, external factors and processor problems are supported. retry_mode revise requires updated input; reuse permits the same stored input, without executing external work automatically. A meaningful reason of at most 1000 characters and explicit confirm:true are required."],
+          ["request_changes", "需要重试（兼容）", "Compatibility alias for a retry requiring revised inputs. For revision tasks, supply the attempt observed in jobs_list, or flow_scopes keyed by job ID with its observed attempt; a stale operation is rejected. A meaningful customer-visible reason and confirm:true are required."],
+          ["reject", "拒绝处理任务", "Reject claimed jobs in the selected product queue with an explanation visible to the customer. For revision tasks, supply the attempt observed in jobs_list, or flow_scopes keyed by job ID with its observed attempt; a stale operation is rejected. This is terminal and does not authorize another fulfillment attempt. A meaningful reason of at most 1000 characters and explicit confirm:true are required."],
         ]) add(
           "jobs_" + operation, title, description,
-          object({ product_id: id, ids, reason: { ...string(1000, 1), pattern: "\\S" }, ...(operation === "request_retry" ? { retry_mode: choice(["revise", "reuse"]), reason_type: choice(["customer_input", "external", "processor"]) } : {}), confirm: confirmed }, ["product_id", "ids", "reason", "confirm"]),
+          object({ product_id: id, ids, ...operationFences, reason: { ...string(1000, 1), pattern: "\\S" }, ...(operation === "request_retry" ? { retry_mode: choice(["revise", "reuse"]), reason_type: choice(["customer_input", "external", "processor"]) } : {}), confirm: confirmed }, ["product_id", "ids", "reason", "confirm"]),
           async (input, signal) => {
             const { reason, ...body } = input;
             return batch(operation)({ ...body, message: reason }, signal);
@@ -2736,8 +2833,8 @@
         add(
           "jobs_allow_retry",
           "核实后允许重试",
-          "After independently confirming no external delivery occurred, permit failed jobs in one selected product queue to retry. May cause a second external fulfillment; explicit confirm:true is required.",
-          object({ product_id: id, ids, confirm: confirmed }, [
+          "After independently confirming no external delivery occurred, permit failed jobs in one selected product queue to retry. For revision tasks, supply the attempt observed in jobs_list, or flow_scopes keyed by job ID with its observed attempt; a stale operation is rejected. May cause a second external fulfillment; explicit confirm:true is required.",
+          object({ product_id: id, ids, ...operationFences, confirm: confirmed }, [
             "product_id",
             "ids",
             "confirm",

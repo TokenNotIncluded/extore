@@ -464,3 +464,118 @@ test("changing the language reloads the same receipt and updates its controls", 
   assert.equal(p.getContext().product, product);
   assert.match(p.node("#app").innerHTML, /Redemption progress/);
 });
+
+function revisionJob(overrides = {}) {
+  return {
+    ...job(), id: "revision-job", attempt: 1,
+    revision: { current: 0, message: "", is_revision: false },
+    entitlements: { attribute_key: "edits_remaining", label: { "zh-CN": "编辑权益", en: "Included edits" }, total: 1, used: 0, remaining: 1, can_request: true, reason: "" },
+    deliveries: [{ revision: 0, attempt: 1, created: 1, revealed: false, has_files: true }],
+    last_delivery: { revision: 0, attempt: 1, created: 1 },
+    ...overrides,
+  };
+}
+const revisionTurn = () => new Promise((resolve) => setImmediate(resolve));
+
+test("交付显示商家自定义的修改权益，排队修改期间保留原交付入口", () => {
+  const p = page();
+  p.receipt("revision-token");
+  p.context.renderReceipt(revisionJob());
+  assert.match(p.node("#app").innerHTML, /编辑权益/);
+  assert.match(p.node("#app").innerHTML, /剩余 1 \/ 1/);
+  assert.match(p.node("#app").innerHTML, /id="receipt-revision-form"/);
+  p.context.renderReceipt(revisionJob({ state: "queued", revision: { current: 1, message: "<script>change<\/script>", is_revision: true }, entitlements: { total: 1, used: 1, remaining: 0, can_request: false } }));
+  const html = p.node("#app").innerHTML;
+  assert.match(html, /id="reveal"/);
+  assert.match(html, /id="destroy"/);
+  assert.doesNotMatch(html, /id="receipt-revision-form"/);
+  assert.match(html, /&lt;script&gt;change/);
+  assert.doesNotMatch(html, /<script>change/);
+});
+
+test("申请修改只提交选定卡密、当前轮次与安全请求 ID，重复点击不重复请求", async () => {
+  const p = page();
+  const product = p.receipt("revision-token");
+  p.context.crypto = require("node:crypto").webcrypto;
+  p.context.renderReceipt(revisionJob());
+  const first = p.context.requestReceiptRevision("  调整结果表格  ");
+  const duplicate = p.context.requestReceiptRevision("调整结果表格");
+  assert.equal(p.requests.length, 1);
+  const request = p.requests[0];
+  assert.equal(request.url, "/api/receipt/revisions");
+  assert.equal(request.body.token, "revision-token");
+  assert.equal(request.body.expected_revision, 0);
+  assert.equal(request.body.message, "调整结果表格");
+  assert.match(request.body.request_id, /^[0-9a-f]{8}-[0-9a-f-]{27}$/);
+  request.respond(revisionJob({ state: "queued" }));
+  await revisionTurn();
+  p.requests[1].respond({ product, job: revisionJob({ state: "queued", revision: { current: 1, message: "调整结果表格", is_revision: true }, entitlements: { total: 1, used: 1, remaining: 0, can_request: false } }) });
+  await Promise.all([first, duplicate]);
+  assert.match(p.node("#app").innerHTML, /第 1 轮修改/);
+});
+
+test("网络失败后重试同一修改建议复用请求 ID，改建议或改卡密生成新 ID", async () => {
+  const p = page();
+  p.receipt("revision-token");
+  p.context.crypto = require("node:crypto").webcrypto;
+  p.context.renderReceipt(revisionJob());
+  const first = p.context.requestReceiptRevision("修改摘要");
+  const id = p.requests[0].body.request_id;
+  p.requests[0].reject(new Error("network interrupted"));
+  await assert.rejects(first, /network interrupted/);
+  const retry = p.context.requestReceiptRevision("修改摘要");
+  assert.equal(p.requests[1].body.request_id, id);
+  p.requests[1].reject(new Error("still offline"));
+  await assert.rejects(retry);
+  const revised = p.context.requestReceiptRevision("修改标题");
+  assert.notEqual(p.requests[2].body.request_id, id);
+  p.requests[2].reject(new Error("offline"));
+  await assert.rejects(revised);
+  const otherProduct = p.receipt("other-token");
+  p.context.renderReceipt(revisionJob());
+  const other = p.context.requestReceiptRevision("修改摘要");
+  assert.notEqual(p.requests[3].body.request_id, id);
+  p.requests[3].respond({ state: "queued" });
+  await revisionTurn();
+  p.requests[4].respond({ product: otherProduct, job: revisionJob({ state: "queued" }) });
+  await other;
+});
+
+test("修改请求拒绝过期轮次、耗尽额度、空建议，不发出网络请求", async () => {
+  const p = page();
+  p.receipt("revision-token");
+  p.context.crypto = require("node:crypto").webcrypto;
+  p.context.renderReceipt(revisionJob());
+  await assert.rejects(p.context.requestReceiptRevision("修改", { expected_revision: 2 }), /轮次已改变/);
+  await assert.rejects(p.context.requestReceiptRevision("   "), /请填写修改建议/);
+  p.context.renderReceipt(revisionJob({ entitlements: { total: 0, remaining: 0, can_request: false } }));
+  await assert.rejects(p.context.requestReceiptRevision("修改"), /不能申请修改/);
+  assert.equal(p.requests.length, 0);
+});
+
+test("已完成多个版本可选择查看，迟到旧版本的内容不能覆盖新版本", async () => {
+  const p = page();
+  p.receipt("revision-token");
+  p.context.renderReceipt(revisionJob({ deliveries: [{ revision: 0 }, { revision: 1 }], last_delivery: { revision: 1 }, revision: { current: 1 }, entitlements: { total: 1, remaining: 0, can_request: false } }));
+  assert.match(p.node("#app").innerHTML, /id="delivery-revision"/);
+  assert.match(p.node("#app").innerHTML, /第 1 轮修改 · 最新/);
+  const first = p.context.revealReceipt({ revision: 0 });
+  const second = p.context.revealReceipt({ revision: 1 });
+  assert.equal(p.requests[0].body.revision, 0);
+  assert.equal(p.requests[1].body.revision, 1);
+  p.requests[1].respond({ revision: 1, content: "new version" });
+  await second;
+  p.requests[0].respond({ revision: 0, content: "old version" });
+  await first;
+  assert.match(p.node("#content").innerHTML, /new version/);
+  assert.doesNotMatch(p.node("#content").innerHTML, /old version/);
+});
+
+test("销毁后隐藏修改权益及所有交付版本", () => {
+  const p = page();
+  p.receipt("revision-token");
+  p.context.renderReceipt(revisionJob({ state: "destroyed", deliveries: [{ revision: 0 }, { revision: 1 }] }));
+  const html = p.node("#app").innerHTML;
+  assert.doesNotMatch(html, /id="(?:reveal|destroy|receipt-revision-form|delivery-revision)"/);
+  assert.match(html, /内容已永久删除/);
+});

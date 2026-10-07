@@ -49,6 +49,7 @@ class FileDownload(BaseModel):
     token: str = Field(max_length=100)
     file_id: str = Field(min_length=1, max_length=100)
     card_id: str | None = Field(default=None, max_length=80)
+    revision: int | None = Field(default=None, strict=True, ge=0, le=1000)
 
 
 def init_schema(c):
@@ -197,7 +198,9 @@ def _manage_scope(c, s, row, permission):
     authorize_product(c, s, row["product_id"])
 
 
-def _output_scope(c, s, jid, field_key, *, flow_epoch=None, action_id=None):
+def _output_scope(
+    c, s, jid, field_key, *, flow_epoch=None, action_id=None, attempt=None
+):
     row = _row(c, jid)
     _manage_scope(c, s, row, "queue.process")
     p = _job_product(c, row)
@@ -211,6 +214,10 @@ def _output_scope(c, s, jid, field_key, *, flow_epoch=None, action_id=None):
         fail("只能为队列商品上传交付文件", 409)
     if row["state"] != "processing" or row["claimed_by"] != actor:
         fail("请先领取任务，且只能处理自己领取的任务", 409)
+    if (row["revision_round"] > 0 and attempt is None) or (
+        attempt is not None and attempt != row["attempt"]
+    ):
+        fail("上传必须绑定当前任务尝试，请刷新任务后重新上传", 409)
     from .flow_adapter import output_file_scope
 
     execution = output_file_scope(c, row, flow_epoch=flow_epoch)
@@ -237,6 +244,11 @@ def _flow_upload_args(fields, *, output=False):
         if not isinstance(value, str) or not 1 <= len(value) <= 100:
             fail("上传处理动作无效", 422)
         result["action_id"] = value
+    if output and "attempt" in fields:
+        value = fields["attempt"]
+        if not isinstance(value, str) or not re.fullmatch(r"[1-9][0-9]{0,8}", value):
+            fail("上传尝试标识无效", 422)
+        result["attempt"] = int(value)
     return result
 
 
@@ -465,7 +477,9 @@ def _store(
         "SELECT COALESCE(SUM(size),0) AS size,COUNT(*) AS count FROM job_files WHERE card_id=? AND content IS NOT NULL",
         (card_id,),
     ).fetchone()
-    if inventory["size"] + size > MAX_CARD_BYTES:
+    from .card_entitlements import allocated_bytes
+
+    if inventory["size"] + allocated_bytes(c, card_id=card_id) + size > MAX_CARD_BYTES:
         fail(f"此卡密的文件总量超过 {_byte_limit(MAX_CARD_BYTES)} 限制", 413)
     if inventory["count"] >= MAX_CARD_FILES:
         fail(f"此卡密的文件数量超过 {MAX_CARD_FILES} 个限制", 413)
@@ -598,7 +612,7 @@ async def upload_output(request: Request):
                     ("job_id", "field_key", "file"),
                     reservation,
                     bind_scope,
-                    optional=("flow_epoch", "action_id"),
+                    optional=("flow_epoch", "action_id", "attempt"),
                 )
                 try:
                     s = session(request, ("admin", "staff"))
@@ -720,6 +734,9 @@ def bind_inputs(c, row, params):
 
 
 def bind_outputs(c, row, output):
+    from .card_entitlements import preserved_output_ids
+
+    preserved = preserved_output_ids(c, row)
     selected = {
         fid
         for field in _job_product(c, row)["outputs"]
@@ -730,7 +747,7 @@ def bind_outputs(c, row, output):
     ).fetchall():
         if item["id"] in selected:
             c.execute("UPDATE job_files SET bound=1 WHERE id=?", (item["id"],))
-        else:
+        elif item["id"] not in preserved:
             c.execute("DELETE FROM job_files WHERE id=?", (item["id"],))
 
 
@@ -754,7 +771,14 @@ def release_output_files(c, row):
 
 
 def purge_job_outputs(c, jid):
-    c.execute("DELETE FROM job_files WHERE job_id=? AND kind='output'", (jid,))
+    from .card_entitlements import preserved_output_ids
+
+    preserved = preserved_output_ids(c, _row(c, jid))
+    for item in c.execute(
+        "SELECT id FROM job_files WHERE job_id=? AND kind='output'", (jid,)
+    ).fetchall():
+        if item["id"] not in preserved:
+            c.execute("DELETE FROM job_files WHERE id=?", (item["id"],))
 
 
 def purge_job_files(c, jid):
@@ -822,14 +846,29 @@ def customer_download(body: FileDownload, request: Request):
         row = _row(c, item["job_id"])
         if row["card_id"] != card["id"] or item["product_id"] != row["product_id"]:
             fail("文件不属于此次领取", 403)
-        if row["state"] != "succeeded" or not row["revealed"] or not item["released"]:
-            fail("请先领取商品后下载文件", 409)
         if not item["available"] or item["consumed"]:
             fail("文件已领取或销毁", 410)
         p = _job_product(c, row)
         _field(p, item["field_key"], "output")
-        if item["attempt"] != row["attempt"]:
-            fail("文件对应的尝试已失效", 409)
+        from .card_entitlements import file_delivery
+
+        delivery = file_delivery(c, row, item, body.revision)
+        # A one-time reveal clears text/JSON but its already-released current
+        # output is still entitled to its single download, exactly as before.
+        once_current = (
+            p["view_policy"] == "once"
+            and row["state"] == "succeeded"
+            and item["attempt"] == row["attempt"]
+            and body.revision in (None, 0)
+        )
+        if delivery is None and not once_current:
+            fail("文件未出现在已完成的交付版本中", 409)
+        if (
+            not item["bound"]
+            or not item["released"]
+            or not (delivery["revealed"] if delivery else row["revealed"])
+        ):
+            fail("请先领取商品后下载文件", 409)
         response = _download(_file(c, body.file_id, content=True))
         if p["view_policy"] == "once":
             c.execute(

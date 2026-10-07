@@ -90,7 +90,14 @@ def init_schema(c):
 
 
 def record_issue(
-    c, pid, codes, label="", expires=None, variant_id="default", variant_snapshot=None
+    c,
+    pid,
+    codes,
+    label="",
+    expires=None,
+    variant_id="default",
+    variant_snapshot=None,
+    attributes=None,
 ):
     """Attach one issuance batch without retaining plaintext codes or digests."""
     if not isinstance(label, str) or len(label.strip()) > 100:
@@ -170,6 +177,23 @@ def record_issue(
         "INSERT INTO card_meta(card_id,batch_id,code_suffix,expires,variant_id,variant_snapshot) VALUES (?,?,?,?,?,?)",
         [(cid, batch_id, suffix, expires, variant_id, frozen) for cid, suffix in rows],
     )
+    # Issuance tools on pre-migration minimal databases keep their legacy SKU
+    # snapshot. Normal installations always freeze the explicit null policy too.
+    if c.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='card_entitlements'"
+    ).fetchone():
+        from .card_entitlements import freeze_card
+        from .variants import validate_attributes
+
+        config = json.loads(
+            c.execute("SELECT config FROM products WHERE id=?", (pid,)).fetchone()[0]
+        )
+        effective = validate_attributes(
+            {**snapshot.get("attributes", {}), **(attributes or {})}
+        )
+        policy = config.get("revision_policy")
+        for cid, _ in rows:
+            freeze_card(c, cid, effective, policy)
     return batch_id
 
 
@@ -217,7 +241,7 @@ WITH inventory AS (
   WHEN j.state IN ('queued','processing','succeeded') THEN j.state
   WHEN j.state='failed' AND j.retryable=1
    AND COALESCE(json_extract(p.config,'$.allow_retry'),1)=1
-   AND j.attempt<COALESCE(json_extract(p.config,'$.max_attempts'),3)
+   AND j.attempt-j.revision_start_attempt+1<COALESCE(json_extract(p.config,'$.max_attempts'),3)
    AND (m.expires IS NULL OR m.expires>:now) THEN 'failed_retryable'
   WHEN j.state='failed' THEN 'failed_terminal'
   WHEN (j.id IS NULL OR j.state='needs_input') AND m.expires IS NOT NULL AND m.expires<=:now THEN 'expired'
@@ -273,8 +297,10 @@ def _summary(c, pid, now, variant_id="", shop_id=""):
     result = _empty_summary()
     for row in c.execute(
         _INVENTORY + "SELECT status,COUNT(*) AS n,"
-        "SUM(job_id IS NOT NULL AND job_state!='needs_input') AS used,"
-        "SUM(first_verified IS NOT NULL) AS verified,SUM(revealed!=0) AS viewed "
+        "SUM(job_id IS NOT NULL AND (job_state!='needs_input' OR EXISTS(SELECT 1 FROM job_delivery_versions v WHERE v.job_id=inventory.job_id))) AS used,"
+        "SUM(status IN ('unused','needs_input') AND NOT EXISTS(SELECT 1 FROM job_delivery_versions v WHERE v.job_id=inventory.job_id)) AS remaining,"
+        "SUM(status IN ('unused','needs_input','failed_retryable') AND NOT EXISTS(SELECT 1 FROM job_delivery_versions v WHERE v.job_id=inventory.job_id)) AS available,"
+        "SUM(first_verified IS NOT NULL) AS verified,SUM(revealed!=0 OR EXISTS(SELECT 1 FROM job_delivery_versions v WHERE v.job_id=inventory.job_id AND v.revealed!=0)) AS viewed "
         "FROM inventory WHERE (:variant_id='' OR variant_id=:variant_id) GROUP BY status",
         {
             "product_id": pid,
@@ -285,12 +311,10 @@ def _summary(c, pid, now, variant_id="", shop_id=""):
     ):
         result["states"][row["status"]] = row["n"]
         result["total"] += row["n"]
-        for key in ("used", "verified", "viewed"):
+        for key in ("used", "verified", "viewed", "remaining", "available"):
             result[key] += row[key]
     counts = result["states"]
     result.update(
-        remaining=counts["unused"] + counts["needs_input"],
-        available=counts["unused"] + counts["needs_input"] + counts["failed_retryable"],
         in_progress=counts["queued"] + counts["processing"],
         completed=counts["succeeded"] + counts["destroyed"],
         failed=counts["failed_retryable"] + counts["failed_terminal"],

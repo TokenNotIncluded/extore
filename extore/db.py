@@ -114,6 +114,7 @@ def init():
         from . import (
             agent_identity,
             automation,
+            card_entitlements,
             flow_adapter,
             flow_worker,
             private_worker,
@@ -133,10 +134,11 @@ def init():
             agent_identity,
             automation,
             product_lifecycle,
+            card_entitlements,
         ):
             module.init_schema(c)
-        if c.execute("PRAGMA user_version").fetchone()[0] < 20:
-            c.execute("PRAGMA user_version=20")
+        if c.execute("PRAGMA user_version").fetchone()[0] < 21:
+            c.execute("PRAGMA user_version=21")
     # WAL is set outside a transaction.
     with sqlite3.connect(DATA / "extore.sqlite3") as c:
         c.execute("PRAGMA journal_mode=WAL")
@@ -199,10 +201,17 @@ def event(c, kind, product_id, job=None):
             payload["data"]["retry_mode"] = job["retry_mode"]
             payload["data"]["retry_reason_type"] = job["retry_reason_type"]
         payload["data"]["variant"] = card_variant(c, job)
+        from .card_entitlements import job_context
+
+        context = job_context(c, job, include_deliveries=False)
+        if kind not in ("redemption.requested", "revision.requested"):
+            context.pop("card_attributes", None)
+            context["revision"].pop("message", None)
+        payload["data"].update(context)
         payload["data"]["steps"], payload["data"]["completed_steps"] = progress_view(
             c, job
         )
-        if kind == "redemption.requested":
+        if kind in ("redemption.requested", "revision.requested"):
             from .work_instructions import instructions
 
             payload["data"]["instructions"] = instructions(c, product_id)

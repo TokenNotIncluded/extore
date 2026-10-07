@@ -6,7 +6,7 @@ from dataclasses import dataclass, field
 from types import MappingProxyType
 from typing import Callable
 
-from ..variants import default_variant
+from ..variants import default_variant, validate_attributes
 from .instructions import WorkInstructions
 
 MAX_INPUT_BYTES = 200000
@@ -106,6 +106,33 @@ def _freeze_steps(plan):
     )
 
 
+def _freeze_delivery_metadata(value, *, depth=0):
+    """Keep server-owned context immutable without exposing values in errors."""
+    if depth > 5:
+        raise ValueError("invalid delivery context")
+    if isinstance(value, Mapping):
+        if len(value) > 100 or any(not isinstance(key, str) for key in value):
+            raise ValueError("invalid delivery context")
+        return MappingProxyType(
+            {
+                key: _freeze_delivery_metadata(content, depth=depth + 1)
+                for key, content in value.items()
+            }
+        )
+    if isinstance(value, (list, tuple)):
+        if len(value) > 1001:
+            raise ValueError("invalid delivery context")
+        return tuple(_freeze_delivery_metadata(item, depth=depth + 1) for item in value)
+    if value is None or type(value) in (str, bool, int, float):
+        if type(value) is float:
+            import math
+
+            if not math.isfinite(value):
+                raise ValueError("invalid delivery context")
+        return value
+    raise ValueError("invalid delivery context")
+
+
 @dataclass(frozen=True)
 class ShopContext:
     """Server-owned routing metadata; credentials belong in configuration."""
@@ -140,6 +167,13 @@ class Task:
     shop_context: ShopContext = field(default_factory=ShopContext)
     environment: Mapping[str, str] = field(default_factory=dict, repr=False)
     instructions: WorkInstructions | None = field(default=None, repr=False)
+    card_attributes: Mapping = field(default_factory=dict)
+    entitlements: Mapping | None = None
+    revision: Mapping = field(
+        default_factory=lambda: {"current": 0, "message": "", "is_revision": False}
+    )
+    deliveries: tuple = field(default_factory=tuple)
+    last_delivery: Mapping | None = None
 
     def __post_init__(self):
         plan = _steps(self.steps, allow_empty=True)
@@ -171,11 +205,43 @@ class Task:
         object.__setattr__(self, "shop_context", context)
         object.__setattr__(self, "environment", _freeze_environment(self.environment))
         object.__setattr__(self, "instructions", instructions)
+        attributes = (
+            validate_attributes(dict(self.card_attributes))
+            if isinstance(self.card_attributes, Mapping)
+            else validate_attributes(self.card_attributes)
+        )
+        if (
+            not isinstance(self.revision, Mapping)
+            or type(self.revision.get("current")) is not int
+            or not 0 <= self.revision["current"] <= 2**53 - 1
+            or not isinstance(self.revision.get("message", ""), str)
+            or len(self.revision.get("message", "")) > 10000
+            or type(self.revision.get("is_revision", False)) is not bool
+            or self.entitlements is not None
+            and not isinstance(self.entitlements, Mapping)
+            or not isinstance(self.deliveries, (list, tuple))
+            or self.last_delivery is not None
+            and not isinstance(self.last_delivery, Mapping)
+        ):
+            raise ValueError("invalid delivery context")
+        for name, value in (
+            ("card_attributes", attributes),
+            ("entitlements", self.entitlements),
+            ("revision", self.revision),
+            ("deliveries", self.deliveries),
+            ("last_delivery", self.last_delivery),
+        ):
+            object.__setattr__(self, name, _freeze_delivery_metadata(value))
 
     @property
     def idempotency_key(self):
         # Stable over retries: downstream fulfillment must deduplicate by task ID.
         return self.id
+
+    @property
+    def delivery_idempotency_key(self):
+        """One content version; stable across technical retries of that version."""
+        return f"{self.id}:revision:{self.revision['current']}"
 
     def define_steps(self, plan, message=""):
         """Initialize an empty task plan once; a saved plan cannot be replaced."""

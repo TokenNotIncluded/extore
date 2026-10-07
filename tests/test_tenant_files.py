@@ -1,5 +1,6 @@
 """File IDs and the shared owner claimant must never cross shop boundaries."""
 
+import json
 import time
 import uuid
 from contextlib import ExitStack
@@ -290,8 +291,12 @@ def test_product_management_links_keep_product_scope_within_and_across_shops(
 def ready_for_download(record):
     with db() as c:
         c.execute(
-            "UPDATE jobs SET state='succeeded',revealed=1 WHERE id=?",
-            (record["job_id"],),
+            "UPDATE jobs SET state='succeeded',revealed=1,result_json=?,content=? WHERE id=?",
+            (
+                json.dumps({"result": record["output_id"]}),
+                record["output_id"],
+                record["job_id"],
+            ),
         )
         c.execute("UPDATE job_files SET released=1 WHERE id=?", (record["output_id"],))
 
