@@ -739,7 +739,7 @@ def test_additive_schema_migration_preserves_all_prior_tables_and_rows(owner):
     init()
     init()
     with db() as c:
-        assert c.execute("PRAGMA user_version").fetchone()[0] == 18
+        assert c.execute("PRAGMA user_version").fetchone()[0] == 20
         assert c.execute("SELECT count(*) FROM cli_device_requests").fetchone()[0] == 0
         for name, old in before.items():
             assert (

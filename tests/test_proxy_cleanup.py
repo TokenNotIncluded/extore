@@ -1,6 +1,8 @@
 """Synthetic cleanup invariants; never contact a real issuer or shop."""
 
 import pytest
+from test_card_batches import change as change_batch
+from test_redemption import finish
 
 from extore import proxy_routes as routing
 from extore.db import db
@@ -145,3 +147,98 @@ def test_removed_proxy_page_redirects_without_query_code(client):
     assert response.status_code == 308
     assert response.headers["location"] == "/"
     assert response.headers["referrer-policy"] == "no-referrer"
+
+
+def test_recoverable_batch_keeps_old_signing_key_until_permanent_purge(issuer):
+    owner, sid, pid = issuer
+    original = owner.get("/api/admin/proxy/identities", params={"shop_id": sid}).json()[
+        0
+    ]
+    issued = owner.post("/api/admin/cards", json={"product_id": pid, "count": 1}).json()
+    bid, code = issued["batch_id"], issued["codes"][0]
+    replacement = owner.post(
+        "/api/admin/proxy/identities", json={"name": "main", "shop_id": sid}
+    )
+    assert replacement.status_code == 200
+
+    def batch_action(action):
+        plan = owner.post(
+            f"/api/admin/card-batches/{bid}/{action}-preview",
+            params={"product_id": pid},
+        )
+        assert plan.status_code == 200, plan.text
+        return owner.request(
+            "DELETE" if action == "delete" else "POST",
+            f"/api/admin/card-batches/{bid}" + ("" if action == "delete" else "/purge"),
+            params={"product_id": pid},
+            json={"confirmed": True, "revision": plan.json()["revision"]},
+        )
+
+    assert batch_action("delete").status_code == 200
+    preview = owner.get(
+        f"/api/admin/proxy/identities/{original['id']}/cleanup-preview",
+        params={"shop_id": sid},
+    ).json()
+    assert preview["issued_card_count"] == 1 and preview["eligible"] is False
+    assert (
+        owner.delete(
+            f"/api/admin/proxy/identities/{original['id']}", params={"shop_id": sid}
+        ).status_code
+        == 409
+    )
+    restored = owner.post(
+        f"/api/admin/card-batches/{bid}/restore", params={"product_id": pid}
+    )
+    assert restored.status_code == 200
+    assert owner.post("/api/exchange", json={"code": code}).status_code == 200
+    assert batch_action("delete").status_code == 200
+    assert batch_action("purge").status_code == 200
+    preview = owner.get(
+        f"/api/admin/proxy/identities/{original['id']}/cleanup-preview",
+        params={"shop_id": sid},
+    ).json()
+    assert preview["issued_card_count"] == 0 and preview["eligible"] is True
+    assert (
+        owner.delete(
+            f"/api/admin/proxy/identities/{original['id']}", params={"shop_id": sid}
+        ).status_code
+        == 200
+    )
+
+
+def test_purged_completed_batch_keeps_repeat_delivery_key_until_destroyed(issuer):
+    owner, sid, pid = issuer
+    original = owner.get("/api/admin/proxy/identities", params={"shop_id": sid}).json()[
+        0
+    ]
+    issued = owner.post("/api/admin/cards", json={"product_id": pid, "count": 1}).json()
+    bid, code = issued["batch_id"], issued["codes"][0]
+    exchange = owner.post("/api/exchange", json={"code": code})
+    assert exchange.status_code == 200
+    receipt = exchange.json()["token"]
+    redemption = owner.post("/api/redeem", json={"token": receipt, "params": {}})
+    assert redemption.status_code == 200, redemption.text
+    finish(owner, redemption.json(), "DELIVERY MUST SURVIVE STOCK CLEANUP")
+    assert (
+        owner.post(
+            "/api/admin/proxy/identities", json={"name": "main", "shop_id": sid}
+        ).status_code
+        == 200
+    )
+    assert change_batch(owner, pid, bid).status_code == 200
+    assert change_batch(owner, pid, bid, "purge").status_code == 200
+    preview_url = f"/api/admin/proxy/identities/{original['id']}/cleanup-preview"
+    cleanup_url = f"/api/admin/proxy/identities/{original['id']}"
+    preview = owner.get(preview_url, params={"shop_id": sid}).json()
+    assert preview["issued_card_count"] == 1 and preview["eligible"] is False
+    assert owner.delete(cleanup_url, params={"shop_id": sid}).status_code == 409
+    assert owner.post("/api/exchange", json={"code": code}).status_code == 200
+    revealed = owner.post("/api/receipt/reveal", json={"token": receipt})
+    assert revealed.status_code == 200
+    assert revealed.json()["content"] == "DELIVERY MUST SURVIVE STOCK CLEANUP"
+    assert (
+        owner.post("/api/receipt/destroy", json={"token": receipt}).status_code == 200
+    )
+    preview = owner.get(preview_url, params={"shop_id": sid}).json()
+    assert preview["issued_card_count"] == 0 and preview["eligible"] is True
+    assert owner.delete(cleanup_url, params={"shop_id": sid}).status_code == 200

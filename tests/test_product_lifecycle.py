@@ -300,6 +300,7 @@ def test_old_webhook_callback_continues_after_delete(owner, setup_product):
 
 def test_additive_schema15_preserves_all_old54_tables(owner, setup_product):
     setup_product()
+    init()
     with db() as c:
         c.execute("DROP TABLE product_purges")
         c.execute("DROP TABLE product_lifecycle")
@@ -313,11 +314,11 @@ def test_additive_schema15_preserves_all_old54_tables(owner, setup_product):
                 "SELECT name,sql FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'"
             )
         }
-        assert len(before) == 55
+        assert len(before) == 56
     init()
     init()
     with db() as c:
-        assert c.execute("PRAGMA user_version").fetchone()[0] == 18
+        assert c.execute("PRAGMA user_version").fetchone()[0] == 20
         after = {
             r["name"]: r["sql"]
             for r in c.execute(

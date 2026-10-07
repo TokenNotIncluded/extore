@@ -165,7 +165,7 @@ def test_schema17_additive_null_identity_and_empty_claims(owner):
     product(owner)
     init()
     with db() as c:
-        assert c.execute("PRAGMA user_version").fetchone()[0] == 18
+        assert c.execute("PRAGMA user_version").fetchone()[0] == 20
         assert (
             c.execute("SELECT count(*) FROM job_worker_identities").fetchone()[0] == 0
         )

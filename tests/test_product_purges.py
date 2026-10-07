@@ -310,6 +310,7 @@ def test_old_permissions_do_not_gain_purge_and_purge_only_grant_is_sufficient(
 def test_schema16_only_adds_empty_purge_table_and_preserves_old55(owner, setup_product):
     pid, _ = setup_product()
     remove(owner, pid)
+    init()
     with db() as c:
         c.execute("DROP TABLE product_purges")
         c.execute("PRAGMA user_version=15")
@@ -322,11 +323,11 @@ def test_schema16_only_adds_empty_purge_table_and_preserves_old55(owner, setup_p
                 "SELECT name,sql FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'"
             )
         }
-        assert len(before) == 56
+        assert len(before) == 57
     init()
     init()
     with db() as c:
-        assert c.execute("PRAGMA user_version").fetchone()[0] == 18
+        assert c.execute("PRAGMA user_version").fetchone()[0] == 20
         names = {
             r["name"]
             for r in c.execute(

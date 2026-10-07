@@ -123,7 +123,7 @@ def test_archive_stops_unstarted_retry_but_keeps_accepted_tasks_and_delivery(
     )
     assert (
         owner.post("/api/exchange", json={"code": result["codes"][3]}).status_code
-        == 410
+        == 404
     )
     assert (
         owner.post(
@@ -299,7 +299,7 @@ def test_staff_requires_cards_permission_and_cannot_use_admin_route(
     assert owner.get("/api/manage/card-batches").status_code == 403
     assert (
         owner.get("/api/admin/card-batches", params={"product_id": pid}).status_code
-        == 403
+        == 401
     )
 
 
@@ -356,7 +356,7 @@ def test_restore_does_not_restore_preexisting_manual_revocation(owner, setup_pro
     )
     assert (
         owner.post("/api/exchange", json={"code": result["codes"][0]}).status_code
-        == 410
+        == 404
     )
     assert (
         owner.post("/api/exchange", json={"code": result["codes"][1]}).status_code

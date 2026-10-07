@@ -427,9 +427,11 @@ def test_approval_logout_before_claim_cancels_pending_device(owner, clients):
 
 def test_schema13_additive_migration_preserves_old39_tables(owner):
     pid = product(owner)
+    init()
     with db() as c:
         # Remove later additions to reproduce an actual schema-11 database.
         for table in (
+            "proxy_issued_cards",
             "job_worker_identities",
             "proxy_routes",
             "proxy_identities",
@@ -464,7 +466,7 @@ def test_schema13_additive_migration_preserves_old39_tables(owner):
         }
     init()
     with db() as c:
-        assert c.execute("PRAGMA user_version").fetchone()[0] == 18
+        assert c.execute("PRAGMA user_version").fetchone()[0] == 20
         for name, (ddl, rows) in before.items():
             assert (
                 c.execute(

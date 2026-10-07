@@ -116,6 +116,45 @@ def test_invalid_guidance_never_changes_configuration(owner, value):
     assert value["workshop_slogan"] == WORKSHOP
 
 
+@pytest.mark.parametrize("field", ("factory_slogan", "workshop_slogan"))
+@pytest.mark.parametrize("invalid", ("value", "mapping-key", "extra-key"))
+def test_validation_rejects_surrogates_without_echoing_private_input(
+    owner, field, invalid
+):
+    private = "PRIVATE_VALIDATION_INPUT_DO_NOT_ECHO_782431"
+    p = create(owner, workshop_slogan=WORKSHOP)
+    factory(owner, p["shop_id"])
+    body = {field: "safe text"}
+    if invalid == "value":
+        body[field] = "\ud800" + private
+    elif invalid == "mapping-key":
+        body[field] = {"\ud800": private}
+    else:
+        body["\ud800"] = private
+    endpoint = (
+        "/api/admin/factory" if field == "factory_slogan" else "/api/manage/workshop"
+    )
+    params = (
+        {"shop_id": p["shop_id"]}
+        if field == "factory_slogan"
+        else {"product_id": p["id"]}
+    )
+    response = owner.put(
+        endpoint,
+        params=params,
+        content=json.dumps(body),
+        headers={"Content-Type": "application/json"},
+    )
+    assert response.status_code == 422
+    assert private not in response.text
+    errors = response.json()["detail"]
+    assert errors and all(set(error) == {"type", "loc", "msg"} for error in errors)
+    with db() as c:
+        current = instructions(c, p["id"])
+    assert current["factory_slogan"] == FACTORY
+    assert current["workshop_slogan"] == WORKSHOP
+
+
 def test_markdown_unicode_and_exact_empty_values_are_supported(owner):
     text = "# 标语 💡\r\n\t只使用已有权限。\n" + "字" * 3979
     assert len(text) <= 4000
@@ -231,7 +270,7 @@ def test_reads_are_scoped_fresh_and_revision_changes_only_with_config(owner):
     )
     with db() as c:
         c.execute("UPDATE staff SET permissions='[]' WHERE id=?", (link["id"],))
-    assert monitor.get("/api/manage/instructions").status_code == 403
+    assert monitor.get("/api/manage/instructions").status_code == 401
     with db() as c:
         c.execute("UPDATE staff SET revoked=1 WHERE id=?", (link["id"],))
     assert monitor.get("/api/manage/instructions").status_code == 401

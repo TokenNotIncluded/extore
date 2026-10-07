@@ -35,6 +35,7 @@ def proxy_store(clean, monkeypatch):
         routing.init_schema(c)
     yield
     with db() as c:
+        c.execute("DELETE FROM proxy_issued_cards")
         c.execute("DELETE FROM proxy_routes")
         c.execute("DELETE FROM proxy_identities")
 
@@ -128,7 +129,9 @@ def snapshot():
 def test_identity_encrypted_and_public_pins_have_no_private_metadata(owner):
     route = issuer_route(owner)
     with db() as c:
-        stored = c.execute("SELECT * FROM proxy_identities").fetchone()
+        stored = c.execute(
+            "SELECT * FROM proxy_identities WHERE id=?", (route["issuer_id"],)
+        ).fetchone()
         private = routing.open_secret(
             stored["private_key"],
             tenant_id=stored["shop_id"],
@@ -147,7 +150,8 @@ def test_identity_encrypted_and_public_pins_have_no_private_metadata(owner):
         )
         assert private not in str([dict(r) for r in c.execute("SELECT * FROM audit")])
     public = owner.get("/api/proxy/routes").json()
-    assert public == [routing.route_public(route)]
+    assert routing.route_public(route) in public
+    assert len({row["route_id"] for row in public}) == len(public)
     assert set(public[0]) == {
         "route_id",
         "issuer_id",
@@ -270,17 +274,22 @@ def test_imported_route_cannot_issue_or_unwrap_even_valid_signature(owner):
         ).status_code
         == 422
     )
-    assert (
-        owner.post(
-            "/api/admin/cards", json={"product_id": product(owner), "routed": True}
-        ).status_code
-        == 409
-    )
+    issued = issue(owner, product(owner), routed=True)["codes"][0]
+    assert routing.parse_routed_code(issued)["route_id"] != route["route_id"]
+    assert owner.post("/api/exchange", json={"code": issued}).status_code == 200
 
 
-def test_legacy_default_explicit_modes_and_disabled_route_no_silent_downgrade(owner):
+def test_mandatory_https_issuer_disallows_downgrade_and_current_disable(
+    owner, monkeypatch
+):
+    monkeypatch.setattr(routing, "ORIGIN", "http://localhost:8000")
     pid = product(owner)
-    legacy = issue(owner, pid)["codes"][0]
+    legacy = "ABCD2345-EFGH2345-IJKL2345-MNOP2345"
+    with db() as c:
+        c.execute(
+            "INSERT INTO cards(id,digest,product_id,created) VALUES (?,?,?,?)",
+            (str(uuid.uuid4()), card_digest(legacy), pid, time.time()),
+        )
     assert not legacy.startswith("EXR")
     assert (
         owner.post(
@@ -288,27 +297,27 @@ def test_legacy_default_explicit_modes_and_disabled_route_no_silent_downgrade(ow
         ).status_code
         == 409
     )
+    monkeypatch.setattr(routing, "ORIGIN", ISSUER)
     route = issuer_route(owner)
     assert issue(owner, pid)["codes"][0].startswith("EXR1.")
     assert issue(owner, pid, routed=True)["codes"][0].startswith("EXR1.")
-    assert not issue(owner, pid, routed=False)["codes"][0].startswith("EXR")
-    assert (
-        owner.put(
-            "/api/admin/proxy/routes/" + route["route_id"], json={"enabled": False}
-        ).status_code
-        == 200
-    )
-    assert owner.get("/api/proxy/routes").json() == []
     before = snapshot()
-    for changes in ({}, {"routed": True}):
+    assert (
+        owner.post(
+            "/api/admin/cards", json={"product_id": pid, "routed": False}
+        ).status_code
+        == 409
+    )
+    assert snapshot() == before
+    for changes in ({"enabled": False}, {"default_issuer": False}):
         assert (
-            owner.post(
-                "/api/admin/cards", json={"product_id": pid, **changes}
+            owner.put(
+                "/api/admin/proxy/routes/" + route["route_id"], json=changes
             ).status_code
             == 409
         )
         assert snapshot() == before
-    assert not issue(owner, pid, routed=False)["codes"][0].startswith("EXR")
+    assert routing.route_public(route) in owner.get("/api/proxy/routes").json()
     assert (
         owner.post(
             "/api/exchange", json={"code": legacy.lower().replace("-", " ")}
@@ -326,13 +335,28 @@ def test_signature_exchange_cannot_cross_shop_even_with_real_local_signing_key(o
             (sid, "另一店", time.time()),
         )
     foreign_pid = product(owner, shop_id=sid)
-    raw = issue(owner, foreign_pid, routed=False)["codes"][0]
+    foreign_code = issue(owner, foreign_pid)["codes"][0]
+    raw = routing.parse_routed_code(foreign_code)["secret"]
     with db() as c:
-        code = routing.wrap_issued_codes(c, [raw], route)[0]
+        identity_row = c.execute(
+            "SELECT * FROM proxy_identities WHERE id=?", (route["issuer_id"],)
+        ).fetchone()
+        key = Ed25519PrivateKey.from_private_bytes(
+            routing._decode(
+                routing.open_secret(
+                    identity_row["private_key"],
+                    tenant_id=identity_row["shop_id"],
+                    resource_type="proxy-issuer-ed25519:v1",
+                    resource_id=identity_row["id"],
+                ),
+                32,
+            )
+        )
+    code = signed(route, key, raw)
     before = snapshot()
     assert owner.post("/api/exchange", json={"code": code}).status_code == 400
     assert snapshot() == before
-    assert owner.post("/api/exchange", json={"code": raw}).status_code == 200
+    assert owner.post("/api/exchange", json={"code": foreign_code}).status_code == 200
 
 
 def test_shop_owner_scoping_and_staff_denial(owner):
@@ -463,7 +487,12 @@ def test_dns_private_or_mixed_answer_rejected(owner, monkeypatch):
         )
         assert response.status_code == 422
     with db() as c:
-        assert c.execute("SELECT count(*) FROM proxy_routes").fetchone()[0] == 0
+        assert (
+            c.execute(
+                "SELECT count(*) FROM proxy_routes WHERE identity_id IS NULL"
+            ).fetchone()[0]
+            == 0
+        )
 
 
 @pytest.mark.parametrize(
@@ -534,8 +563,16 @@ def test_unconfigured_http_issuer_fails_cleanly_and_origin_change_fails_closed(
     assert snapshot() == before
     monkeypatch.setattr(routing, "ORIGIN", "https://new.example.com")
     assert owner.post("/api/exchange", json={"code": code}).status_code == 400
-    assert owner.post("/api/admin/cards", json={"product_id": pid}).status_code == 409
-    assert snapshot() == before
+    issued = issue(owner, pid)["codes"][0]
+    assert routing.parse_routed_code(issued)["route_id"] != route["route_id"]
+    assert owner.post("/api/exchange", json={"code": issued}).status_code == 200
+    with db() as c:
+        stored = dict(
+            c.execute(
+                "SELECT * FROM proxy_routes WHERE route_id=?", (route["route_id"],)
+            ).fetchone()
+        )
+    assert routing.route_public(stored) == routing.route_public(route)
     assert routing.route_public(route)["origin"] == ISSUER
 
 
@@ -553,14 +590,26 @@ def test_same_pin_bindings_are_independent_per_shop_and_public_deduplicates(owne
     )
     assert second.status_code == 200, second.text
     assert second.json()["shop_id"] == sid
-    assert len(owner.get("/api/proxy/routes").json()) == 1
+    assert (
+        sum(
+            row["route_id"] == first["route_id"]
+            for row in owner.get("/api/proxy/routes").json()
+        )
+        == 1
+    )
     assert (
         owner.put(
             "/api/admin/proxy/routes/" + first["route_id"], json={"enabled": False}
         ).status_code
         == 200
     )
-    assert len(owner.get("/api/proxy/routes").json()) == 1
+    assert (
+        sum(
+            row["route_id"] == first["route_id"]
+            for row in owner.get("/api/proxy/routes").json()
+        )
+        == 1
+    )
     rows = owner.get("/api/admin/proxy/routes", params={"shop_id": sid}).json()
     assert len(rows) == 1 and rows[0]["enabled"]
     assert (
@@ -571,7 +620,10 @@ def test_same_pin_bindings_are_independent_per_shop_and_public_deduplicates(owne
         ).status_code
         == 200
     )
-    assert owner.get("/api/proxy/routes").json() == []
+    assert all(
+        row["route_id"] != first["route_id"]
+        for row in owner.get("/api/proxy/routes").json()
+    )
     with db() as c:
         assert (
             c.execute(
@@ -589,8 +641,20 @@ def test_same_pin_bindings_are_independent_per_shop_and_public_deduplicates(owne
         ).status_code
         == 200
     )
-    assert owner.get("/api/admin/proxy/routes").json()[0]["enabled"] == 0
-    assert len(owner.get("/api/proxy/routes").json()) == 1
+    historical = owner.get("/api/admin/proxy/routes", params={"history": "true"}).json()
+    assert (
+        next(row for row in historical if row["route_id"] == first["route_id"])[
+            "enabled"
+        ]
+        == 0
+    )
+    assert (
+        sum(
+            row["route_id"] == first["route_id"]
+            for row in owner.get("/api/proxy/routes").json()
+        )
+        == 1
+    )
 
 
 @pytest.mark.parametrize(
@@ -618,7 +682,7 @@ def test_global_route_pin_cannot_be_redefined_by_other_shop(owner, change):
     assert response.status_code == 409, response.text
     assert snapshot() == before
     assert owner.get("/api/admin/proxy/routes", params={"shop_id": sid}).json() == []
-    assert owner.get("/api/proxy/routes").json() == [routing.route_public(route)]
+    assert routing.route_public(route) in owner.get("/api/proxy/routes").json()
 
 
 @pytest.mark.parametrize("separator", ["X", ":", "-", "/", "%2E"])

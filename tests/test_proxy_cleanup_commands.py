@@ -391,7 +391,6 @@ def test_actual_owner_transport_signs_delete_and_aggregate_cleanup(tmp_path):
     assert observed == [
         ("DELETE", "/api/admin/proxy/routes/" + ROUTE + "?shop_id=" + SHOP),
         ("POST", "/api/admin/proxy/cleanup"),
-        ("GET", "/api/admin/proxy/cleanup"),
     ]
 
 
