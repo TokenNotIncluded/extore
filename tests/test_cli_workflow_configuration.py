@@ -356,7 +356,15 @@ def test_product_cli_authority_cannot_read_store_workflow_configuration(
     profile = workspace.directory / "product-private" / "cli.json"
     monkeypatch.setattr(sys, "stdin", io.StringIO(link))
     manage_client.execute(
-        manager_arguments(profile, "login", "--link-stdin"),
+        manager_arguments(
+            profile,
+            "login",
+            "--link-stdin",
+            "--client-name",
+            "Workflow product test agent",
+            "--agent-type",
+            "Codex test fixture",
+        ),
         transport=workspace.transport,
     )
     result = manage_client.execute(

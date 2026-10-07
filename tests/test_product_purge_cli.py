@@ -11,7 +11,6 @@ from test_owner_cli import execute as owner_run
 from test_product_lifecycle_cli import LifecycleManager, LifecycleOwner
 
 from extore.manage_client import ManageError
-from extore.manage_commands import PERMISSIONS
 
 
 class PurgeOwner(LifecycleOwner):
@@ -90,7 +89,20 @@ class PurgeManager(LifecycleManager):
     def __init__(self):
         super().__init__()
         self.links["purge"] = ("product-a", ["product.purge"])
-        self.links["oldnine"] = ("product-a", list(PERMISSIONS[:-1]))
+        self.links["oldnine"] = (
+            "product-a",
+            [
+                "queue.view",
+                "queue.process",
+                "queue.retry",
+                "product.edit",
+                "fulfillment.configure",
+                "cards.manage",
+                "events.manage",
+                "links.delegate",
+                "product.delete",
+            ],
+        )
         self.retired = True
         self.purged = False
         self.purge_calls = []

@@ -81,7 +81,14 @@ def manager(owner, tmp_path, monkeypatch):
             return remote.execute(arguments(profile, *argv), transport=transport)
 
         monkeypatch.setattr(sys, "stdin", io.StringIO(link))
-        assert run("login", "--link-stdin")["ok"]
+        assert run(
+            "login",
+            "--link-stdin",
+            "--client-name",
+            "Management test agent",
+            "--agent-type",
+            "Test fixture",
+        )["ok"]
         yield {
             "run": run,
             "pid": product,
@@ -252,7 +259,14 @@ def test_sessions_devices_and_audit_are_named_and_revocable(manager, monkeypatch
     child = run(manager, "links", "create", "--json-stdin")
     link = json.loads(Path(child["output"]).read_text())["url"]
     monkeypatch.setattr(sys, "stdin", io.StringIO(link))
-    login = manager["run"]("login", "--link-stdin")
+    login = manager["run"](
+        "login",
+        "--link-stdin",
+        "--client-name",
+        "Delegated test agent",
+        "--agent-type",
+        "Test fixture",
+    )
     childdevice = login["grant"]["id"]
     sessions = run(manager, "sessions", "list")["sessions"]
     assert len(sessions) == 2 and all(item["channel"] == "cli" for item in sessions)
@@ -375,7 +389,18 @@ def test_restricted_grant_cannot_edit_product_or_issue_cards(
 
         transport = httpx.MockTransport(handler)
         monkeypatch.setattr(sys, "stdin", io.StringIO(link))
-        remote.execute(arguments(profile, "login", "--link-stdin"), transport=transport)
+        remote.execute(
+            arguments(
+                profile,
+                "login",
+                "--link-stdin",
+                "--client-name",
+                "Restricted test agent",
+                "--agent-type",
+                "Test fixture",
+            ),
+            transport=transport,
+        )
         for argv in (("product", "get"), ("cards", "issue"), ("links", "list")):
             with pytest.raises(remote.ManageError, match="single grant"):
                 remote.execute(
