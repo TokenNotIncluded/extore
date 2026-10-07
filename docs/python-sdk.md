@@ -65,7 +65,22 @@ worker 只允许尚无计划、无已完成步骤的任务初始化一次 `progr
 
 ## SDK 任务与结果
 
-`Task` 字段为 `id`、`product_id`、`attempt`、`params`、`configuration`、`variant`、`steps`、`completed_steps`、`shop_context` 与 `environment`。`configuration` 和 `environment` 默认 `{}`；环境、步骤计划和完成集合转为只读快照，默认空集合。`ShopContext` 是不可变的 `shop_id/profile_id/revision` 元数据，不含配置秘密，旧请求可省略。旧任务省略 `variant` 时使用固定默认规格（空属性、空参考价、币种 `CNY`）。`idempotency_key` 等于稳定任务 ID，跨重试不变；真实交付必须按这个值去重。
+`Task` 字段为 `id`、`product_id`、`attempt`、`params`、`configuration`、`variant`、`steps`、`completed_steps`、`shop_context`、`environment` 与 `instructions`。`configuration` 和 `environment` 默认 `{}`；环境、步骤计划和完成集合转为只读快照，默认空集合。`ShopContext` 是不可变的 `shop_id/profile_id/revision` 元数据，不含配置秘密，旧请求可省略。旧任务省略 `variant` 时使用固定默认规格（空属性、空参考价、币种 `CNY`）。`idempotency_key` 等于稳定任务 ID，跨重试不变；真实交付必须按这个值去重。
+
+### 工厂与车间提示词
+
+0.9.1 新增 `WorkInstructions`，字段为 `schema,shop_id,product_id,factory_slogan,workshop_slogan,revision`，格式见[AI 队列处理](automation-cli.md#工厂与电子车间提示词)。`Task.instructions` 默认 `None` 以兼容旧请求；提供时验证所属商品及已给出的 `shop_context.shop_id`，复制为不可变对象。两条提示词各最多 4000 字符，不进入顾客 `params`，顾客同名参数不能覆盖。
+
+```python
+from extore.sdk import Task, WorkInstructions
+
+def prepare_ai_brief(task: Task):
+    if task.instructions is None:
+        return []  # 旧请求沿用商家已有工作说明。
+    return [task.instructions.factory_slogan, task.instructions.workshop_slogan]
+```
+
+AI 型处理器在干活前读取提示词，普通确定性处理器可忽略；SDK 不自动执行文字中的命令、访问链接或扩大授权。提示词从服务端读取，不能从顾客参数构造。每次派发使用当前配置，`revision` 表示内容版本；提示词与发行卡密时冻结的处理器环境配置是两回事。`Task` 的自动 `repr` 不包含提示词全文。
 
 ### 变量、密钥与运行环境
 

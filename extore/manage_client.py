@@ -228,6 +228,20 @@ def _objects(value):
     return value
 
 
+def _work_instructions(value, *, product, shop=None):
+    from .sdk.instructions import WorkInstructions
+
+    try:
+        return WorkInstructions.from_dict(
+            value, product_id=product, shop_id=shop
+        ).as_dict()
+    except (ValueError, TypeError):
+        raise ManageError(
+            "Invalid work instructions for the selected product",
+            code="invalid_response",
+        ) from None
+
+
 def _identity_value(value, *, label, limit):
     if value is None:
         return None
@@ -1778,11 +1792,25 @@ class ManageClient:
                     code="invalid_response",
                 )
             seen.add((pair[1], job["id"]))
+            instructions = (
+                _work_instructions(
+                    item["instructions"],
+                    product=pair[1],
+                    shop=selected[pair].get("shop_id"),
+                )
+                if "instructions" in item
+                else None
+            )
             output.append(
                 {
                     "product_id": pair[1],
                     "device_id": pair[0],
                     "grant_id": selected[pair]["id"],
+                    **(
+                        {"instructions": instructions}
+                        if instructions is not None
+                        else {}
+                    ),
                     "job": {
                         key: job[key]
                         for key in (
@@ -1826,6 +1854,45 @@ class ManageClient:
             "request_id": result["request_id"],
             "replayed": result["replayed"],
             **({"stale": result["stale"]} if "stale" in result else {}),
+        }
+
+    def instructions(self, *, product, origin=None, grant_id=None):
+        grants, errors = self.grants(product=product, origin=origin, grant_id=grant_id)
+        grants = [
+            grant
+            for grant in grants
+            if {"queue.view", "queue.monitor"} & set(grant.get("permissions", []))
+        ]
+        if not grants:
+            if errors:
+                raise ManageError(
+                    "Work instructions authorization unavailable", code="no_scope"
+                )
+            raise ManageError(
+                "No independent work instructions authorization", code="no_scope"
+            )
+        if len({grant["origin"] for grant in grants}) > 1:
+            raise ManageError(
+                "This product exists on multiple servers; specify --origin",
+                code="ambiguous_scope",
+            )
+        grant = grants[0]
+        instructions = _work_instructions(
+            self.request(
+                grant,
+                "GET",
+                "/api/manage/instructions",
+                params={"product_id": grant["product_id"]},
+            ),
+            product=grant["product_id"],
+            shop=grant.get("shop_id"),
+        )
+        return {
+            "ok": True,
+            "origin": grant["origin"],
+            "product_id": grant["product_id"],
+            "grant_id": grant["id"],
+            "instructions": instructions,
         }
 
     def products(self, *, origin=None, grant_id=None, detail=False, view="active"):
@@ -2669,6 +2736,7 @@ def add_parser(commands):
         help="keep server waits inside this process and print only when work arrives",
     )
     for name, description in (
+        ("instructions", "read the current factory and workshop work brief"),
         ("jobs", "list compact jobs for one product"),
         ("job", "fetch one task's complete inputs and output schema"),
         ("claim", "claim one or more tasks"),
@@ -2694,7 +2762,7 @@ def add_parser(commands):
         )
         command.add_argument("--origin", help="select a saved server origin")
         command.add_argument("--grant", help="select an individual saved device grant")
-        if name not in ("jobs", "job", "files", "download", "upload"):
+        if name not in ("instructions", "jobs", "job", "files", "download", "upload"):
             command.add_argument(
                 "--attempt", type=_attempt, help="current task attempt from next/job"
             )
@@ -2713,7 +2781,7 @@ def add_parser(commands):
                 type=_action_id,
                 help="expected current flow action token",
             )
-        if name != "jobs":
+        if name not in ("instructions", "jobs"):
             command.add_argument("job_id", nargs="+" if name == "claim" else None)
         if name in ("progress", "complete", "fail"):
             command.add_argument("--message", default="")
@@ -2937,6 +3005,10 @@ def dispatch(client, args, command, origin):
     if command == "products":
         return client.products(
             origin=origin, grant_id=grant_id, detail=args.detail, view=args.view
+        )
+    if command == "instructions":
+        return client.instructions(
+            product=args.product, origin=origin, grant_id=grant_id
         )
     if command == "queues":
         return client.queues(

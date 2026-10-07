@@ -122,6 +122,8 @@ extore admin product get --product PRODUCT_ID --output ./private-product.json
 
 `product create` 输入为完整 Product 对象，字段与默认值见[商品配置](protocol.md#商品配置)。`product update` 则是顶层局部修改，内部读取并保留未提供配置；显式传入的数组或对象整体替换。已经发行的自动商品仍受处理方式、字段结构和凭证冻结规则限制，店主权限不会绕过这些业务约束。
 
+0.9.1 起，可维护工厂与电子车间的 AI 提示词：`extore admin factory get` 读取本店工厂标语，`extore admin factory update --json-file factory.json` 修改。JSON 只含 `factory_slogan` 字符串，最多 4000 字符，空串清空。平台管理员必须明确传 `--shop SHOP_ID`，店主固定到自己店铺。商品的车间标语通过 `product update` 的 `workshop_slogan` 字段修改。每次任务领取带当前提示词，详见[AI 队列处理](automation-cli.md#工厂与电子车间提示词)。
+
 普通标准输出与 `--detail` 都脱敏认证凭证和秘密配置。店主特例是 `product get --output NEWFILE`：显式导出到新 0600 文件时可包含获授权的 Webhook 配置，不要求商品管理命令的 `--include-secrets`；`products --output` 也可导出。处理器配置档案、SMTP、TOTP 的秘密始终不在商品导出或读取接口里。制卡、创建管理链接或快速创建时，一次性凭证自动保存到私密文件，标准输出只显示保存路径与摘要。
 
 ## 配置签名兑换路由

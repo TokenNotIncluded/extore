@@ -711,6 +711,19 @@ def add_parser(commands):
     )
     board.add_argument("--product", help="limit progress to one product in this shop")
     business.board_arguments(board)
+    factory = sub.add_parser(
+        "factory", help="read or update this shop's factory work brief"
+    )
+    factory_actions = factory.add_subparsers(dest="operation", required=True)
+    for operation in ("get", "update"):
+        command = factory_actions.add_parser(operation)
+        _scope(command)
+        command.add_argument(
+            "--shop", help="explicit shop ID; platform owners must select one shop"
+        )
+        command.add_argument("--output", type=Path)
+        if operation == "update":
+            business._json_arguments(command)
     for name in (
         "jobs",
         "job",
@@ -1286,8 +1299,59 @@ def dispatch(client, args):
             raise ManageError(
                 "Recycle bin belongs to a different shop", code="no_scope"
             )
-    client.session(owner, refresh_scope=bool(board_request))
+    if command == "factory":
+        selected_shop = args.shop or owner.get("shop_id")
+        if not isinstance(selected_shop, str) or not re.fullmatch(
+            r"[A-Za-z0-9_-]{1,100}", selected_shop
+        ):
+            raise ManageError(
+                "Platform factory commands require an explicit --shop", code="no_scope"
+            )
+        if owner.get("shop_id") is not None and selected_shop != owner["shop_id"]:
+            raise ManageError("Factory belongs to a different shop", code="no_scope")
+        body = None
+        if args.operation == "update":
+            from .sdk.instructions import validate_slogan
+
+            body = business.read_json(args)
+            try:
+                if not isinstance(body, dict) or set(body) != {"factory_slogan"}:
+                    raise ValueError
+                validate_slogan(body["factory_slogan"])
+            except ValueError:
+                raise ManageError(
+                    "Factory update requires only a factory_slogan text field of at most 4000 characters",
+                    code="invalid_input",
+                ) from None
+    client.session(owner, refresh_scope=bool(board_request or command == "factory"))
     client.active_owner = owner
+    if command == "factory":
+        value = _object(
+            _owner_request(
+                client,
+                owner,
+                "PUT" if args.operation == "update" else "GET",
+                "/api/admin/factory",
+                params={"shop_id": selected_shop},
+                **({"json": body} if body is not None else {}),
+            )
+        )
+        from .sdk.instructions import validate_slogan
+
+        try:
+            if (
+                set(value) != {"shop_id", "shop_name", "factory_slogan"}
+                or value["shop_id"] != selected_shop
+                or not isinstance(value["shop_name"], str)
+                or len(value["shop_name"]) > 120
+            ):
+                raise ValueError
+            validate_slogan(value["factory_slogan"])
+        except ValueError:
+            raise ManageError(
+                "Invalid factory work brief response", code="invalid_response"
+            ) from None
+        return business._finish(args, {"ok": True, "factory": value})
     if board_request:
         board = business.progress_board(
             _owner_request(

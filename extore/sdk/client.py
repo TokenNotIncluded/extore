@@ -11,6 +11,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from urllib.parse import urlsplit
 
+from .instructions import WorkInstructions
+
 
 def signature(secret, timestamp, nonce, body):
     return hmac.new(
@@ -234,6 +236,12 @@ def verify_flow_event(secret, body, headers, *, audience, path, method="POST"):
             or result["deadline"] <= time.time()
         ):
             raise ValueError("Invalid or expired dispatch scope")
+        if "instructions" in result:
+            result["instructions"] = WorkInstructions.from_dict(
+                result["instructions"],
+                product_id=scope.product_id,
+                shop_id=scope.shop_id,
+            ).as_dict()
         return result
     except (KeyError, TypeError, ValueError, UnicodeError, RecursionError):
         raise ValueError("Invalid private-worker event") from None

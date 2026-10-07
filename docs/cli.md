@@ -118,6 +118,8 @@ extore manage job JOB_ID --product PRODUCT_ID
 
 `--origin https://example.com` 选择服务器；`--grant DEVICE_ID` 选择某个设备授权。对单商品操作必须传 `--product`。如果同一商品有多个可用授权而无法确定使用哪一个，应明确传入 `--origin` 或 `--grant`；权限不会取多个授权的并集。
 
+0.9.1 起，`next` 的每个领取项会带 `instructions`，包含商家配置的工厂与电子车间提示词，AI 干活前先读；无需额外读取队列。长任务需要最新约定时可用 `extore manage instructions --product PRODUCT_ID --grant GRANT_ID`。它只读取一份仍有效的 `queue.view` 或 `queue.monitor` 商品授权，不组合权限；没有任务资料或交付内容。详见[工厂与电子车间提示词](automation-cli.md#工厂与电子车间提示词)。
+
 ## 处理一个任务
 
 ### 等到任务后原子领取

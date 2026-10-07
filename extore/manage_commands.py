@@ -213,8 +213,20 @@ def progress_board(
             "Invalid or out-of-scope progress board", code="invalid_response"
         )
 
-    def fields(item, keys):
-        if not isinstance(item, dict) or set(item) != set(keys):
+    def fields(item, keys, optional=()):
+        if (
+            not isinstance(item, dict)
+            or not set(keys) <= set(item)
+            or set(item) - {*keys, *optional}
+        ):
+            invalid()
+
+    def slogan(item):
+        from .sdk.instructions import validate_slogan
+
+        try:
+            validate_slogan(item)
+        except ValueError:
             invalid()
 
     def identifier(item):
@@ -258,9 +270,11 @@ def progress_board(
     if value["schema"] != "extore.progress-board.v1":
         invalid()
     timestamp(value["generated_at"])
-    fields(value["shop"], ("id", "name"))
+    fields(value["shop"], ("id", "name"), ("factory_slogan",))
     identifier(value["shop"]["id"])
     name(value["shop"]["name"])
+    if "factory_slogan" in value["shop"]:
+        slogan(value["shop"]["factory_slogan"])
     if shop is not None and value["shop"]["id"] != shop:
         invalid()
     fields(value["scope"], ("product_ids",))
@@ -326,9 +340,11 @@ def progress_board(
         if worker["last_update"] is not None:
             timestamp(worker["last_update"])
     for row in value["products"]:
-        fields(row, ("id", "name", "mode", "counts", "jobs"))
+        fields(row, ("id", "name", "mode", "counts", "jobs"), ("workshop_slogan",))
         identifier(row["id"])
         name(row["name"])
+        if "workshop_slogan" in row:
+            slogan(row["workshop_slogan"])
         if (
             row["id"] not in ids
             or row["id"] in pids

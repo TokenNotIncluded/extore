@@ -35,6 +35,8 @@ client.update(
 
 `verify_flow_event` 验证签名、目标、方向、时间、严格 JSON，以及正文 scope 与签名身份一致、派发 deadline 尚未过期。它不替 Worker 保存重放记录：Worker 必须持久去重 nonce，并按 `action_id` 去重执行。外部支付和发货还需要跨尝试稳定的业务幂等键。
 
+0.9.1 起，派发若包含顶层 `instructions`，它也被正文签名覆盖。SDK 检查 `extore.work-instructions.v1` 结构以及 `shop_id/product_id` 与当前 `FlowScope` 一致。AI Worker 在实际处理前读取 `factory_slogan` 与 `workshop_slogan`，不能拿顾客参数中的同名内容替代。旧派发省略此字段继续可用。文字不会被 SDK 执行，也不授予额外权限。
+
 `download(scope, field, file_id)` 获取该节点允许读取的输入附件。上传使用实际文件大小上限与安全文件读取，服务器继续检查字段、步骤、尝试、图片内容和配额。结果及输入不应被无条件打印到日志。
 
 密钥来自商家或服务器的私有配置。隔离运行只能限制处理程序访问未授权资源，不能阻止程序泄漏已明确交给它的需求或验证码；只向可信 Worker 派发敏感内容。

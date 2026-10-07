@@ -7,6 +7,7 @@ from types import MappingProxyType
 from typing import Callable
 
 from ..variants import default_variant
+from .instructions import WorkInstructions
 
 MAX_INPUT_BYTES = 200000
 MAX_ENVIRONMENT_FIELDS = 128
@@ -138,6 +139,7 @@ class Task:
     completed_steps: tuple = field(default_factory=tuple)
     shop_context: ShopContext = field(default_factory=ShopContext)
     environment: Mapping[str, str] = field(default_factory=dict, repr=False)
+    instructions: WorkInstructions | None = field(default=None, repr=False)
 
     def __post_init__(self):
         plan = _steps(self.steps, allow_empty=True)
@@ -149,10 +151,26 @@ class Task:
             context = ShopContext(**context)
         elif not isinstance(context, ShopContext):
             raise ValueError("invalid shop context")
+        instructions = self.instructions
+        if isinstance(instructions, Mapping):
+            instructions = WorkInstructions.from_dict(
+                instructions,
+                product_id=self.product_id,
+                shop_id=context.shop_id,
+            )
+        elif instructions is not None:
+            if not isinstance(instructions, WorkInstructions):
+                raise ValueError("invalid work instructions")
+            instructions = WorkInstructions.from_dict(
+                instructions.as_dict(),
+                product_id=self.product_id,
+                shop_id=context.shop_id,
+            )
         object.__setattr__(self, "steps", _freeze_steps(plan))
         object.__setattr__(self, "completed_steps", completed)
         object.__setattr__(self, "shop_context", context)
         object.__setattr__(self, "environment", _freeze_environment(self.environment))
+        object.__setattr__(self, "instructions", instructions)
 
     @property
     def idempotency_key(self):
