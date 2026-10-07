@@ -118,7 +118,15 @@ def test_first_signed_device_code_uses_real_http_proxy(role, client, tmp_path):
             "Proxy admission fixture",
         ]
         if role == "manage":
-            command.extend(["--device-code", "--no-wait", "--existing-link"])
+            command.extend(
+                [
+                    "--device-code",
+                    "--no-wait",
+                    "--existing-link",
+                    "--agent-type",
+                    "test-fixture",
+                ]
+            )
         args = _parser().parse_args(command)
         result = (manage_client if role == "manage" else owner_client).execute(args)
     assert result["ok"] is True
@@ -375,10 +383,11 @@ def test_authenticated_socks_resolves_destination_at_proxy(
     assert "connect_tcp.started" in caplog.text
 
 
-def test_proxy_rejection_does_not_echo_private_proxy_challenge():
+@pytest.mark.parametrize("status", [401, 407])
+def test_proxy_rejection_does_not_echo_private_proxy_challenge(status):
     def rejection(*args):
         return (
-            407,
+            status,
             b"synthetic-private-proxy-password",
             {"Proxy-Authenticate": "Basic realm=private"},
         )
@@ -391,5 +400,5 @@ def test_proxy_rejection_does_not_echo_private_proxy_challenge():
         with manage_client.ManageClient({}, proxy_settings=settings) as manager:
             with pytest.raises(ManageError) as caught:
                 manager._json(ORIGIN, "GET", "/proof")
-    assert caught.value.status == 407
+    assert caught.value.status == status
     assert "synthetic-private-proxy-password" not in json.dumps(caught.value.as_dict())
