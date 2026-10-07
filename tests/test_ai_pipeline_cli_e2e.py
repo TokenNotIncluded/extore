@@ -433,13 +433,18 @@ def test_cli_ai_handles_three_current_only_questions_with_typed_inputs(
         outputs=[field("content", "textarea")],
         task_flow=three_question_graph(),
     )
-    receipt, initial = submit(owner, cli, product, {})
+    code = issue(owner, product)[0]
+    exchanged = cli.customer(
+        "exchange", "--origin", ORIGIN, "--codes-stdin", "--atomic", stdin=code
+    )
+    receipt = exchanged["receipt_id"]
+    assert exchanged["job"] is None
     consent(owner, cli, [product])
     waiting = cli.customer("flow", "view", receipt)["task_flow"]
     assert waiting["phase"] == "await_start" and waiting["deadline"] is None
     assert "fields" not in waiting["current"]
     assert cli.manage("next", "--all", "--wait", "0")["idle"]
-    cli.customer("flow", "start", receipt)
+    initial = cli.customer("flow", "start", receipt)["job"]
     values = ["First private question", "yes", False]
     for index, value in enumerate(values, 1):
         view = cli.customer("flow", "view", receipt)["task_flow"]
