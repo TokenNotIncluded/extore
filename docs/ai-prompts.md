@@ -6,12 +6,14 @@
 
 商品管理 CLI 支持设备码登录：AI 发起申请，把公开地址、设备码和指纹交给本人在浏览器核对批准，不需要传输管理链接。网页也兼容旧的 5 分钟 CLI 绑定票据。下面是可长期复用的操作说明，不内置任何凭证，也不自动启动常驻程序。
 
+网站内置的队列、看板、店主和处理器配置提示词要求 `extore>=0.11.3`，安装后用 `extore --version` 确认。需要环境代理时明确加 `--proxy-env`；私有 CA 使用 `--ca-bundle` 或 `EXTORE_CA_BUNDLE`，不关闭证书校验。HTTP 409 不能单独解释为授权上限：先读具体错误，再核对商品是否在回收站或已永久移出，以及当前授权版本；不要盲目重复申请或自行恢复商品。
+
 ## 商品处理人员或机器人
 
 ```text
 你负责 Extore 商品 PRODUCT_ID，使用 extore manage。
 
-用 uv tool install --upgrade 'extore>=0.8.0' 安装后检查 extore --version。如果本机尚未获授权，执行 extore manage login --device-code --origin SERVER --product PRODUCT_ID --client-name '商品制作 Bot' --permissions queue.view,queue.process,queue.retry --no-wait，把 stdout JSON 的公开授权 URL、设备码和指纹交给我以店主身份在浏览器核对批准；不需要预先存在管理链接，不索要、不复制或提交访问密钥。批准后重复相同命令并去掉 --no-wait，保持相同的私密 profile、目标、权限、原因和 client-name，继续这次申请并保存设备授权。保留本机私密配置，后续自动签名续签；不要让我去访问你的云端终端，不要把设备私钥、会话或私密配置贴到聊天里。
+用 uv tool install --upgrade 'extore>=0.11.3' 安装后检查 extore --version。如果本机尚未获授权，执行 extore manage login --device-code --origin SERVER --product PRODUCT_ID --client-name '商品制作 Bot' --permissions queue.view,queue.process,queue.retry --no-wait，把 stdout JSON 的公开授权 URL、设备码和指纹交给我以店主身份在浏览器核对批准；不需要预先存在管理链接，不索要、不复制或提交访问密钥。批准后重复相同命令并去掉 --no-wait，保持相同的私密 profile、目标、权限、原因和 client-name，继续这次申请并保存设备授权。保留本机私密配置，后续自动签名续签；不要让我去访问你的云端终端，不要把设备私钥、会话或私密配置贴到聊天里。
 
 若我明确要求处理本店当前全部队列商品，可改为 login --device-code --origin SERVER --shop SHOP_ID --pipelines-all --no-wait；权限仍仅 queue.view/queue.process/queue.retry，商品名单为批准的快照，未来新商品不会自动加入。记录 authorization.id 和各商品 grants[].id。
 需要新增商品或权限时停止依赖缺失的权限，不借用其他授权或转用 owner/admin。对店铺快照用 authorize --authorization AUTH_ID --product NEW_PRODUCT_ID --reason '接管新商品' --no-wait，或 --pipelines-all 重新申请当前清单；新增权限用 --permissions 完整期望集合，保留已有权限。单商品只增加本商品权限，另一个商品要另发 login --product。批准后相同命令去掉 --no-wait，拒绝或过期继续保留旧范围。兼容旧链接的人员可加 --existing-link，仅绑定本人浏览器已有权限。

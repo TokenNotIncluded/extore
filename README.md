@@ -184,6 +184,7 @@ SMTP 凭据、TOTP 密钥与店铺处理器配置加密保存。店主可以回�
 | [0.8.0 更新说明](https://github.com/TokenNotIncluded/extore/blob/main/docs/releases/0.8.0.md) | 本轮能力、兼容性与仍需单独验收的边界 |
 | [0.9.0 更新说明](https://github.com/TokenNotIncluded/extore/blob/main/docs/releases/0.9.0.md) | 只读进度看板、工人身份与卡通形象、CLI 网络代理和更清晰的队列页面 |
 | [0.9.1 更新说明](https://github.com/TokenNotIncluded/extore/blob/main/docs/releases/0.9.1.md) | 工厂和车间标语、卡密批次文件夹、发行标识替换与清理、首页统一兑换入口 |
+| [0.11.3 更新说明](https://github.com/TokenNotIncluded/extore/blob/main/docs/releases/0.11.3.md) | 同步远程修复、更新 AI 接入提示词与设备申请冲突原因 |
 | [0.10.0 更新说明](https://github.com/TokenNotIncluded/extore/blob/main/docs/releases/0.10.0.md) | 自定义卡密属性、交付后修改权益、历史版本领取与轮次保护 |
 | [0.8.2 更新说明](https://github.com/TokenNotIncluded/extore/blob/main/docs/releases/0.8.2.md) | 清空回收站与彻底删除商品；保留已有卡密、任务和交付 |
 | [0.8.1 更新说明](https://github.com/TokenNotIncluded/extore/blob/main/docs/releases/0.8.1.md) | 商品删除、回收站恢复与独立删除权限；保留旧卡密和任务 |

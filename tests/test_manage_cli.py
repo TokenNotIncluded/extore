@@ -711,6 +711,60 @@ def test_cli_errors_are_compact_and_never_print_private_credentials(
     assert "Traceback" not in captured.err
 
 
+@pytest.mark.parametrize("detail,message", remote.SCOPE_CONFLICT_MESSAGES.items())
+def test_scope_request_conflicts_explain_fixed_protocol_reasons(detail, message):
+    def respond(request):
+        return httpx.Response(409, json={"detail": detail})
+
+    with remote.ManageClient({}, transport=httpx.MockTransport(respond)) as client:
+        with pytest.raises(remote.ManageError) as error:
+            client._json(ORIGIN, "POST", "/api/cli/scopes/request", json={})
+    assert error.value.as_dict() == {
+        "ok": False,
+        "error": message,
+        "code": "http_error",
+        "status": 409,
+    }
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        b"not JSON with PRIVATE-SECRET",
+        b'{"detail":"PRIVATE-SECRET"}',
+        b'{"detail":{"token":"PRIVATE-SECRET"}}',
+        b"[]",
+        b'{"detail":"' + b"x" * 8192 + b'PRIVATE-SECRET"}',
+    ],
+)
+def test_scope_conflicts_never_echo_unknown_or_unbounded_server_data(body):
+    with remote.ManageClient(
+        {},
+        transport=httpx.MockTransport(
+            lambda request: httpx.Response(409, content=body)
+        ),
+    ) as client:
+        with pytest.raises(remote.ManageError) as error:
+            client._json(ORIGIN, "POST", "/api/cli/scopes/request", json={})
+    assert error.value.status == 409
+    assert "PRIVATE-SECRET" not in str(error.value)
+    assert "capacity" not in str(error.value)
+
+
+def test_scope_conflict_reasons_are_not_applied_to_unrelated_operations():
+    with remote.ManageClient(
+        {},
+        transport=httpx.MockTransport(
+            lambda request: httpx.Response(
+                409, json={"detail": "商品已删除，请先从回收站恢复"}
+            )
+        ),
+    ) as client:
+        with pytest.raises(remote.ManageError) as error:
+            client._json(ORIGIN, "POST", "/api/manage/jobs/job/complete", json={})
+    assert "recycle bin" not in str(error.value)
+
+
 def test_pending_binding_is_reported_without_blocking_existing_grants(
     merchant, profile, monkeypatch
 ):

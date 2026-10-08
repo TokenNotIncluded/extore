@@ -37,6 +37,27 @@ MAX_RESPONSE_BYTES = 16 * 1024 * 1024
 PROFILE_VERSION = 1
 DEVICE_LOGIN_TTL = 600
 AUTOMATION_RECEIPT_TTL = 600
+SCOPE_CONFLICT_MESSAGES = {
+    "商品已删除，请先从回收站恢复": "Product is in the recycle bin; ask the merchant to restore it before requesting access",
+    "商品已永久移出回收站，不能再次发行或修改": "Product was permanently removed from the recycle bin; request access to another product",
+    "原授权版本已变化，请刷新后再申请": "Authorization revision changed; refresh the saved authorization before requesting additions",
+    "原授权已变化，请重新申请追加权限": "Authorization changed; review its current scope before requesting additions",
+}
+
+
+def _scope_conflict_message(response):
+    """Recognize fixed protocol reasons without echoing arbitrary server data."""
+    try:
+        body = bytearray()
+        for chunk in response.iter_bytes(4096):
+            body.extend(chunk)
+            if len(body) > 8192:
+                return None
+        value = json.loads(body)
+        detail = value.get("detail") if isinstance(value, dict) else None
+        return SCOPE_CONFLICT_MESSAGES.get(detail) if isinstance(detail, str) else None
+    except (httpx.HTTPError, ValueError):
+        return None
 
 
 class ManageError(Exception):
@@ -316,12 +337,19 @@ class ManageClient:
             ) from None
         if not 200 <= response.status_code < 300:
             status = response.status_code
-            response.close()
+            try:
+                conflict = (
+                    _scope_conflict_message(response)
+                    if status == 409 and path == "/api/cli/scopes/request"
+                    else None
+                )
+            finally:
+                response.close()
             messages = {
                 401: "CLI session expired or revoked",
                 403: "This grant cannot perform the requested operation",
                 404: "The requested task, file, or authorization was not found",
-                409: "The task changed or authorization capacity is exhausted; refresh before retrying",
+                409: "The request conflicts with the current server state; refresh the target before retrying",
                 410: "This authorization or file is no longer available",
                 413: "Upload exceeds the server's storage limit",
                 422: "Invalid request; check the product schema and command inputs",
@@ -329,7 +357,8 @@ class ManageClient:
                 503: "Server storage or capacity is temporarily unavailable",
             }
             raise ManageError(
-                messages.get(status, "The Extore server rejected the request"),
+                conflict
+                or messages.get(status, "The Extore server rejected the request"),
                 code="http_error",
                 status=status,
             )

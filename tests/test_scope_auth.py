@@ -5,6 +5,7 @@ import secrets
 import time
 import uuid
 
+import httpx
 import pytest
 from fastapi.testclient import TestClient
 from starlette.responses import Response
@@ -13,6 +14,7 @@ from test_cli_auth import b64, bearer, identity, login, product, staff_browser
 from extore import pipeline_scopes as scopes
 from extore.app import app
 from extore.db import db, init
+from extore.manage_client import ManageClient, ManageError
 from extore.models import LINK_PERMISSIONS
 from extore.security import create_session
 
@@ -150,6 +152,41 @@ def shop(pid):
         return c.execute("SELECT shop_id FROM products WHERE id=?", (pid,)).fetchone()[
             0
         ]
+
+
+@pytest.mark.parametrize("purged", [False, True])
+def test_deleted_product_request_explains_conflict_without_creating_device_code(
+    owner, clients, purged
+):
+    pid, server = product(owner), clients()
+    with db() as c:
+        c.execute(
+            "INSERT INTO product_lifecycle(product_id,deleted_at) VALUES (?,?)",
+            (pid, time.time()),
+        )
+        if purged:
+            c.execute(
+                "INSERT INTO product_purges VALUES (?,?,?)", (pid, time.time(), "test")
+            )
+        before = c.execute("SELECT count(*) FROM cli_scope_requests").fetchone()[0]
+
+    def forward(request):
+        response = server.post(CLI + "/request", content=request.content)
+        return httpx.Response(response.status_code, content=response.content)
+
+    with ManageClient({}, transport=httpx.MockTransport(forward)) as client:
+        with pytest.raises(ManageError) as error:
+            client._json(
+                ORIGIN, "POST", CLI + "/request", json=request_body(identity(), pid=pid)
+            )
+    assert error.value.status == 409
+    assert ("permanently removed" if purged else "in the recycle bin") in str(
+        error.value
+    )
+    with db() as c:
+        assert (
+            c.execute("SELECT count(*) FROM cli_scope_requests").fetchone()[0] == before
+        )
 
 
 def test_product_device_code_full_real_flow_and_hidden_grant(owner, clients):
