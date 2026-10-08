@@ -1,0 +1,32 @@
+name: Review source snapshot
+on:
+  push:
+    branches: [review/resource-lifecycle-20261008]
+    paths: [.github/workflows/review-source.yml]
+permissions:
+  contents: read
+jobs:
+  snapshot:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          submodules: recursive
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@94527f2e458b27549849d47d273a16bec83a01e9
+        with:
+          version: "0.12.20"
+      - run: uv sync --frozen --python 3.13
+      - name: Export tracked source and test dependencies only
+        run: |
+          mkdir -p "$RUNNER_TEMP/snapshot/source/processors/official" "$RUNNER_TEMP/snapshot/site-packages"
+          git archive HEAD | tar -x -C "$RUNNER_TEMP/snapshot/source"
+          git -C processors/official archive HEAD | tar -x -C "$RUNNER_TEMP/snapshot/source/processors/official"
+          cp -a .venv/lib/python3.13/site-packages/. "$RUNNER_TEMP/snapshot/site-packages/"
+          printf '%s\n' "$(git rev-parse HEAD)" > "$RUNNER_TEMP/snapshot/source-commit.txt"
+          tar -czf "$RUNNER_TEMP/extore-review-source.tar.gz" -C "$RUNNER_TEMP/snapshot" .
+      - uses: actions/upload-artifact@v4
+        with:
+          name: extore-review-source
+          path: ${{ runner.temp }}/extore-review-source.tar.gz
+          retention-days: 1
