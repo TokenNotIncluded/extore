@@ -1938,6 +1938,11 @@ STATIC = Path(__file__).parent / "static"
 app.mount("/static", StaticFiles(directory=STATIC), name="static")
 
 
+@app.api_route("/AGENTS.md", methods=["GET", "HEAD"], include_in_schema=False)
+def agent_rules():
+    return FileResponse(STATIC / "AGENTS.md", media_type="text/markdown")
+
+
 @app.api_route("/", methods=["GET", "HEAD"])
 @app.api_route("/admin", methods=["GET", "HEAD"])
 @app.api_route("/staff", methods=["GET", "HEAD"])
