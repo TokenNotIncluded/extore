@@ -268,11 +268,7 @@ def discard_assignment(c, card_id):
 
 
 def allocated_bytes(c, shop_id=None):
-    """Include text stock in shared quotas, while old databases remain readable."""
-    if not c.execute(
-        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='text_card_payloads'"
-    ).fetchone():
-        return 0
+    """Include issued text stock in shared storage quotas."""
     if shop_id is None:
         return c.execute(
             "SELECT COALESCE(SUM(size),0) FROM text_card_payloads"

@@ -36,13 +36,10 @@ def _quota(c, ciphertext, product_id, *, job_id=None, old_bytes=0):
             "ON jobs.card_id=card_task_flows.card_id WHERE jobs.id=?",
             (job_id,),
         ).fetchone()[0]
-        if c.execute(
-            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='task_flow_dispatches'"
-        ).fetchone():
-            total += c.execute(
-                "SELECT COALESCE(SUM(length(payload_ciphertext)),0) FROM task_flow_dispatches WHERE job_id=?",
-                (job_id,),
-            ).fetchone()[0]
+        total += c.execute(
+            "SELECT COALESCE(SUM(length(payload_ciphertext)),0) FROM task_flow_dispatches WHERE job_id=?",
+            (job_id,),
+        ).fetchone()[0]
         if total + additional > MAX_RUN_CIPHERTEXT_BYTES:
             fail("任务流程文字存储达到上限，请使用附件", 413)
     if additional > 0:

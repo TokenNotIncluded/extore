@@ -460,13 +460,3 @@ def test_automation_maintenance_deletes_only_two_hundred_expired_receipts():
         assert [
             row["id"] for row in c.execute("SELECT id FROM automation_requests")
         ] == ["live"]
-
-
-def test_legacy_database_scan_filter_does_not_require_new_table():
-    import sqlite3
-
-    c = sqlite3.connect(":memory:")
-    try:
-        assert worker._flow_exclusion(c) == ""
-    finally:
-        c.close()

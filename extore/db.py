@@ -48,6 +48,11 @@ def db():
 
 
 def init():
+    """Complete migrations before serving requests or starting workers.
+
+    Runtime code requires the full schema; missing tables must not silently
+    disable authorization, retention, or quota checks.
+    """
     DATA.mkdir(parents=True, exist_ok=True, mode=0o700)
     with db() as c:
         c.executescript(SCHEMA)

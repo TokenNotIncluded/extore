@@ -286,3 +286,27 @@ def test_schema_is_structural_and_server_remains_graph_authority():
     Draft202012Validator(definition_schema()).validate(raw)
     with pytest.raises(ValueError):
         validate_definition(raw, product())
+
+
+def test_example_validation_ignores_cache_directories(tmp_path, capsys):
+    import json
+
+    from examples.workflows.validate_examples import main
+
+    (tmp_path / "__pycache__").mkdir()
+    example = tmp_path / "sample"
+    example.mkdir()
+    (example / "flow.json").write_text(json.dumps(graph()), encoding="utf-8")
+    (example / "product.json").write_text(json.dumps(product()), encoding="utf-8")
+    main(tmp_path)
+    assert capsys.readouterr().out == "sample: valid (5 nodes)\n"
+    (example / "product.json").unlink()
+    with pytest.raises(FileNotFoundError):
+        main(tmp_path)
+
+
+def test_example_validation_rejects_empty_directory(tmp_path):
+    from examples.workflows.validate_examples import main
+
+    with pytest.raises(ValueError, match="No workflow examples found"):
+        main(tmp_path)

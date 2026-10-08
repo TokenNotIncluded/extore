@@ -6,3 +6,10 @@ output
 .playwright-cli
 .pytest_cache
 __pycache__
+.ruff_cache
+dist
+build
+*.egg-info
+.coverage
+.coverage.*
+htmlcov

@@ -18,22 +18,6 @@ from .service import apply_update, bootstrap_progress_plan, job, product, progre
 from .variants import card_variant
 
 
-def _has_table(c, name):
-    return (
-        c.execute(
-            "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (name,)
-        ).fetchone()
-        is not None
-    )
-
-
-def _flow_exclusion(c):
-    # Compatibility with existing databases/tests before the additive migration.
-    if not _has_table(c, "card_task_flows"):
-        return ""
-    return " AND NOT EXISTS (SELECT 1 FROM card_task_flows WHERE card_task_flows.card_id=jobs.card_id)"
-
-
 def _check_script_execution(c, row, processor_id, *, require_input=False):
     """Recheck live authority without putting private configuration in a task."""
     current = job(c, row["id"])
@@ -211,8 +195,7 @@ async def outbox_once():
                 not r
                 or r["state"] not in ("queued", "processing")
                 or r["attempt"] != payload["data"]["attempt"]
-                or _has_table(c, "card_task_flows")
-                and c.execute(
+                or c.execute(
                     "SELECT 1 FROM card_task_flows WHERE card_id=?", (r["card_id"],)
                 ).fetchone()
                 is not None
@@ -267,8 +250,7 @@ async def execute_script(row, p, task_flow_epoch=None):
         ):
             raise ValueError("处理任务已失效")
         is_flow = (
-            _has_table(c, "card_task_flows")
-            and c.execute(
+            c.execute(
                 "SELECT 1 FROM card_task_flows WHERE card_id=?",
                 (trusted_job["card_id"],),
             ).fetchone()
@@ -524,7 +506,7 @@ async def _execute_processor(row, p, processor_package):
 
 async def job_once():
     with db() as c:
-        exclusion = _flow_exclusion(c)
+        exclusion = " AND NOT EXISTS (SELECT 1 FROM card_task_flows WHERE card_task_flows.card_id=jobs.card_id)"
         # A crash/timeout may already have performed external effects. Never retry silently.
         expired = c.execute(
             "SELECT * FROM jobs WHERE state='processing' AND lease<?" + exclusion,
@@ -614,8 +596,6 @@ def automation_maintenance_once():
     from .automation import cleanup
 
     with db() as c:
-        if not _has_table(c, "automation_requests"):
-            return 0
         return cleanup(c, limit=200)
 
 

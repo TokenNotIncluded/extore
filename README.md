@@ -187,7 +187,7 @@ SMTP 凭据、TOTP 密钥与店铺处理器配置加密保存。店主可以回�
 | [0.10.0 更新说明](https://github.com/TokenNotIncluded/extore/blob/main/docs/releases/0.10.0.md) | 自定义卡密属性、交付后修改权益、历史版本领取与轮次保护 |
 | [0.8.2 更新说明](https://github.com/TokenNotIncluded/extore/blob/main/docs/releases/0.8.2.md) | 清空回收站与彻底删除商品；保留已有卡密、任务和交付 |
 | [0.8.1 更新说明](https://github.com/TokenNotIncluded/extore/blob/main/docs/releases/0.8.1.md) | 商品删除、回收站恢复与独立删除权限；保留旧卡密和任务 |
-| [验收记录](https://github.com/TokenNotIncluded/extore/blob/main/docs/acceptance.md) | 已记录的验证结果、对接边界与限制 |
+| [验证指南](https://github.com/TokenNotIncluded/extore/blob/main/docs/acceptance.md) | 当前检查方法、数据升级与真实验收边界 |
 | [产品定义](https://github.com/TokenNotIncluded/extore/blob/main/PRODUCT.md) · [设计说明](https://github.com/TokenNotIncluded/extore/blob/main/DESIGN.md) | 项目范围、交互和视觉原则 |
 
 服务运行后，`/docs` 提供交互式 OpenAPI 文档。普通事件和既有回调保持 **v1**；流程私有 Worker 使用独立的 **v2** 签名与节点范围。

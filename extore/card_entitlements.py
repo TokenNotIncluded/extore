@@ -7,7 +7,6 @@ Successful older deliveries have independent read authority and storage lifetime
 import hashlib
 import hmac
 import json
-import sqlite3
 import time
 
 from .card_tracking import card_expired
@@ -55,10 +54,6 @@ def _value(row, name, default=None):
     return row[name] if name in row.keys() else default
 
 
-def _missing_schema(error):
-    return "no such table" in str(error) or "no such column" in str(error)
-
-
 def validate_capacity(attributes, policy):
     if not policy:
         return 0
@@ -84,15 +79,10 @@ def freeze_card(c, card_id, attributes, policy):
 
 
 def _record(c, card_id):
-    try:
-        return c.execute(
-            "SELECT attributes,policy FROM card_entitlements WHERE card_id=?",
-            (card_id,),
-        ).fetchone()
-    except sqlite3.OperationalError as error:
-        if not _missing_schema(error):
-            raise
-        return None
+    return c.execute(
+        "SELECT attributes,policy FROM card_entitlements WHERE card_id=?",
+        (card_id,),
+    ).fetchone()
 
 
 def card_attributes(c, card):
@@ -122,21 +112,6 @@ def revision_view(row):
     }
 
 
-def _versions(c, row):
-    try:
-        return [
-            dict(item)
-            for item in c.execute(
-                "SELECT * FROM job_delivery_versions WHERE job_id=? ORDER BY revision",
-                (row["id"],),
-            )
-        ]
-    except sqlite3.OperationalError as error:
-        if not _missing_schema(error):
-            raise
-        return []
-
-
 def _current_delivery(row):
     return {
         "job_id": row["id"],
@@ -155,20 +130,15 @@ def delivery_view(c, row):
     from .service import job_product
 
     # Polling never materializes historical document bodies in Python memory.
-    try:
-        result = [
-            dict(item)
-            for item in c.execute(
-                "SELECT v.revision,v.attempt,v.created,v.revealed,EXISTS(SELECT 1 FROM job_files f "
-                "WHERE f.job_id=v.job_id AND f.attempt=v.attempt AND f.kind='output' AND f.bound=1 AND f.content IS NOT NULL) AS has_files "
-                "FROM job_delivery_versions v WHERE v.job_id=? ORDER BY v.revision",
-                (row["id"],),
-            )
-        ]
-    except sqlite3.OperationalError as error:
-        if not _missing_schema(error):
-            raise
-        result = []
+    result = [
+        dict(item)
+        for item in c.execute(
+            "SELECT v.revision,v.attempt,v.created,v.revealed,EXISTS(SELECT 1 FROM job_files f "
+            "WHERE f.job_id=v.job_id AND f.attempt=v.attempt AND f.kind='output' AND f.bound=1 AND f.content IS NOT NULL) AS has_files "
+            "FROM job_delivery_versions v WHERE v.job_id=? ORDER BY v.revision",
+            (row["id"],),
+        )
+    ]
     for item in result:
         item["revealed"] = bool(item["revealed"])
         item["has_files"] = bool(item["has_files"])
@@ -194,49 +164,34 @@ def last_delivery(c, row):
     if row["state"] == "succeeded":
         current = _current_delivery(row)
         return {key: current[key] for key in ("revision", "attempt", "created")}
-    try:
-        saved = c.execute(
-            "SELECT revision,attempt,created FROM job_delivery_versions WHERE job_id=? ORDER BY revision DESC LIMIT 1",
-            (row["id"],),
-        ).fetchone()
-    except sqlite3.OperationalError as error:
-        if not _missing_schema(error):
-            raise
-        saved = None
+    saved = c.execute(
+        "SELECT revision,attempt,created FROM job_delivery_versions WHERE job_id=? ORDER BY revision DESC LIMIT 1",
+        (row["id"],),
+    ).fetchone()
     return dict(saved) if saved else None
 
 
 def has_previous_delivery(c, row):
-    try:
-        return bool(
-            c.execute(
-                "SELECT 1 FROM job_delivery_versions WHERE job_id=? LIMIT 1",
-                (row["id"],),
-            ).fetchone()
-        )
-    except sqlite3.OperationalError as error:
-        if not _missing_schema(error):
-            raise
-        return False
+    return bool(
+        c.execute(
+            "SELECT 1 FROM job_delivery_versions WHERE job_id=? LIMIT 1",
+            (row["id"],),
+        ).fetchone()
+    )
 
 
 def preserved_output_ids(c, row):
     # bind_outputs only binds selected outputs, and deletes all other drafts.
     # This retention query is not download authority: downloads still check the
     # archived JSON's exact field/file reference independently.
-    try:
-        return {
-            item[0]
-            for item in c.execute(
-                "SELECT id FROM job_files f WHERE f.job_id=? AND f.kind='output' AND f.bound=1 "
-                "AND EXISTS(SELECT 1 FROM job_delivery_versions v WHERE v.job_id=f.job_id AND v.attempt=f.attempt AND v.result_json IS NOT NULL)",
-                (row["id"],),
-            )
-        }
-    except sqlite3.OperationalError as error:
-        if not _missing_schema(error):
-            raise
-        return set()
+    return {
+        item[0]
+        for item in c.execute(
+            "SELECT id FROM job_files f WHERE f.job_id=? AND f.kind='output' AND f.bound=1 "
+            "AND EXISTS(SELECT 1 FROM job_delivery_versions v WHERE v.job_id=f.job_id AND v.attempt=f.attempt AND v.result_json IS NOT NULL)",
+            (row["id"],),
+        )
+    }
 
 
 def file_delivery(c, row, item, revision=None):
@@ -346,15 +301,10 @@ def select_delivery(c, row, revision=None):
     current = _current_delivery(row) if row["state"] == "succeeded" else None
     if current and (revision is None or revision == current["revision"]):
         return current
-    try:
-        saved = c.execute(
-            "SELECT * FROM job_delivery_versions WHERE job_id=? AND (? IS NULL OR revision=?) ORDER BY revision DESC LIMIT 1",
-            (row["id"], revision, revision),
-        ).fetchone()
-    except sqlite3.OperationalError as error:
-        if not _missing_schema(error):
-            raise
-        saved = None
+    saved = c.execute(
+        "SELECT * FROM job_delivery_versions WHERE job_id=? AND (? IS NULL OR revision=?) ORDER BY revision DESC LIMIT 1",
+        (row["id"], revision, revision),
+    ).fetchone()
     if not saved:
         fail(
             "尚无可领取内容" if revision is None else "交付版本不存在",
@@ -380,12 +330,6 @@ def mark_revealed(c, row, delivery):
 
 def allocated_bytes(c, shop_id=None, card_id=None):
     """Historical text and revision suggestions share normal storage quotas."""
-    tables = {
-        item[0]
-        for item in c.execute("SELECT name FROM sqlite_master WHERE type='table'")
-    }
-    if "job_delivery_versions" not in tables:
-        return 0
     scope = " AND (? IS NULL OR p.shop_id=?) AND (? IS NULL OR j.card_id=?)"
     values = (shop_id, shop_id, card_id, card_id)
     saved = c.execute(

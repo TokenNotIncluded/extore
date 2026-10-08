@@ -99,15 +99,6 @@ def init_schema(c):
     )
 
 
-def _has_schema(c):
-    return (
-        c.execute(
-            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='proxy_routes'"
-        ).fetchone()
-        is not None
-    )
-
-
 def _encode(raw):
     return base64.urlsafe_b64encode(raw).decode("ascii").rstrip("=")
 
@@ -530,14 +521,10 @@ def default_issuer_route(c, shop_id, routed=None):
     ensure_shop_issuer(c, shop_id)
     if routed is False and ORIGIN.startswith("https:"):
         fail("新卡必须使用本店发行标识", 409)
-    row = (
-        c.execute(
-            "SELECT * FROM proxy_routes WHERE shop_id=? AND default_issuer=1 AND identity_id IS NOT NULL",
-            (shop_id,),
-        ).fetchone()
-        if _has_schema(c)
-        else None
-    )
+    row = c.execute(
+        "SELECT * FROM proxy_routes WHERE shop_id=? AND default_issuer=1 AND identity_id IS NOT NULL",
+        (shop_id,),
+    ).fetchone()
     if row is None:
         if routed is True or ORIGIN.startswith("https:"):
             fail("请先配置本店的签名发行路由", 409)
@@ -612,14 +599,10 @@ def unwrap_local_code(c, code):
         return code
     try:
         parsed = parse_routed_code(code)
-        row = (
-            c.execute(
-                "SELECT * FROM proxy_routes WHERE route_id=? AND enabled=1 AND identity_id IS NOT NULL",
-                (parsed["route_id"],),
-            ).fetchone()
-            if _has_schema(c)
-            else None
-        )
+        row = c.execute(
+            "SELECT * FROM proxy_routes WHERE route_id=? AND enabled=1 AND identity_id IS NOT NULL",
+            (parsed["route_id"],),
+        ).fetchone()
         if (
             row is None
             or row["origin"] != canonical_origin(ORIGIN)
@@ -650,8 +633,6 @@ def unwrap_local_code(c, code):
 @router.get("/api/proxy/routes")
 def public_routes():
     with db() as c:
-        if not _has_schema(c):
-            return []
         unique = {}
         for row in c.execute(
             "SELECT routes.* FROM proxy_routes routes JOIN shops ON shops.id=routes.shop_id WHERE routes.enabled=1 AND shops.enabled=1 ORDER BY routes.created,routes.route_id"
