@@ -25,6 +25,8 @@ let lang = preferences.resolved.language,
   progressBoardProductId = "",
   progressBoardView = "active",
   accountView = null,
+  commerceView = null,
+  commerceFreshCancel = null,
   authStatus = {},
   waitingAnimationPaused = false,
   receiptGeneration = 0,
@@ -309,12 +311,16 @@ async function api(path, body, method, options = {}) {
     throw new Error("服务器返回异常，请稍后重试");
   }
   if (!response.ok) {
+    const commerceError = /^\/admin\/commerce(?:\/|$)/.test(path) && typeof data.error === "string" && /^[a-z_]{1,80}$/.test(data.error);
     const error = new Error(
-      typeof data.detail === "string"
+      commerceError && typeof data.error_description === "string" && data.error_description.length <= 1000
+        ? data.error_description
+        : typeof data.detail === "string"
         ? data.detail
         : "输入格式有误，请检查表单",
     );
     error.status = response.status;
+    if (commerceError) error.code = data.error;
     throw error;
   }
   return data;
@@ -596,7 +602,7 @@ window.addEventListener("popstate", start);
 window.addEventListener("hashchange", () => {
   if (location.pathname === "/cli/owner") start();
 });
-window.addEventListener("pagehide", () => { window.ExtoreProducts?.dispose?.($("#workspace")); window.ExtoreTaskFlow?.dispose(app); ownerCliApproval?.dispose(); deviceCliApproval?.dispose(); pipelineAuthView?.dispose(); progressBoardController?.dispose(); });
+window.addEventListener("pagehide", () => { window.ExtoreProducts?.dispose?.($("#workspace")); window.ExtoreTaskFlow?.dispose(app); ownerCliApproval?.dispose(); deviceCliApproval?.dispose(); pipelineAuthView?.dispose(); progressBoardController?.dispose(); commerceFreshCancel?.(); commerceView?.dispose(); });
 
 async function home() {
   window.ExtoreTaskFlow?.dispose(app);
@@ -1491,17 +1497,17 @@ const permitted = (permission) =>
   role === "admin" || permissions.includes(permission);
 function managementTabs() {
   const items = [
-    ["products", "商品", "product.edit"],
-    ["jobs", "处理队列", "queue.view"],
+    ["products", tr("商品", "Products"), "product.edit"],
+    ["jobs", tr("处理队列", "Queue"), "queue.view"],
     ["board", tr("进度看板", "Progress board"), "queue.monitor"],
-    ["cards", "卡密", "cards.manage"],
-    ["staff", "管理链接", "links.delegate"],
-    ["events", "事件记录", "events.manage"],
+    ["cards", tr("卡密", "Redemption codes"), "cards.manage"],
+    ["staff", tr("管理链接", "Management links"), "links.delegate"],
+    ["events", tr("事件记录", "Events"), "events.manage"],
   ].filter(([key, , permission]) => permitted(permission) || (key === "board" && permitted("queue.view")) || (key === "products" && (permitted("product.delete") || permitted("product.purge"))));
-  items.push(["sessions", "会话与审计"]);
+  items.push(["sessions", tr("会话与审计", "Sessions and audit")]);
   if (role === "admin") {
-    items.push(["security", "账户安全"], ["profiles", "商品处理器配置"], ["proxy", "兑换路由"]);
-    if (window.ExtoreAccount?.rootScope(authStatus)) items.push(["shops", "店铺"], ["mail", "邮箱服务器"]);
+    items.push(["security", tr("账户安全", "Account security")], ["profiles", tr("商品处理器配置", "Processor configuration")], ["proxy", tr("兑换路由", "Redemption routing")], ["commerce", tr("商城连接", "Storefront connections")]);
+    if (window.ExtoreAccount?.rootScope(authStatus)) items.push(["shops", tr("店铺", "Shops")], ["mail", tr("邮箱服务器", "Email service")]);
   }
   return items;
 }
@@ -1509,21 +1515,36 @@ function shell() {
   progressBoardController?.dispose(); progressBoardController = null;
   const items = managementTabs();
   if (!items.some(([key]) => key === tab)) tab = items[0]?.[0] || "";
-  app.innerHTML = `<div class="admin-top"><div><h1>${role === "staff" ? "商品管理" : "商家后台"}</h1><p id="management-identity" class="muted">${esc(managementIdentity())}</p></div><button id="logout" class="secondary">退出登录</button></div><nav class="tabs" aria-label="管理导航">${items.map(([v, label]) => `<button data-tab="${v}" class="${tab === v ? "active" : ""}">${label}</button>`).join("")}</nav><div id="workspace"></div>`;
+  const groups = [
+    { name: tr("日常经营", "Daily operations"), keys: ["products", "jobs", "board", "cards"] },
+    { name: tr("协作与记录", "Collaboration and records"), keys: ["staff", "events", "sessions"] },
+    { name: tr("店铺设置", "Shop settings"), keys: ["profiles", "commerce", "proxy", "security"] },
+    { name: tr("平台管理", "Platform settings"), keys: ["shops", "mail"] },
+  ].map((group) => ({ ...group, items: group.keys.map((key) => items.find(([value]) => value === key)).filter(Boolean) })).filter((group) => group.items.length);
+  app.innerHTML = `<div class="management-shell"><div class="admin-top"><div><h1>${role === "staff" ? tr("商品管理", "Product management") : tr("商家后台", "Merchant dashboard")}</h1><p id="management-identity" class="muted">${esc(managementIdentity())}</p></div><button id="logout" class="secondary">${tr("退出登录", "Sign out")}</button></div><div class="management-layout"><nav class="management-navigation" aria-label="${tr("管理导航", "Management navigation")}"><div class="management-mobile-navigation"><label for="management-section">${tr("当前工作区", "Workspace")}</label><select id="management-section">${groups.map((group) => `<optgroup label="${esc(group.name)}">${group.items.map(([value, label]) => `<option value="${value}" ${tab === value ? "selected" : ""}>${esc(label)}</option>`).join("")}</optgroup>`).join("")}</select></div><div class="management-desktop-navigation">${groups.map((group) => `<section class="management-navigation-group"><h2>${esc(group.name)}</h2>${group.items.map(([value, label]) => `<button type="button" data-tab="${value}" ${tab === value ? 'class="active" aria-current="page"' : ""}>${esc(label)}</button>`).join("")}</section>`).join("")}</div></nav><div id="workspace" class="management-workspace"></div></div></div>`;
   on("#logout", async () => {
     progressBoardController?.dispose(); progressBoardController = null;
     await api("/auth/logout", {});
     navigate("/admin");
   });
+  const choose = (value, mobile = false) => {
+    if (!items.some(([key]) => key === value) || tab === value) return;
+    tab = value;
+    shell();
+    const target = mobile ? $("#management-section") : $(`[data-tab="${value}"]`);
+    target?.focus?.();
+    perform(renderTab);
+  };
+  on("#management-section", () => choose($("#management-section").value, true), "change");
   document.querySelectorAll("[data-tab]").forEach((b) =>
     b.addEventListener("click", () => {
-      tab = b.dataset.tab;
-      shell();
-      perform(renderTab);
+      choose(b.dataset.tab);
     }),
   );
 }
 async function renderTab() {
+  commerceFreshCancel?.();
+  commerceView?.dispose(); commerceView = null;
   window.ExtoreProducts?.dispose?.($("#workspace"));
   progressBoardController?.dispose(); progressBoardController = null;
   proxyConfigView?.dispose();
@@ -1551,6 +1572,7 @@ async function renderTab() {
   if (["security", "shops", "mail", "profiles"].includes(tab)) renderAccountTab();
   if (tab === "sessions") await renderSessions();
   if (tab === "proxy") renderProxyConfig();
+  if (tab === "commerce") renderCommerceConnections();
 }
 function renderProgressBoard() {
   if (!permitted("queue.monitor") && !permitted("queue.view")) return;
@@ -2279,6 +2301,40 @@ function renderAccountTab() {
     isCurrent: () => generation === queueLoadId && tab === selected && location.pathname === pathname });
 }
 async function renderSecurity() { renderAccountTab(); }
+function reauthenticateCommerce({ root, title, isCurrent, onAuth } = {}) {
+  commerceFreshCancel?.();
+  if (!root || !isCurrent?.() || !window.ExtoreAccount) return Promise.resolve(false);
+  return new Promise((resolve) => {
+    let finished = false, confirmation;
+    const finish = (result) => {
+      if (finished) return;
+      finished = true;
+      confirmation?.dispose();
+      root.removeEventListener("click", cancelled);
+      root.innerHTML = "";
+      if (commerceFreshCancel === cancel) commerceFreshCancel = null;
+      resolve(result);
+    };
+    const cancel = () => finish(false);
+    const cancelled = (event) => { if (event.target.closest?.("#account-fresh-cancel")) cancel(); };
+    commerceFreshCancel = cancel;
+    confirmation = window.ExtoreAccount.mount({ root, api, auth: authStatus, mode: "confirm", language: () => lang,
+      passkey, isCurrent: () => !finished && isCurrent(), onAuth: (value) => { acceptAuth(value); onAuth?.(value); } });
+    root.addEventListener("click", cancelled);
+    confirmation.confirmFresh(() => { if (isCurrent()) finish(authStatus); else cancel(); }, title);
+  });
+}
+function commerceNavigate(url) {
+  if (/^https:\/\//.test(url)) window.location.assign(url);
+  else return navigate(url);
+}
+function renderCommerceConnections() {
+  const generation = queueLoadId, pathname = location.pathname;
+  const current = () => generation === queueLoadId && tab === "commerce" && location.pathname === pathname;
+  if (!window.ExtoreCommerceConnect) throw new Error(tr("商城连接模块未加载，请刷新页面。", "Storefront connections did not load. Refresh the page."));
+  commerceView = window.ExtoreCommerceConnect.mount({ root: $("#workspace"), api, auth: () => authStatus, mode: "management",
+    language: () => lang, isCurrent: current, onAuth: acceptAuth, reauthenticate: reauthenticateCommerce, navigate: commerceNavigate });
+}
 async function staff() {
   stopPoll();
   const generation = queueLoadId;
@@ -2302,6 +2358,8 @@ async function staff() {
   await renderTab();
 }
 async function start() {
+  commerceFreshCancel?.();
+  commerceView?.dispose(); commerceView = null;
   window.ExtoreProducts?.dispose?.($("#workspace"));
   progressBoardController?.dispose(); progressBoardController = null;
   proxyConfigView?.dispose();
@@ -2360,11 +2418,21 @@ async function start() {
       $("#header-context").textContent = tr("CLI 设备授权", "CLI device authorization");
       deviceCliApproval = window.ExtoreDeviceLogin.mount({ root: app, api, auth, passkey,
         language: () => lang, isCurrent: active, onAuth: acceptAuth, navigate });
+    } else if (pathname === "/connect/authorize") {
+      currentToken = ""; currentBatch = null; batchSelection = ""; batchRetryOnly = false;
+      currentProduct = null; currentJob = null; currentVariant = null; queueProduct = null;
+      $("#header-context").textContent = tr("商城连接授权", "Storefront authorization");
+      if (!window.ExtoreCommerceConnect) throw new Error(tr("商城连接模块未加载，请刷新页面。", "Storefront connections did not load. Refresh the page."));
+      commerceView = window.ExtoreCommerceConnect.mount({ root: app, api, auth: () => authStatus, mode: "authorize", requestId: hash.slice(1),
+        language: () => lang, isCurrent: active, onAuth: acceptAuth, reauthenticate: reauthenticateCommerce, navigate: commerceNavigate });
     } else if (pathname === "/account" || pathname.startsWith("/account/")) {
       const accountRoute = window.ExtoreAccount.route(pathname, hash);
       $("#header-context").textContent = tr("店铺账户", "Shop account");
       accountView = window.ExtoreAccount.mount({ root: app, api, auth, ...accountRoute,
-        language: () => lang, navigate, passkey, onAuth: acceptAuth, isCurrent: active });
+        language: () => lang, navigate: (url) => {
+          const destination = new URLSearchParams(location.search).get("return_to") || "";
+          return navigate(accountRoute.mode === "login" && url === "/admin" && /^\/connect\/authorize#[A-Za-z0-9_-]{43}$/.test(destination) ? destination : url);
+        }, passkey, onAuth: acceptAuth, isCurrent: active });
     } else if (location.pathname === "/admin") await admin();
     else if (location.pathname === "/staff") await staff();
     else if (location.pathname === "/receipt") {
@@ -2397,6 +2465,7 @@ window.ExtoreWebMCP?.configure({
         "/admin": "admin",
         "/staff": "staff",
         "/cli/owner": "owner_cli",
+        "/connect/authorize": "commerce_authorize",
         "/cli/device": "cli_device",
       }[location.pathname] || "home",
     role,

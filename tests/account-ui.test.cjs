@@ -20,7 +20,7 @@ function fixture(options = {}) {
   const element = (attributes = "", tagName = "div") => {
     const listeners = new Map(), children = new Set();
     const attributeValues = new Map([...attributes.matchAll(/\b([a-z][a-z0-9-]*)="([^"]*)"/gi)].map(([, name, value]) => [name, decode(value)]));
-    const node = { attributes, tagName: tagName.toUpperCase(), value: attributeValues.get("value") || "", defaultValue: attributeValues.get("value") || "", checked: /\bchecked\b/.test(attributes), hidden: /(?:^|\s)hidden(?:\s|$)/.test(attributes), disabled: /(?:^|\s)disabled(?:\s|$)/.test(attributes), textContent: "", dataset: {}, isConnected: true,
+    const node = { attributes, tagName: tagName.toUpperCase(), value: attributeValues.get("value") || "", defaultValue: attributeValues.get("value") || "", checked: /\bchecked\b/.test(attributes), open: /(?:^|\s)open(?:\s|$)/.test(attributes), hidden: /(?:^|\s)hidden(?:\s|$)/.test(attributes), disabled: /(?:^|\s)disabled(?:\s|$)/.test(attributes), textContent: "", dataset: {}, isConnected: true,
       addEventListener(event, fn) { listeners.set(event, fn); }, emit(event) { if (tagName === "button" && node.disabled) return; return listeners.get(event)?.({ preventDefault() {} }); },
       setAttribute(name, value) { attributeValues.set(name, String(value)); }, getAttribute(name) { return attributeValues.get(name) ?? null; },
       focus() { node.focused = true; }, select() { node.selected = true; }, setSelectionRange(start, end) { node.selectionStart = start; node.selectionEnd = end; },
@@ -528,6 +528,184 @@ async function workflowWrite(p, selector) {
   assert.equal(Object.hasOwn(p.requests[4].body, "workflow"), false);
   return body;
 }
+
+test("processor configurations begin as a compact list with true status counts and an explicit editor", async () => {
+  const items = [
+    { id: "profile-one", shop_id: "shop-one", processor_id: "processor", name: "Visible profile", revision: 7, configuration: { template: "Excluded until edit" } },
+    { id: "profile-two", shop_id: "shop-one", processor_id: "processor", name: "Retired profile", revision: 2, disabled: true },
+  ];
+  const p = await profilePage(items);
+  assert.equal(p.node("#profile-create").open, false);
+  assert.match(p.root.innerHTML, /1 个启用 · 1 个停用/);
+  assert.match(p.root.innerHTML, /启用中/);
+  assert.match(p.root.innerHTML, /已停用/);
+  assert.match(p.root.innerHTML, /版本 7/);
+  assert.equal(p.root.querySelectorAll("[data-profile-edit]").length, 1);
+  assert.equal(p.node("#profile-update-profile-one"), undefined);
+  assert.equal(p.node("#profile-update-profile-one-0"), undefined);
+  assert.doesNotMatch(p.root.innerHTML, /Excluded until edit|style="/);
+  const button = p.root.querySelectorAll("[data-profile-edit]")[0];
+  assert.equal(button.getAttribute("aria-expanded"), "false");
+  await button.emit("click");
+  assert.equal(button.getAttribute("aria-expanded"), "true");
+  assert.equal(p.node("#profile-update-profile-one-0").value, "Excluded until edit");
+  assert.equal(p.node("#profile-update-profile-one-name").focused, true);
+  assert.doesNotMatch(p.node("#profile-editor-profile-one").innerHTML, /<details class="processor-workflow" open/);
+  assert.ok(p.node("#profile-update-profile-one-runtime-timeout_seconds"));
+  const empty = await profilePage();
+  assert.equal(empty.node("#profile-create").open, true);
+  assert.match(empty.root.innerHTML, /尚未创建处理器配置/);
+});
+
+test("reopening an active processor editor retains its plain, secret and variable drafts", async () => {
+  const p = await editWorkflow({ variables: { NOTE: "initial" }, configured_secret_names: ["TOKEN"] });
+  const button = p.root.querySelectorAll("[data-profile-edit]")[0], prefix = "#profile-update-profile-one-";
+  const originalForm = p.node("#profile-update-profile-one");
+  p.node(prefix + "0").value = "Unsaved template\nKeep this";
+  p.node(prefix + "2").value = "unsaved-private-value";
+  p.node(prefix + "variable-0-value").value = "Unsaved variable";
+  p.node(prefix + "secret-1-value").value = "unsaved-workflow-secret";
+  await p.node(prefix + "add-variable").emit("click");
+  p.node(prefix + "variable-2-name").value = "NEW_NOTE";
+  p.node(prefix + "variable-2-value").value = "Keep the new row";
+  await button.emit("click");
+  assert.equal(p.node("#profile-update-profile-one"), originalForm);
+  assert.equal(p.node(prefix + "0").value, "Unsaved template\nKeep this");
+  assert.equal(p.node(prefix + "2").value, "unsaved-private-value");
+  assert.equal(p.node(prefix + "variable-0-value").value, "Unsaved variable");
+  assert.equal(p.node(prefix + "secret-1-value").value, "unsaved-workflow-secret");
+  assert.equal(p.node(prefix + "variable-2-value").value, "Keep the new row");
+});
+
+test("cancelling one processor editor clears its secret controls without losing a second editor draft", async () => {
+  const p = await profilePage(["one", "two"].map((id) => ({ id: "profile-" + id, shop_id: "shop-one", processor_id: "processor", name: id, revision: 2,
+    configuration: { template: "Saved " + id }, workflow: { configured_secret_names: ["TOKEN"] },
+  })));
+  const buttons = p.root.querySelectorAll("[data-profile-edit]");
+  for (const button of buttons) await button.emit("click");
+  const one = "#profile-update-profile-one-", two = "#profile-update-profile-two-";
+  const firstSecret = p.node(one + "2"), firstWorkflowSecret = p.node(one + "secret-0-value");
+  firstSecret.value = firstSecret.defaultValue = "discard-this-secret";
+  firstWorkflowSecret.value = firstWorkflowSecret.defaultValue = "discard-workflow-secret";
+  p.node(two + "0").value = "Preserve second template";
+  p.node(two + "2").value = "preserve-second-secret";
+  p.node(two + "secret-0-value").value = "preserve-second-workflow-secret";
+  await p.node(one + "cancel").emit("click");
+  assert.equal(firstSecret.value, ""); assert.equal(firstSecret.defaultValue, "");
+  assert.equal(firstWorkflowSecret.value, ""); assert.equal(firstWorkflowSecret.defaultValue, "");
+  assert.equal(firstSecret.isConnected, false);
+  assert.equal(p.node("#profile-update-profile-one"), undefined);
+  assert.equal(buttons[0].getAttribute("aria-expanded"), "false");
+  assert.equal(buttons[0].focused, true);
+  assert.equal(p.node(two + "0").value, "Preserve second template");
+  assert.equal(p.node(two + "2").value, "preserve-second-secret");
+  assert.equal(p.node(two + "secret-0-value").value, "preserve-second-workflow-secret");
+  await buttons[0].emit("click");
+  assert.equal(p.node(one + "0").value, "Saved one");
+  assert.equal(p.node(one + "2").value, "");
+});
+
+test("cancelling a processor edit also invalidates its pending identity confirmation", async () => {
+  const p = await editWorkflow(), prefix = "#profile-update-profile-one-";
+  p.node(prefix + "2").value = "pending-private-value";
+  await p.node("#profile-update-profile-one").emit("submit");
+  const oldConfirmation = p.node("#account-fresh-form"), oldPassword = p.node("#fresh-password");
+  oldPassword.value = oldPassword.defaultValue = "pending-auth-password";
+  await p.node(prefix + "cancel").emit("click");
+  assert.equal(oldPassword.value, ""); assert.equal(oldPassword.defaultValue, "");
+  assert.equal(p.node("#account-fresh-form"), undefined);
+  await oldConfirmation.emit("submit");
+  assert.equal(p.requests.length, 2);
+  await p.root.querySelectorAll("[data-profile-edit]")[0].emit("click");
+  const body = await workflowWrite(p, "#profile-update-profile-one");
+  assert.equal(Object.hasOwn(body.configuration, "resource_url"), false);
+});
+
+test("cancelled processor confirmation preserves ordinary edits and prevents old confirmation handlers", async () => {
+  const p = await editWorkflow(), prefix = "#profile-update-profile-one-";
+  p.node(prefix + "0").value = "Keep ordinary edit";
+  p.node(prefix + "2").value = "discard-submission-secret";
+  await p.node("#profile-update-profile-one").emit("submit");
+  const oldConfirmation = p.node("#account-fresh-form");
+  await p.node("#account-fresh-cancel").emit("click");
+  assert.equal(p.node(prefix + "0").value, "Keep ordinary edit");
+  assert.equal(p.node(prefix + "2").value, "");
+  await oldConfirmation.emit("submit");
+  assert.equal(p.requests.length, 2);
+  const body = await workflowWrite(p, "#profile-update-profile-one");
+  assert.equal(body.configuration.template, "Keep ordinary edit");
+  assert.equal(Object.hasOwn(body.configuration, "resource_url"), false);
+});
+
+test("processor confirmation cannot resume after pagehide or disposal, including a pending authentication", async () => {
+  for (const dispose of [false, true]) {
+    const p = await editWorkflow();
+    p.node("#profile-update-profile-one-2").value = "pending-private-value";
+    await p.node("#profile-update-profile-one").emit("submit");
+    p.node("#fresh-password").value = "current-password";
+    const pending = p.node("#account-fresh-form").emit("submit");
+    assert.equal(p.requests[2].url, "/auth/reauth/password");
+    if (dispose) p.instance.dispose(); else p.emitWindow("pagehide");
+    p.requests[2].resolve({ ok: true }); await pending;
+    assert.equal(p.requests.length, 3);
+    assert.equal(p.node("#account-fresh-form"), undefined);
+  }
+});
+
+test("processor configuration page localizes its overview and preserves native form controls", async () => {
+  const p = fixture({ auth: shopAuth, mode: "profiles", language: "en" });
+  p.requests[0].resolve([{ id: "processor", name: "Processor", shop_configuration: profileDefinitions }]); await flush();
+  p.requests[1].resolve([{ id: "profile-one", shop_id: "shop-one", processor_id: "processor", name: "Profile", revision: 2 }]); await flush();
+  assert.match(p.root.innerHTML, /Saved configurations/);
+  assert.match(p.root.innerHTML, /1 enabled · 0 disabled/);
+  assert.match(p.root.innerHTML, /New configuration/);
+  for (const button of p.root.innerHTML.matchAll(/<button\b([^>]*)>/g)) assert.match(button[1], /type="(?:button|submit)"/);
+  await p.root.querySelectorAll("[data-profile-edit]")[0].emit("click");
+  const markup = p.node("#profile-editor-profile-one").innerHTML;
+  assert.match(markup, /Save new version/);
+  assert.match(markup, /Runtime limits/);
+  assert.match(markup, /Secrets/);
+  assert.match(markup, /Cancel editing/);
+  assert.doesNotMatch(markup, /<details class="processor-workflow" open|style="/);
+});
+
+test("switching the new configuration processor invalidates the previous captured submission", async () => {
+  const p = await profilePage();
+  p.node("#profile-name").value = "Pending creation";
+  p.node("#profile-processor").value = "processor";
+  await p.node("#profile-processor").emit("change");
+  p.node("#profile-field-2").value = "previous-secret";
+  await p.node("#profile-create-form").emit("submit");
+  const oldConfirmation = p.node("#account-fresh-form");
+  p.node("#profile-processor").value = "";
+  await p.node("#profile-processor").emit("change");
+  assert.equal(p.node("#account-fresh-form"), undefined);
+  await oldConfirmation.emit("submit");
+  assert.equal(p.requests.length, 2);
+});
+
+test("root shop selection leaves an old processor editor inert while loading a different shop", async () => {
+  const p = fixture({ auth: rootAuth, mode: "profiles" });
+  const shops = [{ id: "shop-one", name: "First shop" }, { id: "shop-two", name: "Second shop" }];
+  const catalog = [{ id: "processor", name: "Processor", shop_configuration: profileDefinitions }];
+  p.requests[0].resolve(catalog); p.requests[1].resolve(shops); await flush();
+  p.requests[2].resolve([{ id: "profile-one", shop_id: "shop-one", processor_id: "processor", name: "First config", revision: 1 }]); await flush();
+  const oldEdit = p.root.querySelectorAll("[data-profile-edit]")[0];
+  await oldEdit.emit("click");
+  const oldForm = p.node("#profile-update-profile-one"), oldAdd = p.node("#profile-update-profile-one-add-secret");
+  p.node("#profile-update-profile-one-2").value = "first-shop-draft-secret";
+  p.node("#profile-shop").value = "shop-two";
+  const switching = p.node("#profile-shop").emit("change");
+  assert.equal(p.requests.length, 5);
+  await oldForm.emit("submit"); await oldAdd.emit("click");
+  assert.equal(p.node("#account-fresh-form"), undefined);
+  p.requests[3].resolve(catalog); p.requests[4].resolve(shops); await flush();
+  assert.equal(p.requests[5].url, "/admin/processor-profiles?shop_id=shop-two");
+  p.requests[5].resolve([]); await switching;
+  await oldEdit.emit("click"); await oldForm.emit("submit");
+  assert.equal(p.node("#profile-update-profile-one"), undefined);
+  assert.equal(p.requests.length, 6);
+});
 
 test("workflow creation writes plain variables and new secrets with bounded integer runtime limits", async () => {
   const p = await profilePage();

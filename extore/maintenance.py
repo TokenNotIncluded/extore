@@ -63,6 +63,23 @@ def resolve_audit_shop(c, actor, target):
     ).fetchone()
     if row:
         return row["shop_id"]
+    # Commerce tables are additive and may not exist during an older audit
+    # migration. Persist scope from stored authority, never from request data.
+    for table, sql in (
+        ("commerce_clients", "SELECT shop_id FROM commerce_clients WHERE id=?"),
+        ("commerce_grants", "SELECT shop_id FROM commerce_grants WHERE id=?"),
+        (
+            "commerce_requests",
+            "SELECT c.shop_id FROM commerce_requests r "
+            "JOIN commerce_clients c ON c.id=r.client_id WHERE r.id=?",
+        ),
+    ):
+        if c.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (table,)
+        ).fetchone():
+            row = c.execute(sql, (target,)).fetchone()
+            if row:
+                return row["shop_id"]
     # This table is created after the historical audit migration. Older
     # installations must still resolve their existing records during init.
     if c.execute(

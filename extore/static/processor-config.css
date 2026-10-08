@@ -1,0 +1,75 @@
+.processor-config-page { min-width: 0; }
+.processor-config-intro { max-width: 66ch; margin: 0 0 26px; }
+.processor-config-scope { max-width: 440px; margin-bottom: 16px; }
+.processor-config-scope > p { margin: 0; font-weight: 600; }
+.processor-config-scope > p > span { display: block; margin-top: 3px; font-weight: 400; overflow-wrap: anywhere; }
+.processor-config-page button { min-height: 44px; }
+.processor-config-page summary { cursor: pointer; min-height: 44px; }
+.processor-config-page summary::marker { color: var(--green); }
+.processor-config-create { margin: 12px 0 42px; border-bottom: 1px dashed var(--dashed-line); }
+.processor-config-create > summary { padding: 15px 0 20px; font-size: 1rem; font-weight: 600; color: var(--green); }
+.processor-config-create[open] > summary { padding-bottom: 12px; }
+.processor-config-create > form { max-width: 920px; padding: 16px 0 30px; }
+.processor-config-page .processor-config-basics { gap: 24px; }
+.processor-config-page .processor-settings,
+.processor-config-page .processor-workflow-fields { border: 0; border-radius: 0; padding: 0; margin: 20px 0 28px; }
+.processor-config-page .processor-settings > legend { padding: 0; margin-bottom: 6px; }
+.processor-config-page .processor-workflow-fields > legend { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
+.processor-config-page .processor-settings > .caption,
+.processor-config-page .processor-workflow-fields > .caption { max-width: 78ch; margin-top: 0; margin-bottom: 24px; }
+.processor-config-page .processor-workflow { margin: 0; border-top: 1px dashed var(--dashed-line); }
+.processor-config-page .processor-workflow > summary { padding: 16px 0; font-size: .9rem; }
+.processor-config-page .processor-workflow[open] > summary { border-bottom: 0; }
+.processor-config-page .processor-runtime-grid { gap: 12px 24px; }
+.processor-config-page .processor-workflow-actions { margin-bottom: 24px; }
+.processor-config-editor-actions { margin-top: 28px; }
+.processor-profile-list-head { display: flex; justify-content: space-between; align-items: baseline; flex-wrap: wrap; gap: 8px 24px; margin-bottom: 12px; }
+.processor-profile-list-head > h3 { margin: 0; font-size: 1.15rem; }
+.processor-profile-list-head > p { margin: 0; }
+.processor-profile-row { min-width: 0; padding: 25px 0 22px; border-bottom: 1px dashed var(--dashed-line); }
+.processor-profile-row-head { display: grid; grid-template-columns: minmax(180px, 1fr) auto auto; align-items: start; gap: 18px 28px; }
+.processor-profile-row-head > * { min-width: 0; }
+.processor-profile-name > h4 { margin: 0 0 5px; font-size: 1.08rem; font-weight: 600; overflow-wrap: anywhere; }
+.processor-profile-name > p { margin: 0; font-size: .82rem; }
+.processor-profile-meta { display: flex; align-items: center; flex-wrap: wrap; gap: 8px 12px; padding-top: 2px; }
+.processor-profile-meta > .caption { font-size: .78rem; white-space: nowrap; }
+.processor-profile-status { display: inline-block; padding: 3px 10px; border-radius: 5px; font-size: .78rem; font-weight: 600; white-space: nowrap; }
+.processor-profile-status.enabled { color: var(--green); background: var(--status-bg); }
+.processor-profile-status.disabled { color: var(--muted); background: var(--warm); }
+.processor-profile-actions { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 8px; }
+.processor-profile-actions button { font-size: .8rem; padding: 10px 14px; }
+.processor-profile-actions .processor-profile-disable { background: transparent; color: var(--muted); }
+.processor-profile-actions .processor-profile-disable:hover { background: var(--warm); color: var(--red); }
+.processor-profile-identity { margin-top: 8px; color: var(--muted); font-size: .76rem; }
+.processor-profile-identity > summary { padding: 10px 0; }
+.processor-profile-identity > dl { display: grid; grid-template-columns: max-content minmax(0, 1fr); gap: 6px 18px; margin: 3px 0 12px; max-width: 650px; }
+.processor-profile-identity dt, .processor-profile-identity dd { margin: 0; overflow-wrap: anywhere; }
+.processor-profile-editor:not(:empty) { margin-top: 16px; padding: 26px 28px; background: var(--white); border-radius: 8px; }
+.processor-profile-editor > form { max-width: 900px; }
+.processor-profile-editor > form > .field:first-child { max-width: 440px; }
+.processor-profile-editor > form > .caption { max-width: 76ch; }
+.processor-profile-empty { padding: 35px 0 42px; max-width: 66ch; }
+.processor-profile-empty > h4 { margin: 0 0 8px; font-size: 1rem; }
+.processor-profile-empty > p { margin: 0; color: var(--muted); }
+.processor-config-freeze-note { max-width: 80ch; margin: 28px 0 0; font-size: .78rem; }
+@media (max-width: 1100px) {
+  .processor-profile-row-head { grid-template-columns: minmax(0, 1fr) auto; }
+  .processor-profile-actions { grid-column: 1 / -1; justify-content: flex-start; }
+}
+@media (max-width: 760px) {
+  .processor-config-intro { margin-bottom: 20px; }
+  .processor-config-create { margin-bottom: 32px; }
+  .processor-config-page input, .processor-config-page select, .processor-config-page textarea { font-size: 16px; min-width: 0; }
+  .processor-config-page .processor-config-basics { gap: 0; }
+  .processor-profile-row-head { grid-template-columns: minmax(0, 1fr); gap: 12px; }
+  .processor-profile-meta { padding-top: 0; }
+  .processor-profile-actions { gap: 8px; }
+  .processor-profile-actions button { flex: 0 1 auto; max-width: 100%; }
+  .processor-profile-identity > dl { grid-template-columns: minmax(0, 1fr); gap: 3px; }
+  .processor-profile-identity dd { margin-bottom: 9px; }
+  .processor-profile-editor:not(:empty) { padding: 20px 16px; }
+  .processor-config-page .processor-variable-row,
+  .processor-config-page .processor-secret-row { gap: 12px; margin: 24px 0; }
+  .processor-config-page .processor-runtime-grid { gap: 0; }
+  .processor-config-page .processor-config-editor-actions > button { flex: 1 1 180px; }
+}

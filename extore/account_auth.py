@@ -216,6 +216,7 @@ def _verify_second_factor(c, shop, code, backup_code):
 
 
 def revoke_shop_auth(c, sid, action="account.auth.reset"):
+    from .commerce_store import revoke_shop_grants
     from .link_access import revoke_session
     from .owner_cli_auth import revoke_owner_devices
     from .pipeline_scopes import revoke_authorizations
@@ -226,6 +227,7 @@ def revoke_shop_auth(c, sid, action="account.auth.reset"):
         revoke_authorizations(c, actor=_actor(sid), issuer_role="root")
     else:
         revoke_authorizations(c, shop_id=sid, actor=_actor(sid))
+    revoke_shop_grants(c, sid, _actor(sid))
 
     for row in c.execute(
         "SELECT digest FROM sessions WHERE shop_id IS ? AND role IN ('admin','bootstrap') AND revoked=0",

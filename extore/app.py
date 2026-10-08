@@ -19,6 +19,9 @@ from .automation import router as automation_router
 from .batch_redemption import router as batch_redemption_router
 from .card_tracking import router as card_tracking_router
 from .cli_auth import router as cli_auth_router
+from .commerce_oauth import error_response as commerce_error_response
+from .commerce_oauth import router as commerce_router
+from .commerce_store import CommerceError
 from .config import ORIGIN, check_config
 from .db import audit, db, event, init, setting
 from .device_login import router as device_login_router
@@ -128,6 +131,8 @@ app.include_router(maintenance_router)
 app.include_router(text_cards_router)
 app.include_router(work_instructions_router)
 app.include_router(workflow_validation_router)
+app.include_router(commerce_router)
+app.add_exception_handler(CommerceError, commerce_error_response)
 
 
 @app.exception_handler(RequestValidationError)
@@ -1945,6 +1950,7 @@ app.mount("/static", StaticFiles(directory=STATIC), name="static")
 @app.api_route("/account/register", methods=["GET", "HEAD"])
 @app.api_route("/account/reset", methods=["GET", "HEAD"])
 @app.api_route("/account/security", methods=["GET", "HEAD"])
+@app.api_route("/connect/authorize", methods=["GET", "HEAD"])
 def index():
     return FileResponse(STATIC / "index.html")
 

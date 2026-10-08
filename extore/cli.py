@@ -76,6 +76,7 @@ def main(argv=None):
         if command == "serve":
             subparser.add_argument("--host", type=host_name, default="127.0.0.1")
             subparser.add_argument("--port", type=port_number, default=8000)
+    from .commerce_commands import add_parser as add_commerce_parser
     from .customer_cli import add_parser as add_customer_parser
     from .manage_client import add_parser as add_manage_parser
     from .owner_client import add_parser as add_owner_parser
@@ -87,7 +88,12 @@ def main(argv=None):
     add_version(add_owner_parser(commands))
     add_version(add_workflow_parser(commands))
     add_version(add_processor_parser(commands))
+    add_version(add_commerce_parser(commands))
     args = parser.parse_args(argv)
+    if args.command == "commerce":
+        from .commerce_commands import run as commerce_main
+
+        return commerce_main(args)
     if args.command == "processors":
         from .processor_contribution_commands import run as processors_main
 

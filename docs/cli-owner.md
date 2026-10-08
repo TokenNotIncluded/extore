@@ -1,6 +1,6 @@
 # 店主 CLI
 
-[CLI 总览](cli.md) · [顾客 CLI](cli-customer.md) · [AI 接入提示词](ai-prompts.md) · [设备协议](protocol.md#店主-cli-设备授权)
+[CLI 总览](cli.md) · [顾客 CLI](cli-customer.md) · [AI 接入提示词](ai-prompts.md) · [设备协议](protocol.md#店主-cli-设备授权) · [商城接入](commerce-import-protocol.md#店主登记与撤销的-cli)
 
 `extore admin` 使用绑定到账号的 CLI 设备管理本店。它与商品管理链接的 `manage` 授权分开，支持商品创建、配置、卡密、队列、事件、会话与安全操作。店主账号限于自己的店铺，平台管理员另外维护店铺、注册和 SMTP；商品授权不能升级为店主或平台权限。完整 CLI 从 0.6.0 提供，多店账号与配置档案说明见[多店与账号](shops.md)。
 
@@ -114,8 +114,12 @@ extore admin cards issue --product PRODUCT_ID --variant enhanced \
 | `maintenance status / policy / cleanup` | 本店保留策略与清理；cleanup 默认预览，`--apply` 才执行 |
 | `proxy identities list / replace / cleanup-preview / delete` | 自动 main 标识；替换当前标识，历史可预览清理，不导出私钥 |
 | `proxy routes list / import / export / enable / disable / cleanup-preview / delete` | 固定兑换目的地及本店启用、历史清理；平台 root 必须明确 `--shop` |
+| `commerce clients list / create / delete` | 预登记商城名称与 HTTPS 回调；只登记应用，不授予商品权限 |
+| `commerce grants list / revoke` | 查看本店商城授权及规格累计发行额度，撤销连接；已发卡密保留 |
 
 本店 `sessions`、`devices`、`events`、`audit`、`processors` 和 `api` 可省略 `--product`；队列写入、已有商品修改、制卡等明确指定商品。平台管理员跨店创建商品或配置档案时显式选店，不合并店主身份；相关输入、确认和命令示例见[多店与账号](shops.md)。保存了多台服务器或设备时，用 `--origin SERVER`、`--grant DEVICE_ID` 选择，避免隐式选择。
+
+商城 OAuth 批准仍由商家本人在浏览器完成。上游服务器使用独立的 [`extore commerce`](commerce-import-protocol.md#命令行接入) 操作授权事务、令牌、商品读取与规格补货，不借用店主 profile。完整登记、撤销、私密文件和恢复规则见[商城接入文档](commerce-import-protocol.md)。
 
 ### 创建与修改商品
 

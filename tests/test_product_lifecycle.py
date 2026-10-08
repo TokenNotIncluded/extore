@@ -302,6 +302,14 @@ def test_additive_schema15_preserves_all_old54_tables(owner, setup_product):
     setup_product()
     init()
     with db() as c:
+        for table in (
+            "commerce_issuances",
+            "commerce_tokens",
+            "commerce_grants",
+            "commerce_requests",
+            "commerce_clients",
+        ):
+            c.execute("DROP TABLE " + table)
         c.execute("DROP TABLE product_purges")
         c.execute("DROP TABLE product_lifecycle")
         c.execute("PRAGMA user_version=14")
@@ -318,18 +326,34 @@ def test_additive_schema15_preserves_all_old54_tables(owner, setup_product):
     init()
     init()
     with db() as c:
-        assert c.execute("PRAGMA user_version").fetchone()[0] == 21
+        assert c.execute("PRAGMA user_version").fetchone()[0] == 22
         after = {
             r["name"]: r["sql"]
             for r in c.execute(
                 "SELECT name,sql FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'"
             )
         }
-        assert set(after) - set(before) == {"product_lifecycle", "product_purges"}
+        assert set(after) - set(before) == {
+            "product_lifecycle",
+            "product_purges",
+            "commerce_issuances",
+            "commerce_tokens",
+            "commerce_grants",
+            "commerce_requests",
+            "commerce_clients",
+        }
         for name, (ddl, rows) in before.items():
             assert after[name] == ddl
             assert [tuple(v) for v in c.execute('SELECT * FROM "' + name + '"')] == rows
         assert not c.execute("SELECT * FROM product_lifecycle").fetchall()
+        for table in (
+            "commerce_issuances",
+            "commerce_tokens",
+            "commerce_grants",
+            "commerce_requests",
+            "commerce_clients",
+        ):
+            assert c.execute("SELECT count(*) FROM " + table).fetchone()[0] == 0
 
 
 def test_deletion_and_issuance_are_serialized(owner, setup_product):

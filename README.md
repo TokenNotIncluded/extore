@@ -75,6 +75,8 @@ Extore 接手支付之后的兑换与交付：验证卡密，将顾客带到对�
 
 没有合适的商品处理器时，可在配置页一键复制开发提示词，或运行 `extore processors contribute`。自有处理器须向 [extore-processors](https://github.com/TokenNotIncluded/extore-processors/compare) 提交 PR；经过源码审核、测试、合并并随 Extore 发布后，才进入商家可选目录。[贡献指南](docs/processor-contributing.md)提供开发模板、测试方法与提交说明。
 
+[商城接入协议](docs/commerce-import-protocol.md)使用 OAuth 2.0 授权码与 S256 PKCE，让上游商城读取商家明确授权的商品详情、规格与参考价，并在独立批准的规格额度内补充卡密。卡密补货按请求幂等，授权可到期或撤销，新增商品不会自动获权。提供开放接口、JSON Schema、Python SDK 和 CLI；实际支付、售价、销售库存与订单仍由上游商城管理。
+
 [一卡一文本](https://github.com/TokenNotIncluded/extore/blob/main/docs/text-stock.md)适合已有交付内容的库存；[签名兑换路由](https://github.com/TokenNotIncluded/extore/blob/main/docs/proxy-routing.md)适合多个 Extore 站点共用入口。普通旧卡密不会被拿去逐个试探其他站点，入口站后端不接收下游路由卡密。
 
 需要重试时，处理者须说明原因并选择「修改后重提」或「原资料重试」；外部故障也能作为原因。拒绝处理会禁用卡密。原任务、规格和步骤计划保留，重新开始后进度归零。
@@ -167,6 +169,7 @@ SMTP 凭据、TOTP 密钥与店铺处理器配置加密保存。店主可以回�
 | --- | --- |
 | [快速入门与运行指南](https://github.com/TokenNotIncluded/extore/blob/main/docs/getting-started.md) | 本地运行、管理权限、认证恢复、生产配置、Docker 与 Arch Linux 部署 |
 | [接口与事件协议](https://github.com/TokenNotIncluded/extore/blob/main/docs/protocol.md) | 商品、SKU、卡密、队列、附件、完整事件定义与签名回调 |
+| [商城授权与商品导入](https://github.com/TokenNotIncluded/extore/blob/main/docs/commerce-import-protocol.md) | OAuth 与 S256 PKCE、商品字段映射、规格卡密补货、幂等恢复、JSON Schema、SDK 和 CLI 接入 |
 | [CLI 指南](https://github.com/TokenNotIncluded/extore/blob/main/docs/cli.md) | 商品完整管理、卡密、授权、队列与私密输出 |
 | [顾客 CLI](https://github.com/TokenNotIncluded/extore/blob/main/docs/cli-customer.md) · [店主 CLI](https://github.com/TokenNotIncluded/extore/blob/main/docs/cli-owner.md) | 批量兑换、材料与交付；Passkey 设备批准和全店操作 |
 | [多店与账号](https://github.com/TokenNotIncluded/extore/blob/main/docs/shops.md) | 平台与店主边界、邮箱邀请、TOTP、SMTP、加密处理器配置与存储额度 |

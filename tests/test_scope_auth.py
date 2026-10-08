@@ -431,6 +431,11 @@ def test_schema13_additive_migration_preserves_old39_tables(owner):
     with db() as c:
         # Remove later additions to reproduce an actual schema-11 database.
         for table in (
+            "commerce_issuances",
+            "commerce_tokens",
+            "commerce_grants",
+            "commerce_requests",
+            "commerce_clients",
             "job_delivery_versions",
             "job_revision_requests",
             "card_entitlements",
@@ -469,7 +474,7 @@ def test_schema13_additive_migration_preserves_old39_tables(owner):
         }
     init()
     with db() as c:
-        assert c.execute("PRAGMA user_version").fetchone()[0] == 21
+        assert c.execute("PRAGMA user_version").fetchone()[0] == 22
         for name, (ddl, rows) in before.items():
             assert (
                 c.execute(
@@ -480,6 +485,11 @@ def test_schema13_additive_migration_preserves_old39_tables(owner):
             assert [tuple(x) for x in c.execute('SELECT * FROM "' + name + '"')] == rows
         assert c.execute("SELECT id FROM products WHERE id=?", (pid,)).fetchone()
         for table in (
+            "commerce_issuances",
+            "commerce_tokens",
+            "commerce_grants",
+            "commerce_requests",
+            "commerce_clients",
             "cli_scope_requests",
             "pipeline_bindings",
             "pipeline_authorizations",

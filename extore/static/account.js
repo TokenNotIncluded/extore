@@ -19,7 +19,7 @@
   function mount({ root, api, auth = {}, mode = "login", token = "", isCurrent = () => true, navigate = (url) => { window.location.href = url; }, passkey, language = "zh-CN", onAuth = () => {}, copyProcessorPrompt } = {}) {
     if (!root?.querySelector || typeof api !== "function") throw new TypeError("Account page needs a root and API");
     mounts.get(root)?.dispose();
-    let disposed = false, version = 0, busy = false, selectedProfileShop = "", enrollment = null, contributionView = null;
+    let disposed = false, version = 0, busy = false, selectedProfileShop = "", enrollment = null, contributionView = null, profileConfirmation = null;
     const controller = new AbortController();
     const active = () => !disposed && root.isConnected !== false && isCurrent();
     const $ = (selector) => root.querySelector(selector);
@@ -31,6 +31,7 @@
       if (!active()) return;
       clearContribution();
       clearTotpSetup();
+      clearProfileConfirmation();
       version++;
       root.innerHTML = `<div class="account-page ${["security", "shops", "mail", "profiles"].includes(mode) ? "" : "narrow"}"><div class="section-head"><h${mode === "security" || ["shops", "mail", "profiles"].includes(mode) ? "2" : "1"}>${esc(title)}</h${mode === "security" || ["shops", "mail", "profiles"].includes(mode) ? "2" : "1"}><a href="/admin">${tr("商家后台", "Dashboard")}</a></div>${body}<p id="account-error" class="error" role="alert"></p><div id="account-confirmation"></div></div>`;
     };
@@ -67,7 +68,18 @@
       previous.form.hidden = false;
     }
     function clearContribution() { contributionView?.dispose(); contributionView = null; }
-    const leavePage = () => { version++; clearContribution(); clearTotpSetup(); clearSecrets(); };
+    function clearProfileConfirmation() {
+      const state = profileConfirmation;
+      profileConfirmation = null;
+      if (!state) return;
+      state.active = false;
+      if (state.body) { delete state.body.configuration; delete state.body.workflow; }
+      if ($("#account-confirmation") === state.target) {
+        for (const id of ["fresh-password", "fresh-code", "fresh-backup"]) { const input = $("#" + id); if (input) input.value = input.defaultValue = ""; }
+        state.target.innerHTML = "";
+      }
+    }
+    const leavePage = () => { version++; clearProfileConfirmation(); clearContribution(); clearTotpSetup(); clearSecrets(); };
     window.addEventListener?.("pagehide", leavePage);
     async function checkScope(allowFreshSession = false, verified = null) {
       const current = verified || await request("/auth/status");
@@ -151,27 +163,30 @@
         }
       });
     }
-    function fresh(handler, title = "确认账户身份") {
-      if (!active()) return;
+    function fresh(handler, title = "确认账户身份", options = {}) {
+      const current = () => active() && (typeof options.isCurrent !== "function" || options.isCurrent());
+      if (!current()) return;
       const target = $("#account-confirmation");
       const identity = shopScope(auth)
         ? `<div class="account-identity"><p id="account-fresh-shop"><strong>${esc(auth.shop_name || tr("店铺", "Shop"))}</strong></p>${auth.shop_email ? `<p id="account-fresh-email" class="caption">${esc(auth.shop_email)}</p>` : ""}<p class="caption mono">${tr("店铺 ID", "Shop ID")}：${esc(auth.shop_id)}</p></div>`
         : `<p class="caption">${rootScope(auth) ? tr("超级管理员", "Platform administrator") : tr("未登录", "Not signed in")}</p>`;
       target.innerHTML = `<section class="panel account-stepup"><h3>${esc(title)}</h3><p class="caption">${tr("重新验证后才会提交本次操作。", "This operation is submitted only after you verify your identity again.")}</p>${identity}${shopScope(auth) ? `<form id="account-fresh-form">${secret("fresh-password", "当前密码", 'required autocomplete="current-password" maxlength="200"')}${factors("fresh", tr)}<button type="submit">使用密码确认</button></form>` : ""}<div class="actions"><button id="account-fresh-passkey" type="button">使用 Passkey 确认</button><button id="account-fresh-cancel" class="secondary" type="button">取消</button></div></section>`;
       on("#account-fresh-form", "submit", async () => {
+        if (!current()) return;
         try { await request("/auth/reauth/password", values("fresh"), "POST"); } finally { clearSecrets(); }
-        if (!await checkScope()) return;
-        if (active()) target.innerHTML = "";
+        if (!current() || !await checkScope() || !current()) return;
+        target.innerHTML = "";
         await handler();
       });
       on("#account-fresh-passkey", "click", async () => {
+        if (!current()) return;
         if (typeof passkey !== "function") throw new Error("Passkey 模块未加载，请刷新页面");
-        const verified = await passkey(false, null, { signal: controller.signal, isCurrent: active });
-        if (!await checkScope(true, verified)) return;
-        if (active()) target.innerHTML = "";
+        const verified = await passkey(false, null, { signal: controller.signal, isCurrent: current });
+        if (!current() || !await checkScope(true, verified) || !current()) return;
+        target.innerHTML = "";
         await handler();
       });
-      on("#account-fresh-cancel", "click", () => { target.innerHTML = ""; });
+      on("#account-fresh-cancel", "click", () => { if (!current()) return; options.onCancel?.(); target.innerHTML = ""; });
     }
     const completed = (message) => { page(tr("操作已完成", "Done"), `<section class="panel"><p>${esc(message)}</p><a href="/account/login">${tr("返回登录", "Return to sign in")}</a></section>`); };
 
@@ -283,6 +298,7 @@
     }
     async function profiles() {
       if (!rootScope(auth) && !shopScope(auth)) throw new Error("仅店主可管理处理器配置");
+      clearProfileConfirmation();
       const load = ++version;
       const [catalog, shopsList] = await Promise.all([request("/admin/processors"), rootScope(auth) ? request("/platform/shops") : Promise.resolve([])]);
       if (!active() || version !== load) return;
@@ -312,10 +328,10 @@
         return options;
       };
       const limits = [
-        { key: "timeout_seconds", name: "超时（秒）", min: 10, max: 120, default: 120 },
-        { key: "memory_mb", name: "内存（MiB）", min: 64, max: 512, default: 256 },
-        { key: "cpu_seconds", name: "CPU 时间（秒）", min: 1, max: 120, default: 120 },
-        { key: "max_output_bytes", name: "输出上限（字节）", min: 65536, max: 1000000, default: 1000000 },
+        { key: "timeout_seconds", name: tr("超时（秒）", "Timeout (seconds)"), min: 10, max: 120, default: 120 },
+        { key: "memory_mb", name: tr("内存（MiB）", "Memory (MiB)"), min: 64, max: 512, default: 256 },
+        { key: "cpu_seconds", name: tr("CPU 时间（秒）", "CPU time (seconds)"), min: 1, max: 120, default: 120 },
+        { key: "max_output_bytes", name: tr("输出上限（字节）", "Output limit (bytes)"), min: 65536, max: 1000000, default: 1000000 },
       ];
       const validName = (name) => /^[A-Z][A-Z0-9_]{0,63}$/.test(name) && !name.startsWith("EXTORE_");
       const drafts = new Map();
@@ -336,22 +352,22 @@
         }
         if (definition.type === "textarea") return `<div class="field"><label for="${id}">${esc(name)}</label><textarea id="${id}" rows="5" ${attrs}>${esc(value)}</textarea></div>${help}`;
         return field(id, name, ["text", "url", "email", "tel", "number"].includes(definition.type) ? definition.type : "text", attrs, value) + help;
-      }).join("") || '<p class="caption">此处理器没有额外参数。</p>';
+      }).join("") || `<p class="caption">${tr("此处理器没有额外参数。", "This processor needs no additional parameters.")}</p>`;
       const rowHTML = (prefix, kind, row) => {
         const base = `${prefix}${kind}-${row.id}`;
-        return `<div id="${base}" class="processor-${kind === "variable" ? "variable" : "secret"}-row">${field(base + "-name", "名称（大写）", "text", `maxlength="64" pattern="[A-Z][A-Z0-9_]{0,63}" ${kind === "secret" && row.originalName ? "readonly" : ""}`, row.name)}${kind === "secret" ? secret(base + "-value", row.originalName ? "新值（留空保留）" : "密钥值", 'maxlength="8192"') : `<div class="field"><label for="${base}-value">值（普通文本）</label><textarea id="${base}-value" rows="2" maxlength="8192">${esc(row.value)}</textarea></div>`}<button id="${base}-remove" type="button" class="secondary">删除${kind === "secret" ? "密钥" : "变量"}</button></div>`;
+        return `<div id="${base}" class="processor-${kind === "variable" ? "variable" : "secret"}-row">${field(base + "-name", tr("名称（大写）", "Name (uppercase)"), "text", `maxlength="64" pattern="[A-Z][A-Z0-9_]{0,63}" ${kind === "secret" && row.originalName ? "readonly" : ""}`, row.name)}${kind === "secret" ? secret(base + "-value", row.originalName ? tr("新值（留空保留）", "New value (leave empty to keep)") : tr("密钥值", "Secret value"), 'maxlength="8192"') : `<div class="field"><label for="${base}-value">${tr("值（普通文本）", "Value (plain text)")}</label><textarea id="${base}-value" rows="2" maxlength="8192">${esc(row.value)}</textarea></div>`}<button id="${base}-remove" type="button" class="secondary">${kind === "secret" ? tr("删除密钥", "Remove secret") : tr("删除变量", "Remove variable")}</button></div>`;
       };
       const editorHTML = (spec, prefix, item = null) => {
         const workflow = item?.workflow || {}, state = { variables: [], secrets: [], nextId: 0 };
         for (const [name, value] of Object.entries(workflow.variables || {})) if (typeof value === "string") state.variables.push({ id: state.nextId++, name, value, originalName: name });
         for (const name of Array.isArray(workflow.configured_secret_names) ? workflow.configured_secret_names : []) if (typeof name === "string") state.secrets.push({ id: state.nextId++, name, originalName: name });
         drafts.set(prefix, state);
-        return `${spec?.description ? `<p class="caption processor-description">${esc(label(spec.description, ""))}</p>` : ""}<fieldset class="processor-settings"><legend>处理器参数</legend>${fieldsHTML(spec, prefix, !!item, item?.configuration || {})}<p class="caption">普通模板可直接编辑；处理器凭据不回读，留空保留。</p></fieldset><details class="processor-workflow" ${state.variables.length ? "open" : ""}><summary id="${prefix}variable-summary">普通变量 · ${state.variables.length}</summary><fieldset class="processor-workflow-fields"><legend>普通变量</legend><p class="caption">名称使用大写字母、数字与下划线；系统保留名不能使用，保存时会校验。程序通过 Task.environment[NAME] 读取，同时传入 EXTORE_WORKFLOW_NAME。普通变量可见，请把凭据放入密钥。</p><div id="${prefix}variables">${state.variables.map((row) => rowHTML(prefix, "variable", row)).join("")}</div><div class="processor-workflow-actions actions"><button id="${prefix}add-variable" type="button" class="secondary">添加变量</button></div></fieldset></details><details class="processor-workflow" ${state.secrets.length ? "open" : ""}><summary id="${prefix}secret-summary">密钥 · ${state.secrets.length}</summary><fieldset class="processor-workflow-fields"><legend>密钥</legend><p class="caption">只显示已配置的名称，值只写入、不回读。留空保留；删除在保存后生效。改名请删除旧密钥，再添加新名称和值。</p><div id="${prefix}secrets">${state.secrets.map((row) => rowHTML(prefix, "secret", row)).join("")}</div><div class="processor-workflow-actions actions"><button id="${prefix}add-secret" type="button" class="secondary">添加密钥</button></div></fieldset></details><details class="processor-workflow"><summary>运行限制</summary><fieldset class="processor-workflow-fields"><legend>运行限制</legend><div class="processor-runtime-grid grid">${limits.map((limit) => field(prefix + "runtime-" + limit.key, limit.name, "number", `required min="${limit.min}" max="${limit.max}" step="1" inputmode="numeric"`, workflow.runtime?.[limit.key] ?? limit.default)).join("")}</div><p class="caption">超时 10–120 秒，内存 64–512 MiB，CPU 时间 1–120 秒，输出 65,536–1,000,000 字节。仅运行离线预设处理器；配置不能改变启动命令、镜像、软件包、网络或挂载。</p></fieldset></details>`;
+        return `${spec?.description ? `<p class="caption processor-description">${esc(label(spec.description, ""))}</p>` : ""}<fieldset class="processor-settings"><legend>${tr("处理器参数", "Processor parameters")}</legend>${fieldsHTML(spec, prefix, !!item, item?.configuration || {})}<p class="caption">${tr("普通模板可直接编辑；处理器凭据不回读，留空保留。", "Edit plain text directly. Credentials are never shown; leave them empty to keep the saved values.")}</p></fieldset><details class="processor-workflow"><summary id="${prefix}variable-summary">${tr("普通变量", "Variables")} · ${state.variables.length}</summary><fieldset class="processor-workflow-fields"><legend>${tr("普通变量", "Variables")}</legend><p class="caption">${tr("名称使用大写字母、数字与下划线；系统保留名不能使用，保存时会校验。普通变量可见，请把凭据放入密钥。", "Use uppercase letters, digits and underscores. Reserved system names are checked when saving. Variables are readable; put credentials in secrets.")}</p><div id="${prefix}variables">${state.variables.map((row) => rowHTML(prefix, "variable", row)).join("")}</div><div class="processor-workflow-actions actions"><button id="${prefix}add-variable" type="button" class="secondary">${tr("添加变量", "Add variable")}</button></div><p class="caption">${tr("程序通过 Task.environment[NAME] 读取，同时传入 EXTORE_WORKFLOW_NAME。", "Processors read Task.environment[NAME]; EXTORE_WORKFLOW_NAME is provided as well.")}</p></fieldset></details><details class="processor-workflow"><summary id="${prefix}secret-summary">${tr("密钥", "Secrets")} · ${state.secrets.length}</summary><fieldset class="processor-workflow-fields"><legend>${tr("密钥", "Secrets")}</legend><p class="caption">${tr("只显示已配置的名称，值只写入、不回读。留空保留；删除在保存后生效。改名请删除旧密钥，再添加新名称和值。", "Only configured names are visible. Values are write-only; empty keeps the saved value. Removal takes effect when saved. To rename, remove the old secret and add its new name and value.")}</p><div id="${prefix}secrets">${state.secrets.map((row) => rowHTML(prefix, "secret", row)).join("")}</div><div class="processor-workflow-actions actions"><button id="${prefix}add-secret" type="button" class="secondary">${tr("添加密钥", "Add secret")}</button></div></fieldset></details><details class="processor-workflow"><summary>${tr("运行限制", "Runtime limits")}</summary><fieldset class="processor-workflow-fields"><legend>${tr("运行限制", "Runtime limits")}</legend><div class="processor-runtime-grid grid">${limits.map((limit) => field(prefix + "runtime-" + limit.key, limit.name, "number", `required min="${limit.min}" max="${limit.max}" step="1" inputmode="numeric"`, workflow.runtime?.[limit.key] ?? limit.default)).join("")}</div><p class="caption">${tr("超时 10–120 秒，内存 64–512 MiB，CPU 时间 1–120 秒，输出 65,536–1,000,000 字节。仅运行离线预设处理器；配置不能改变启动命令、镜像、软件包、网络或挂载。", "Timeout 10–120 seconds, memory 64–512 MiB, CPU time 1–120 seconds, output 65,536–1,000,000 bytes. These limits apply to offline presets; configuration cannot change commands, images, packages, networking or mounts.")}</p></fieldset></details>`;
       };
       const wireWorkflow = (prefix) => {
         const state = drafts.get(prefix);
-        const updateCount = (kind, rows) => text("#" + prefix + kind + "-summary", (kind === "variable" ? "普通变量" : "密钥") + " · " + rows.filter((row) => !row.deleted).length);
-        const bindRow = (kind, row) => on(`#${prefix}${kind}-${row.id}-remove`, "click", () => {
+        const updateCount = (kind, rows) => text("#" + prefix + kind + "-summary", (kind === "variable" ? tr("普通变量", "Variables") : tr("密钥", "Secrets")) + " · " + rows.filter((row) => !row.deleted).length);
+        const bindRow = (kind, row) => profileOn(`#${prefix}${kind}-${row.id}-remove`, "click", () => {
           row.deleted = true;
           const node = $(`#${prefix}${kind}-${row.id}`), value = $(`#${prefix}${kind}-${row.id}-value`);
           if (value) value.value = value.defaultValue = "";
@@ -360,7 +376,7 @@
         });
         for (const [kind, rows] of [["variable", state.variables], ["secret", state.secrets]]) {
           rows.forEach((row) => bindRow(kind, row));
-          on("#" + prefix + "add-" + kind, "click", () => {
+          profileOn("#" + prefix + "add-" + kind, "click", () => {
             if (rows.filter((row) => !row.deleted).length >= 64) throw new Error("每组最多添加 64 个变量或密钥");
             const row = { id: state.nextId++, name: "", value: "", originalName: null };
             rows.push(row);
@@ -415,45 +431,85 @@
         }
         return workflow;
       };
-      page("商品处理器配置", `<p class="caption">按店铺隔离的工作流配置：处理器参数、普通变量、密钥与运行限制。保存会创建新版本；商品需重新绑定才影响之后发行的卡密，已发行卡密继续使用原来的冻结版本。</p><div id="profile-processor-contribution"></div><section class="panel processor-config-card"><h3>新建配置</h3><form id="profile-create-form" class="processor-config-form">${rootScope(auth) ? `<div class="field"><label for="profile-shop">所属店铺</label><select id="profile-shop"><option value="">请选择店铺</option>${shopsList.map((shop) => `<option value="${esc(shop.id)}" ${profileShop === shop.id ? "selected" : ""}>${esc(shop.name)}</option>`).join("")}</select></div>` : ""}<div class="processor-config-basics grid">${field("profile-name", "配置名称", "text", 'required maxlength="120"')}<div class="field"><label for="profile-processor">商品处理器</label><select id="profile-processor" required><option value="">请选择处理器</option>${specs.map((spec) => `<option value="${esc(spec.id)}">${esc(label(spec.name, spec.id))}</option>`).join("")}</select></div></div><div id="profile-fields"></div><div class="actions"><button type="submit">创建配置</button>${typeof copyProcessorPrompt === "function" ? '<button id="profile-copy-template" type="button" class="secondary">复制配置提示词</button>' : ""}</div></form></section><div id="processor-cli-prompt"></div><div id="profile-items">${items.map((item) => `<section class="panel processor-config-card"><div class="section-head"><div><h3>${esc(item.name)}</h3><p class="caption">${esc(label(specs.find((spec) => spec.id === item.processor_id)?.name, item.processor_id))} · 当前版本 ${esc(item.revision)}${item.disabled ? " · 已停用" : ""}</p><p class="caption mono">${esc(item.processor_id)} · ${esc(item.shop_id)}</p></div><div class="actions">${typeof copyProcessorPrompt === "function" ? `<button data-profile-copy="${esc(item.id)}" class="secondary" type="button">复制配置提示词</button>` : ""}${item.disabled ? "" : `<button data-profile-edit="${esc(item.id)}" class="secondary">编辑配置</button><button data-profile-delete="${esc(item.id)}" class="danger">停用</button>`}</div></div><p class="caption">已绑定商品保留各自的绑定版本；在商品页重新绑定后，后续发行才使用此配置版本。已发行卡密不会改变。</p><div id="profile-editor-${esc(item.id)}"></div></section>`).join("")}${items.length ? "" : `<div class="empty"><h3>${tr("尚未创建处理器配置", "No processor configurations yet")}</h3><p>${tr("先选择处理器并创建配置，再到商品页绑定。没有合适的处理器时，可以从上方入口通过 PR 贡献。", "Choose a processor and create a configuration, then bind it on the product page. If none fits, use the contribution entry above to submit a PR.")}</p></div>`}</div>`);
-      const displayVersion = version;
+      const enabledCount = items.filter((item) => !item.disabled).length;
+      const selectedShop = shopsList.find((shop) => shop.id === profileShop);
+      const scopeName = rootScope(auth) ? selectedShop?.name || tr("选择店铺", "Choose a shop") : auth.shop_name || tr("本店", "This shop");
+      page(tr("商品处理器配置", "Processor configurations"), `<div class="processor-config-page"><p class="processor-config-intro caption">${tr("为商品处理器保存一份店铺配置，再到商品页绑定。普通模板可编辑，密钥单独保存。", "Save a shop configuration for a processor, then bind it on the product page. Plain text is editable; secrets are stored separately.")}</p><div class="processor-config-scope">${rootScope(auth) ? `<div class="field"><label for="profile-shop">${tr("所属店铺", "Shop")}</label><select id="profile-shop"><option value="">${tr("请选择店铺", "Choose a shop")}</option>${shopsList.map((shop) => `<option value="${esc(shop.id)}" ${profileShop === shop.id ? "selected" : ""}>${esc(shop.name)}</option>`).join("")}</select></div>` : `<p>${esc(scopeName)}${auth.shop_email ? `<span class="caption">${esc(auth.shop_email)}</span>` : ""}</p>`}</div><div id="profile-processor-contribution"></div><details id="profile-create" class="processor-config-create" ${items.length ? "" : "open"}><summary>${tr("新建配置", "New configuration")}</summary><form id="profile-create-form" class="processor-config-form"><div class="processor-config-basics grid">${field("profile-name", tr("配置名称", "Configuration name"), "text", 'required maxlength="120"')}<div class="field"><label for="profile-processor">${tr("商品处理器", "Processor")}</label><select id="profile-processor" required><option value="">${tr("请选择处理器", "Choose a processor")}</option>${specs.map((spec) => `<option value="${esc(spec.id)}">${esc(label(spec.name, spec.id))}</option>`).join("")}</select></div></div><div id="profile-fields"></div><div class="processor-config-editor-actions actions"><button type="submit">${tr("创建配置", "Create configuration")}</button>${typeof copyProcessorPrompt === "function" ? `<button id="profile-copy-template" type="button" class="secondary">${tr("复制配置提示词", "Copy configuration prompt")}</button>` : ""}</div></form></details><div id="processor-cli-prompt"></div><section id="profile-overview" class="processor-profile-overview" aria-labelledby="profile-list-title"><div class="processor-profile-list-head"><h3 id="profile-list-title">${tr("已保存的配置", "Saved configurations")}</h3><p class="caption">${tr(`${enabledCount} 个启用 · ${items.length - enabledCount} 个停用`, `${enabledCount} enabled · ${items.length - enabledCount} disabled`)}</p></div><div id="profile-items">${items.map((item) => `<article class="processor-profile-row${item.disabled ? " is-disabled" : ""}"><div class="processor-profile-row-head"><div class="processor-profile-name"><h4>${esc(item.name)}</h4><p class="caption">${esc(label(specs.find((spec) => spec.id === item.processor_id)?.name, item.processor_id))}</p></div><div class="processor-profile-meta"><span class="processor-profile-status ${item.disabled ? "disabled" : "enabled"}">${item.disabled ? tr("已停用", "Disabled") : tr("启用中", "Enabled")}</span><span class="caption">${tr("版本", "Version")} ${esc(item.revision)}</span></div><div class="processor-profile-actions">${typeof copyProcessorPrompt === "function" ? `<button data-profile-copy="${esc(item.id)}" class="secondary" type="button">${tr("复制配置提示词", "Copy configuration prompt")}</button>` : ""}${item.disabled ? "" : `<button data-profile-edit="${esc(item.id)}" class="secondary" type="button" aria-expanded="false" aria-controls="profile-editor-${esc(item.id)}">${tr("编辑配置", "Edit configuration")}</button><button data-profile-delete="${esc(item.id)}" class="processor-profile-disable secondary" type="button">${tr("停用", "Disable")}</button>`}</div></div><details class="processor-profile-identity"><summary>${tr("配置标识", "Configuration identifiers")}</summary><dl><dt>${tr("配置 ID", "Configuration ID")}</dt><dd class="mono">${esc(item.id)}</dd><dt>${tr("处理器 ID", "Processor ID")}</dt><dd class="mono">${esc(item.processor_id)}</dd><dt>${tr("店铺 ID", "Shop ID")}</dt><dd class="mono">${esc(item.shop_id)}</dd></dl></details><div id="profile-editor-${esc(item.id)}" class="processor-profile-editor"></div></article>`).join("")}${items.length ? "" : `<div class="processor-profile-empty"><h4>${tr("尚未创建处理器配置", "No processor configurations yet")}</h4><p>${tr("选择处理器并保存第一份配置，再到商品页绑定。没有合适的处理器，可以从上方入口通过 PR 贡献。", "Choose a processor and save your first configuration, then bind it on the product page. If none fits, use the contribution entry above to submit a PR.")}</p></div>`}</div></section><p class="processor-config-freeze-note caption">${tr("保存会创建新版本。商品重新绑定后，只有新发行卡密使用新配置；已发行卡密保留原来的冻结版本。", "Saving creates a new version. Rebinding a product applies it only to new codes; issued codes retain their original frozen version.")}</p></div>`);
+      const displayVersion = version, overview = $("#profile-overview"), editors = new Map();
+      const profileCurrent = () => active() && version === displayVersion && $("#profile-overview") === overview;
+      const profileOn = (selector, event, handler) => { const control = $(selector); on(selector, event, (e) => { if (profileCurrent() && control?.isConnected !== false && $(selector) === control) return handler(e); }); };
       contributionView = window.ExtoreProcessorContribution?.mount({
         root: $("#profile-processor-contribution"), api: request,
-        language, isCurrent: () => active() && version === displayVersion,
+        language, isCurrent: profileCurrent,
         identity: () => JSON.stringify([auth.role, auth.shop_id, auth.session_id, profileShop]),
       });
       const copyPrompt = (item, processorId) => {
         if (!profileShop) throw new Error("请选择所属店铺");
         if (!processorId) throw new Error("请选择可用的商品处理器");
-        return copyProcessorPrompt({ shopId: profileShop, ...(item ? { profileId: item.id } : {}), processorId }, $("#processor-cli-prompt"), () => active() && version === displayVersion);
+        if (!profileCurrent()) return;
+        return copyProcessorPrompt({ shopId: profileShop, ...(item ? { profileId: item.id } : {}), processorId }, $("#processor-cli-prompt"), profileCurrent);
       };
-      on("#profile-copy-template", "click", () => copyPrompt(null, specs.find((spec) => spec.id === $("#profile-processor").value)?.id));
-      root.querySelectorAll("[data-profile-copy]").forEach((node) => node.addEventListener("click", () => run(() => { const item = items.find((profile) => profile.id === node.dataset.profileCopy); return copyPrompt(item, item.processor_id); }, node)));
-      on("#profile-shop", "change", async () => { selectedProfileShop = $("#profile-shop").value; await profiles(); });
-      on("#profile-processor", "change", () => { clearSecrets(); $("#profile-fields").innerHTML = editorHTML(specs.find((spec) => spec.id === $("#profile-processor").value), "profile-field-"); wireWorkflow("profile-field-"); });
-      on("#profile-create-form", "submit", async () => {
+      const confirmProfileWrite = (body, current, write, title) => {
+        clearProfileConfirmation();
+        const state = { body, target: $("#account-confirmation"), active: true };
+        profileConfirmation = state;
+        const pending = () => state.active && profileConfirmation === state && current();
+        fresh(async () => {
+          try { if (pending()) await write(); }
+          finally {
+            state.active = false;
+            if (state.clearConfiguration) delete body.configuration;
+            else if (Object.hasOwn(body, "configuration")) body.configuration = {};
+            delete body.workflow;
+            if (profileConfirmation === state) profileConfirmation = null;
+          }
+          if (current()) await profiles();
+        }, title, { isCurrent: pending, onCancel: clearProfileConfirmation });
+      };
+      profileOn("#profile-copy-template", "click", () => copyPrompt(null, specs.find((spec) => spec.id === $("#profile-processor").value)?.id));
+      root.querySelectorAll("[data-profile-copy]").forEach((node) => node.addEventListener("click", () => run(() => { if (!profileCurrent() || node.isConnected === false) return; const item = items.find((profile) => profile.id === node.dataset.profileCopy); return copyPrompt(item, item.processor_id); }, node)));
+      profileOn("#profile-shop", "change", async () => { selectedProfileShop = $("#profile-shop").value; await profiles(); });
+      profileOn("#profile-processor", "change", () => { clearProfileConfirmation(); clearSecrets(); $("#profile-fields").innerHTML = editorHTML(specs.find((spec) => spec.id === $("#profile-processor").value), "profile-field-"); wireWorkflow("profile-field-"); });
+      profileOn("#profile-create-form", "submit", async () => {
         const spec = specs.find((spec) => spec.id === $("#profile-processor").value);
         if (!spec) throw new Error("请选择可用的商品处理器");
         const body = { name: $("#profile-name").value.trim(), processor_id: spec.id, configuration: capture(spec, "profile-field-"), workflow: captureWorkflow("profile-field-") };
         delete body.workflow.delete_variables; delete body.workflow.delete_secrets;
         if (rootScope(auth)) { body.shop_id = $("#profile-shop").value; if (!body.shop_id) throw new Error("请选择所属店铺"); }
         clearSecrets();
-        fresh(async () => { try { await request("/admin/processor-profiles", body, "POST"); } finally { body.configuration = {}; delete body.workflow; } if (active()) await profiles(); }, "确认创建处理器配置");
+        confirmProfileWrite(body, profileCurrent, () => request("/admin/processor-profiles", body, "POST"), tr("确认创建处理器配置", "Confirm configuration creation"));
       });
       root.querySelectorAll("[data-profile-edit]").forEach((node) => node.addEventListener("click", () => run(() => {
-        const item = items.find((p) => p.id === node.dataset.profileEdit), spec = specs.find((s) => s.id === item.processor_id), prefix = "profile-update-" + item.id + "-";
-        $("#profile-editor-" + item.id).innerHTML = `<form id="profile-update-${esc(item.id)}" class="processor-config-form">${field(prefix + "name", "配置名称", "text", 'required maxlength="120"', item.name)}${editorHTML(spec, prefix, item)}<p class="caption">普通文本和变量可直接编辑；清空可选文本会删除原内容。密钥留空保留，删除须明确点击对应删除按钮后保存。</p><button type="submit">保存新版本</button></form>`;
+        if (!profileCurrent() || node.isConnected === false) return;
+        const item = items.find((p) => p.id === node.dataset.profileEdit), spec = specs.find((s) => s.id === item.processor_id), prefix = "profile-update-" + item.id + "-", host = $("#profile-editor-" + item.id);
+        if (editors.has(item.id)) { $("#" + prefix + "name")?.focus(); return; }
+        const state = { prefix, host, button: node, active: true };
+        editors.set(item.id, state);
+        host.innerHTML = `<form id="profile-update-${esc(item.id)}" class="processor-config-form">${field(prefix + "name", tr("配置名称", "Configuration name"), "text", 'required maxlength="120"', item.name)}${editorHTML(spec, prefix, item)}<p class="caption">${tr("普通文本和变量可直接编辑；清空可选文本会删除原内容。密钥留空保留，删除须明确点击对应删除按钮后保存。", "Edit plain text and variables directly. Clearing optional text removes it. Empty secrets keep the saved values; removing a secret requires its removal button and a save.")}</p><div class="processor-config-editor-actions actions"><button type="submit">${tr("保存新版本", "Save new version")}</button><button id="${prefix}cancel" type="button" class="secondary">${tr("取消编辑", "Cancel editing")}</button></div></form>`;
+        node.setAttribute("aria-expanded", "true");
+        state.form = $("#profile-update-" + item.id);
+        const editorCurrent = () => profileCurrent() && state.active && editors.get(item.id) === state && $("#profile-update-" + item.id) === state.form;
         wireWorkflow(prefix);
-        on("#profile-update-" + item.id, "submit", async () => {
+        profileOn("#" + prefix + "cancel", "click", () => {
+          if (!editorCurrent()) return;
+          for (const [index, definition] of definitions(spec).entries()) if (definition.secret !== false) { const control = $("#" + prefix + index); if (control) control.value = control.defaultValue = ""; }
+          for (const row of drafts.get(prefix)?.secrets || []) { const control = $(`#${prefix}secret-${row.id}-value`); if (control) control.value = control.defaultValue = ""; }
+          if (profileConfirmation?.editor === state) clearProfileConfirmation();
+          state.active = false; drafts.delete(prefix); editors.delete(item.id); host.innerHTML = ""; node.setAttribute("aria-expanded", "false"); node.focus();
+        });
+        profileOn("#profile-update-" + item.id, "submit", async () => {
+          if (!editorCurrent()) return;
           const body = { name: $("#" + prefix + "name").value.trim(), workflow: captureWorkflow(prefix) }, configuration = capture(spec, prefix);
           if (Object.keys(configuration).length) body.configuration = configuration;
           clearSecrets();
-          fresh(async () => { try { await request("/admin/processor-profiles/" + encodeURIComponent(item.id), body, "PUT"); } finally { delete body.configuration; delete body.workflow; } if (active()) await profiles(); }, "确认更新处理器配置");
+          confirmProfileWrite(body, editorCurrent, () => request("/admin/processor-profiles/" + encodeURIComponent(item.id), body, "PUT"), tr("确认更新处理器配置", "Confirm configuration update"));
+          if (profileConfirmation) { profileConfirmation.editor = state; profileConfirmation.clearConfiguration = true; }
         });
+        $("#" + prefix + "name")?.focus();
       }, node)));
-      root.querySelectorAll("[data-profile-delete]").forEach((node) => node.addEventListener("click", () => run(() => fresh(async () => { await request("/admin/processor-profiles/" + encodeURIComponent(node.dataset.profileDelete), null, "DELETE"); if (active()) await profiles(); }, "确认停用处理器配置"), node)));
+      root.querySelectorAll("[data-profile-delete]").forEach((node) => node.addEventListener("click", () => run(() => { if (!profileCurrent() || node.isConnected === false) return; clearProfileConfirmation(); fresh(async () => { if (!profileCurrent()) return; await request("/admin/processor-profiles/" + encodeURIComponent(node.dataset.profileDelete), null, "DELETE"); if (profileCurrent()) await profiles(); }, tr("确认停用处理器配置", "Confirm configuration disable")); }, node)));
     }
-    const instance = Object.freeze({ dispose() { disposed = true; version++; controller.abort(); clearContribution(); clearTotpSetup(); clearSecrets(); window.removeEventListener?.("pagehide", leavePage); if (mounts.get(root) === instance) mounts.delete(root); }, confirmFresh: fresh, get active() { return active(); } });
+    const instance = Object.freeze({ dispose() { disposed = true; version++; controller.abort(); clearProfileConfirmation(); clearContribution(); clearTotpSetup(); clearSecrets(); window.removeEventListener?.("pagehide", leavePage); if (mounts.get(root) === instance) mounts.delete(root); }, confirmFresh: fresh, get active() { return active(); } });
     mounts.set(root, instance);
     const ready = mode === "confirm" ? () => page("确认身份", "") : mode === "security" ? security : mode === "shops" ? shops : mode === "mail" ? mail : mode === "profiles" ? profiles : mode === "login" ? login : emailFlow;
     instanceReady(ready);

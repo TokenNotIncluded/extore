@@ -586,7 +586,7 @@ def test_schema21_upgrade_preserves_legacy_job_without_granting_new_entitlements
     init()
     init()
     with db() as c:
-        assert c.execute("PRAGMA user_version").fetchone()[0] == 21
+        assert c.execute("PRAGMA user_version").fetchone()[0] == 22
         after = dict(
             c.execute("SELECT * FROM jobs WHERE id=?", (row["id"],)).fetchone()
         )

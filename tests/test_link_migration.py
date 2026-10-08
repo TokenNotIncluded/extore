@@ -59,7 +59,7 @@ def test_legacy_staff_links_migrate_without_escalating_permissions(
         database.init()
         database.init()
         with database.db() as c:
-            assert c.execute("PRAGMA user_version").fetchone()[0] == 21
+            assert c.execute("PRAGMA user_version").fetchone()[0] == 22
             assert "result_json" in {
                 row["name"] for row in c.execute("PRAGMA table_info(jobs)")
             }

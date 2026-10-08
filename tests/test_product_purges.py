@@ -312,6 +312,14 @@ def test_schema16_only_adds_empty_purge_table_and_preserves_old55(owner, setup_p
     remove(owner, pid)
     init()
     with db() as c:
+        for table in (
+            "commerce_issuances",
+            "commerce_tokens",
+            "commerce_grants",
+            "commerce_requests",
+            "commerce_clients",
+        ):
+            c.execute("DROP TABLE " + table)
         c.execute("DROP TABLE product_purges")
         c.execute("PRAGMA user_version=15")
         before = {
@@ -327,14 +335,21 @@ def test_schema16_only_adds_empty_purge_table_and_preserves_old55(owner, setup_p
     init()
     init()
     with db() as c:
-        assert c.execute("PRAGMA user_version").fetchone()[0] == 21
+        assert c.execute("PRAGMA user_version").fetchone()[0] == 22
         names = {
             r["name"]
             for r in c.execute(
                 "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'"
             )
         }
-        assert names - set(before) == {"product_purges"}
+        assert names - set(before) == {
+            "product_purges",
+            "commerce_issuances",
+            "commerce_tokens",
+            "commerce_grants",
+            "commerce_requests",
+            "commerce_clients",
+        }
         for name, (ddl, rows) in before.items():
             assert (
                 c.execute(
@@ -344,6 +359,14 @@ def test_schema16_only_adds_empty_purge_table_and_preserves_old55(owner, setup_p
             )
             assert [tuple(v) for v in c.execute('SELECT * FROM "' + name + '"')] == rows
         assert not c.execute("SELECT * FROM product_purges").fetchall()
+        for table in (
+            "commerce_issuances",
+            "commerce_tokens",
+            "commerce_grants",
+            "commerce_requests",
+            "commerce_clients",
+        ):
+            assert c.execute("SELECT count(*) FROM " + table).fetchone()[0] == 0
         assert product_lifecycle.metadata(c, pid)["deleted"] is True
 
 

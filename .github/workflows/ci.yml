@@ -45,6 +45,7 @@ jobs:
       - run: node --check extore/static/preferences.js
       - run: node --check extore/static/products.js
       - run: node --check extore/static/processor-contribution.js
+      - run: node --check extore/static/commerce-connect.js
       - run: node --check extore/static/cards.js
       - run: node --check extore/static/webmcp.js
       - run: node --check extore/static/product-export.js
@@ -66,3 +67,6 @@ jobs:
       - run: uv run extore admin board --help
       - run: uv run extore manage board --help
       - run: uv run extore customer --help
+      - run: uv run extore commerce --help
+      - run: uv run extore admin commerce --help
+      - run: uv run python examples/commerce_import/mock_roundtrip.py

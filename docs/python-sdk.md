@@ -8,6 +8,7 @@
 | 普通 Webhook 商品接收事件、回调状态 | `verify_event`、`Client`，协议 v1 |
 | 设计带再次输入或分支的任务图 | `FlowDefinition`，定义 v1 |
 | 私有 Worker 接收并完成一个流程节点 | `verify_flow_event`、`FlowScope`、`PrivateWorkerClient.execution`，协议 v2 |
+| 上游商城读取获授权商品、按规格补充卡密 | [`CommerceClient`](commerce-import-protocol.md#python-sdk)，开放商城协议 v1 |
 
 图、配置档案的运行环境和顾客进度计划各有职责：`task_flow` 决定节点转换，配置 `workflow` 决定变量、密钥与资源，`progress_steps` 只描述工作进度。它们不能互相替代。
 

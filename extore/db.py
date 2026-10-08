@@ -115,6 +115,7 @@ def init():
             agent_identity,
             automation,
             card_entitlements,
+            commerce_store,
             flow_adapter,
             flow_worker,
             private_worker,
@@ -135,10 +136,11 @@ def init():
             automation,
             product_lifecycle,
             card_entitlements,
+            commerce_store,
         ):
             module.init_schema(c)
-        if c.execute("PRAGMA user_version").fetchone()[0] < 21:
-            c.execute("PRAGMA user_version=21")
+        if c.execute("PRAGMA user_version").fetchone()[0] < 22:
+            c.execute("PRAGMA user_version=22")
     # WAL is set outside a transaction.
     with sqlite3.connect(DATA / "extore.sqlite3") as c:
         c.execute("PRAGMA journal_mode=WAL")

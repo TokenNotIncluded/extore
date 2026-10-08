@@ -1,0 +1,90 @@
+.commerce-connect { max-width: 1100px; margin-inline: auto; }
+.commerce-connect h2 { margin: 0 0 8px; font-size: 1.5rem; }
+.commerce-connect h3 { margin: 0 0 12px; font-size: 1.12rem; }
+.commerce-connect p { max-width: 72ch; }
+.commerce-connect .caption { color: var(--muted); }
+.commerce-connect .commerce-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 24px; margin-bottom: 32px; }
+.commerce-connect .commerce-head p { margin: 0; }
+.commerce-connect .commerce-head button { flex: 0 0 auto; }
+.commerce-connect .commerce-head > a { display: inline-flex; align-items: center; min-height: 44px; font-size: .85rem; }
+.commerce-connect .commerce-scope { margin-bottom: 30px; max-width: 440px; }
+.commerce-connect .commerce-scope p { margin: 0; }
+.commerce-connect .commerce-scope .caption { display: block; }
+.commerce-connect .commerce-columns { display: block; }
+.commerce-connect .commerce-registration { min-width: 0; margin-bottom: 32px; }
+.commerce-connect .commerce-registration > details > summary { display: flex; align-items: center; color: var(--green); font-size: .95rem; font-weight: 600; cursor: pointer; }
+.commerce-connect .commerce-registration > details > summary::before { content: "▸"; margin-inline-end: 8px; }
+.commerce-connect .commerce-registration > details[open] > summary::before { content: "▾"; }
+.commerce-connect .commerce-registration > details > form { max-width: 580px; }
+.commerce-connect .commerce-registration > details > p { margin: 16px 0 24px; max-width: 72ch; font-size: .86rem; }
+.commerce-connect .field { margin-bottom: 20px; }
+.commerce-connect .field > label { display: block; margin-bottom: 7px; font-size: .88rem; font-weight: 600; }
+.commerce-connect .field .caption { margin: 7px 0 0; font-size: .8rem; }
+.commerce-connect textarea { min-height: 108px; }
+.commerce-connect button, .commerce-connect summary, .commerce-connect .commerce-login { min-height: 44px; }
+.commerce-connect button { font-size: .85rem; }
+.commerce-connect button:disabled { cursor: not-allowed; }
+.commerce-connect .commerce-actions { display: flex; align-items: center; flex-wrap: wrap; gap: 12px; }
+.commerce-connect .commerce-list-head { display: flex; align-items: center; justify-content: space-between; gap: 16px; margin-bottom: 8px; }
+.commerce-connect .commerce-list-head h3 { margin: 0; }
+.commerce-connect .commerce-row { padding: 24px 0; border-bottom: 1px dashed var(--dashed-line); min-width: 0; }
+.commerce-connect .commerce-row:first-child { border-top: 1px dashed var(--dashed-line); }
+.commerce-connect .commerce-row-header { display: flex; justify-content: space-between; align-items: flex-start; gap: 20px; }
+.commerce-connect .commerce-row-header h4 { margin: 0 0 6px; font-size: 1.02rem; overflow-wrap: anywhere; }
+.commerce-connect .commerce-row-header p { margin: 0; font-size: .8rem; }
+.commerce-connect .commerce-row details { margin-top: 12px; }
+.commerce-connect .commerce-row summary { cursor: pointer; display: flex; align-items: center; font-size: .8rem; color: var(--muted); }
+.commerce-connect .commerce-row dl { margin-top: 8px; }
+.commerce-connect dl { display: grid; grid-template-columns: minmax(100px, .45fr) minmax(0, 1fr); gap: 8px 16px; font-size: .83rem; }
+.commerce-connect dt { color: var(--muted); }
+.commerce-connect dd { margin: 0; overflow-wrap: anywhere; }
+.commerce-connect .commerce-grants { margin-top: 38px; }
+.commerce-connect .commerce-empty { padding: 24px 0; font-size: .88rem; }
+.commerce-connect .commerce-empty p { margin: 8px 0 0; color: var(--muted); }
+.commerce-connect .commerce-review { padding: 22px 0; border-top: 1px dashed var(--dashed-line); margin-top: 26px; }
+.commerce-connect .commerce-status { color: var(--green); font-size: .85rem; }
+.commerce-connect .commerce-status:empty, .commerce-connect .error:empty { margin: 0; }
+.commerce-connect .error { font-size: .87rem; overflow-wrap: anywhere; }
+.commerce-connect .commerce-identifier { min-height: 60px; font-size: .8rem; }
+.commerce-connect .commerce-intro { margin-bottom: 26px; }
+.commerce-connect .commerce-steps { display: flex; gap: 0; list-style: none; padding: 0; margin: 0 0 30px; border-bottom: 1px dashed var(--dashed-line); }
+.commerce-connect .commerce-steps li { flex: 1; font-size: .8rem; padding: 0 12px 14px 0; color: var(--muted); }
+.commerce-connect .commerce-steps li[aria-current="step"] { color: var(--ink); font-weight: 600; }
+.commerce-connect.commerce-authorization { max-width: 760px; }
+.commerce-connect .commerce-paper { padding: 32px 36px 42px; background: var(--white); position: relative; }
+.commerce-connect .commerce-paper::after { content: ""; position: absolute; left: 0; right: 0; bottom: -9px; height: 10px; background: var(--white); clip-path: polygon(0 0, 0 60%, 2% 100%, 4% 40%, 6% 100%, 8% 40%, 10% 100%, 12% 40%, 14% 100%, 16% 40%, 18% 100%, 20% 40%, 22% 100%, 24% 40%, 26% 100%, 28% 40%, 30% 100%, 32% 40%, 34% 100%, 36% 40%, 38% 100%, 40% 40%, 42% 100%, 44% 40%, 46% 100%, 48% 40%, 50% 100%, 52% 40%, 54% 100%, 56% 40%, 58% 100%, 60% 40%, 62% 100%, 64% 40%, 66% 100%, 68% 40%, 70% 100%, 72% 40%, 74% 100%, 76% 40%, 78% 100%, 80% 40%, 82% 100%, 84% 40%, 86% 100%, 88% 40%, 90% 100%, 92% 40%, 94% 100%, 96% 40%, 98% 100%, 100% 60%, 100% 0); }
+.commerce-connect .commerce-application { margin-bottom: 30px; }
+.commerce-connect .commerce-application h3 { overflow-wrap: anywhere; }
+.commerce-connect .commerce-host { font-size: 1.08rem; font-weight: 600; overflow-wrap: anywhere; margin: 8px 0; }
+.commerce-connect .commerce-separator { padding-top: 24px; margin-top: 26px; border-top: 1px dashed var(--dashed-line); }
+.commerce-connect fieldset { padding: 0; border: 0; margin: 0 0 24px; min-width: 0; }
+.commerce-connect legend { font-weight: 600; font-size: .95rem; margin-bottom: 12px; }
+.commerce-connect .commerce-choice { display: flex; align-items: flex-start; gap: 12px; min-height: 44px; cursor: pointer; padding: 10px 0; font-size: .88rem; }
+.commerce-connect .commerce-choice input { margin-top: 5px; flex: 0 0 auto; }
+.commerce-connect .commerce-choice span { min-width: 0; overflow-wrap: anywhere; }
+.commerce-connect .commerce-choice small { display: block; color: var(--muted); font-size: .8rem; margin-top: 3px; }
+.commerce-connect .commerce-products { max-height: 370px; overflow-y: auto; overscroll-behavior: contain; padding-right: 10px; }
+.commerce-connect .commerce-limits { margin-top: 24px; }
+.commerce-connect .commerce-limit-row { display: grid; grid-template-columns: minmax(0, 1fr) 140px; gap: 20px; align-items: center; margin-bottom: 14px; }
+.commerce-connect .commerce-limit-row label { font-size: .83rem; overflow-wrap: anywhere; }
+.commerce-connect .commerce-limit-row small { display: block; color: var(--muted); margin-top: 3px; }
+.commerce-connect .commerce-limit-total { font-variant-numeric: tabular-nums; font-size: .85rem; }
+.commerce-connect .commerce-summary-list { margin: 12px 0 22px; padding-left: 20px; font-size: .88rem; }
+.commerce-connect .commerce-summary-list li { margin-bottom: 8px; overflow-wrap: anywhere; }
+.commerce-connect .commerce-loading { padding: 24px 0; color: var(--muted); }
+.commerce-connect .commerce-loading div { height: 13px; background: var(--line); margin: 16px 0; max-width: 72%; }
+.commerce-connect .commerce-loading div:last-child { max-width: 44%; }
+.commerce-connect [hidden] { display: none !important; }
+@media (max-width: 1100px) { .commerce-connect .commerce-columns { grid-template-columns: 1fr; gap: 42px; } .commerce-connect .commerce-registration { max-width: 580px; } }
+@media (max-width: 600px) {
+  .commerce-connect .commerce-head { flex-direction: column; gap: 16px; margin-bottom: 24px; }
+  .commerce-connect h2 { font-size: 1.35rem; }
+  .commerce-connect .commerce-paper { padding: 24px 20px 34px; }
+  .commerce-connect input, .commerce-connect textarea, .commerce-connect select { font-size: 16px; min-width: 0; }
+  .commerce-connect .commerce-row-header { flex-wrap: wrap; gap: 14px; }
+  .commerce-connect .commerce-actions button { flex: 1 1 150px; }
+  .commerce-connect dl { grid-template-columns: 1fr; gap: 4px; }
+  .commerce-connect dd { margin-bottom: 10px; }
+  .commerce-connect .commerce-limit-row { grid-template-columns: minmax(0, 1fr) 100px; gap: 12px; }
+  .commerce-connect .commerce-steps li { font-size: .74rem; }
+}

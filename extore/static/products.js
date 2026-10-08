@@ -206,13 +206,63 @@
     let selectedTrashShop = chooseTrashShop ? "" : trashShops[0] || "";
     const selectedTrash = () => trashProducts.filter((product) => !chooseTrashShop || shopIdOf(product) === selectedTrashShop);
     const clearDisabled = () => (chooseTrashShop && !selectedTrashShop) || !selectedTrash().length || selectedTrash().length > 500;
-    ctx.workspace.innerHTML = `<div class="section-head"><h2>${tr("商品", "Products")}</h2>${canCreate ? `<button id="new-product">${tr("新建商品", "New product")}</button>` : ""}</div>
-      <div class="toolbar product-lifecycle-toolbar">${select("products-view", tr("商品视图", "Product view"), [["active", tr("在售商品", "Active products")], ["deleted", tr("回收站", "Recycle bin")], ["all", tr("全部商品", "All products")]], productView)}${productView === "deleted" && canPurge ? `${chooseTrashShop ? select("trash-shop", tr("清空范围：店铺", "Clear scope: shop"), [["", tr("先选择一个店铺", "Choose one shop first")], ...trashShops.map((id) => [id, trashProducts.find((product) => shopIdOf(product) === id)?.shop_name || id || tr("当前店铺", "Current shop")])], selectedTrashShop) : ""}<button type="button" id="empty-product-trash" class="danger" ${clearDisabled() ? "disabled" : ""}>${tr("清空回收站", "Empty recycle bin")}</button>` : ""}</div>${productView === "deleted" && trashProducts.length > 500 ? `<p class="caption">${tr("单次最多清理同一店铺的 500 个商品；超过时请逐个彻底删除。", "Remove up to 500 products from one shop per confirmation. Larger shop selections must be removed individually.")}</p>` : ""}<div id="product-lifecycle-confirmation" aria-live="polite"></div>
-      ${canCreate ? `<div class="form-divider"><div class="grid">${select("quick-template", "快速新建模板", [["random", "随机选择模板"]], "random")}<div class="field"><label for="quick-product">生成私有草稿与 AI 配置链接</label><button id="quick-product" class="secondary" disabled>随机快速新建</button></div></div><p class="caption">先创建一个私有商品，再把仅能配置这个商品的链接交给 AI 完善。配置链接有效期为 7 天。复制已有商品后，需重新填写私密发货配置。</p></div>` : ""}
-      ${createdLink ? `<div class="parameter" id="quick-created"><h3>商品已创建 · ${escape(createdLink.productName)}</h3><p class="caption">这个链接只允许编辑当前商品与发货配置。请复制保存；离开后完整链接不再显示。</p>${field("quick-management-link", "AI 商品配置链接", createdLink.url, "text", "readonly")}<div class="toolbar"><button id="copy-quick-link" class="secondary">${ctx.lang === "en" ? "Copy link" : "复制链接"}</button><button id="edit-quick-product" class="secondary">继续配置商品</button></div></div>` : ""}
-      ${products.length ? `<div class="product-list">${products.map((product) => `<article class="product-row">${product.logo ? `<img src="${escape(product.logo)}" alt="" loading="lazy" referrerpolicy="no-referrer">` : `<div class="product-icon">${icon}</div>`}<div class="product-info"><h3>${escape(product.name)}</h3><p>${isDeleted(product) ? tr("已删除 · 旧卡密与任务仍有效", "Deleted · existing codes and tasks remain valid") : `${product.public ? "公开展示" : "仅持卡可见"} · ${escape({ manual: "队列", stock: "一卡一文本", webhook: "外部 Webhook", script: "商品处理器" }[product.mode] || product.mode)} · ${product.delivery === "service" ? "服务状态" : "内容交付"}`}</p><div class="variant-summary">${productVariants(product).map((variant) => `<span>${escape(variant.name)} · ${escape(priceLabel(variant))}${variant.enabled === false ? " · 已停用" : ""}</span>`).join("")}</div><div class="mono muted">${escape(product.id)}</div></div><div class="product-actions">${isDeleted(product) ? `${canDelete ? `<button type="button" class="secondary" data-restore="${escape(product.id)}">${tr("恢复商品", "Restore product")}</button>` : ""}${canPurge ? `<button type="button" class="danger" data-purge="${escape(product.id)}">${tr("彻底删除", "Delete permanently")}</button>` : ""}` : `${canEdit ? `<button class="secondary" data-edit="${escape(product.id)}">${tr("配置", "Configure")}</button><button type="button" class="secondary" data-export="${escape(product.id)}">${tr("复制商品资料", "Copy product info")}</button>` : ""}${canDelete ? `<button type="button" class="danger" data-delete="${escape(product.id)}">${tr("删除商品", "Delete product")}</button>` : ""}`}</div></article>`).join("")}</div>` : `<div class="empty">${productView === "deleted" ? tr("回收站暂无商品。", "The recycle bin is empty.") : tr("暂无商品。", "No products here.")}</div>`}
+    const modeLabel = (product) => ({ manual: tr("队列", "Queue"), stock: tr("一卡一文本", "One code, one text"), webhook: tr("外部 Webhook", "External webhook"), script: tr("商品处理器", "Product processor") }[product.mode] || product.mode || tr("未设置", "Not set"));
+    const variantsOf = (product) => Array.isArray(product.variants) && product.variants.length ? product.variants : [{ ...defaultVariant(), name: tr("默认规格", "Default variant") }];
+    const variantMarkup = (variant) => `<li><span class="products-variant-name">${escape(variant.name)}</span><span class="products-variant-price">${escape(variant.price === null || variant.price === undefined ? tr("未设置参考价", "Reference price not set") : tr(`参考价 ${variant.price} ${variant.currency || "CNY"}`, `Reference price ${variant.price} ${variant.currency || "CNY"}`))}</span>${variant.enabled === false ? `<span class="products-variant-disabled">${tr("已停用", "Disabled")}</span>` : ""}</li>`;
+    const productMarkup = (product) => {
+      const deleted = isDeleted(product);
+      const variants = variantsOf(product);
+      const state = deleted ? tr("已删除", "Deleted") : product.public ? tr("公开展示", "Public") : tr("仅持卡可见", "Code holders only");
+      return `<article class="product-row products-item" data-product-row="${escape(product.id)}" aria-label="${escape(product.name)}">
+        ${product.logo ? `<img class="products-logo" src="${escape(product.logo)}" alt="" loading="lazy" referrerpolicy="no-referrer">` : `<div class="product-icon products-logo">${icon}</div>`}
+        <div class="product-info"><div class="products-item-heading"><h3>${escape(product.name)}</h3><span class="products-visibility ${deleted ? "is-deleted" : product.public ? "is-public" : "is-private"}">${state}</span></div>
+          <p class="products-item-meta"><span>${escape(modeLabel(product))}</span><span>${product.delivery === "service" ? tr("服务状态", "Service status") : tr("内容交付", "Content delivery")}</span></p>
+          ${deleted ? `<p class="products-deleted-note">${tr("已删除 · 旧卡密与任务仍有效", "Deleted · existing codes and tasks remain valid")}</p>` : ""}
+          <ul class="products-variants">${variants.slice(0, 3).map(variantMarkup).join("")}</ul>${variants.length > 3 ? `<details class="products-more-variants"><summary>${tr(`查看其余 ${variants.length - 3} 个规格`, `View ${variants.length - 3} more variants`)}</summary><ul class="products-variants">${variants.slice(3).map(variantMarkup).join("")}</ul></details>` : ""}
+          <p class="products-item-id mono">ID ${escape(product.id)}</p>
+        </div><div class="product-actions">${deleted ? `${canDelete ? `<button type="button" class="secondary" data-restore="${escape(product.id)}">${tr("恢复商品", "Restore product")}</button>` : ""}${canPurge ? `<button type="button" class="danger" data-purge="${escape(product.id)}">${tr("彻底删除", "Delete permanently")}</button>` : ""}` : `${canEdit ? `<button type="button" class="products-configure" data-edit="${escape(product.id)}">${tr("配置", "Configure")}</button><button type="button" class="secondary" data-export="${escape(product.id)}">${tr("复制商品资料", "Copy product info")}</button>` : ""}${canDelete ? `<button type="button" class="danger" data-delete="${escape(product.id)}">${tr("删除商品", "Delete product")}</button>` : ""}`}</div>
+      </article>`;
+    };
+    const searchControl = products.length ? field("products-search", tr("搜索商品", "Search products"), "", "search", `maxlength="200" autocomplete="off" placeholder="${escape(tr("名称、商品 ID 或规格", "Name, product ID or variant"))}"`) : "";
+    const viewControl = select("products-view", tr("商品视图", "Product view"), [["active", tr("正常商品", "Active products")], ["deleted", tr("回收站", "Recycle bin")], ["all", tr("全部商品", "All products")]], productView);
+    const visibilityControl = products.length && productView !== "deleted" ? select("products-status", tr("展示状态", "Visibility"), [["all", tr("全部状态", "All visibility")], ["public", tr("公开展示", "Public")], ["private", tr("仅持卡可见", "Code holders only")]], "all") : "";
+    ctx.workspace.innerHTML = `<section class="products-workspace" aria-label="${tr("商品管理", "Product management")}"><div class="section-head products-heading"><div><h2>${tr("商品", "Products")}</h2><p>${productView === "deleted" ? tr("恢复或清理商品，已有卡密与任务继续保留。", "Restore or remove products while keeping existing codes and tasks.") : tr("管理兑换、交付与规格。参考价供外部商城使用。", "Manage redemption, delivery and variants. Reference prices are for external stores.")}</p></div>${canCreate ? `<button id="new-product">${tr("新建商品", "New product")}</button>` : ""}</div>
+      <div class="products-tools"><div class="toolbar product-lifecycle-toolbar products-filters">${searchControl}${viewControl}${visibilityControl}</div>
+      ${productView === "deleted" && canPurge ? `<div class="products-trash-tools">${chooseTrashShop ? select("trash-shop", tr("清空范围：店铺", "Clear scope: shop"), [["", tr("先选择一个店铺", "Choose one shop first")], ...trashShops.map((id) => [id, trashProducts.find((product) => shopIdOf(product) === id)?.shop_name || id || tr("当前店铺", "Current shop")])], selectedTrashShop) : ""}<button type="button" id="empty-product-trash" class="danger" ${clearDisabled() ? "disabled" : ""}>${tr("清空回收站", "Empty recycle bin")}</button><p class="caption">${tr("搜索只影响显示。清空时会列出所选店铺全部已删除商品，供你确认。", "Search changes the display only. Clearing lists every deleted product in the selected shop for confirmation.")}</p></div>` : ""}</div>${productView === "deleted" && trashProducts.length > 500 ? `<p class="caption">${tr("单次最多清理同一店铺的 500 个商品；超过时请逐个彻底删除。", "Remove up to 500 products from one shop per confirmation. Larger shop selections must be removed individually.")}</p>` : ""}<div id="product-lifecycle-confirmation" aria-live="polite"></div>
+      ${canCreate ? `<details class="products-quick-create"><summary>${tr("从模板快速新建", "Quick creation from a template")}</summary><div class="grid">${select("quick-template", tr("快速新建模板", "Quick creation template"), [["random", tr("随机选择模板", "Choose a random template")]], "random")}<div class="field"><label for="quick-product">${tr("生成私有草稿与 AI 配置链接", "Create a private draft and AI configuration link")}</label><button id="quick-product" class="secondary" disabled>${tr("随机快速新建", "Create a quick draft")}</button></div></div><p class="caption">${tr("先创建一个私有商品，再把仅能配置这个商品的链接交给 AI 完善。配置链接有效期为 7 天。复制已有商品后，需重新填写私密发货配置。", "Create a private product, then give AI a link limited to configuring that product. The link expires in 7 days. Copied products need their private delivery configuration entered again.")}</p></details>` : ""}
+      ${createdLink ? `<div class="parameter products-created" id="quick-created"><h3>${tr("商品已创建", "Product created")} · ${escape(createdLink.productName)}</h3><p class="caption">${tr("这个链接只允许编辑当前商品与发货配置。请复制保存；离开后完整链接不再显示。", "This link can edit only this product and its delivery configuration. Save it now; the full link will no longer be shown after leaving.")}</p>${field("quick-management-link", tr("AI 商品配置链接", "AI product configuration link"), createdLink.url, "text", "readonly")}<div class="toolbar"><button id="copy-quick-link" class="secondary">${tr("复制链接", "Copy link")}</button><button id="edit-quick-product" class="secondary">${tr("继续配置商品", "Continue configuring")}</button></div></div>` : ""}
+      ${products.length ? `<p id="products-result-count" class="products-result-count" aria-live="polite" aria-atomic="true"></p><div class="product-list products-list">${products.map(productMarkup).join("")}</div><div id="products-no-match" class="products-no-match" hidden><h3>${tr("没有匹配的商品", "No matching products")}</h3><p>${tr("试试其他名称、ID 或规格，也可以重置筛选。", "Try another name, ID or variant, or reset the filters.")}</p><button type="button" id="products-reset" class="secondary">${tr("重置筛选", "Reset filters")}</button></div>` : `<div class="empty products-empty"><h3>${productView === "deleted" ? tr("回收站暂无商品。", "The recycle bin is empty.") : tr("暂无商品。", "No products here.")}</h3><p>${productView === "deleted" ? tr("删除的商品会先出现在这里，可以恢复或彻底清理。", "Deleted products appear here before restoration or permanent removal.") : canCreate ? tr("新建商品，或从模板开始配置兑换与交付。", "Create a product or start from a template to configure redemption and delivery.") : tr("这里显示已授权给你的商品。", "Products authorized for you appear here.")}</p></div>`}
       <div id="product-export-panel"></div>
-      <div id="error" class="error" role="alert"></div>`;
+      <div id="error" class="error" role="alert"></div></section>`;
+    const rows = [...all("[data-product-row]")];
+    const searchable = new Map(products.map((product) => [product.id, [product.name, product.id, ...variantsOf(product).map((variant) => variant.name)].join(" ").toLowerCase()]));
+    const productById = new Map(products.map((product) => [product.id, product]));
+    const filterProducts = () => {
+      if (!active()) return;
+      const query = ($("#products-search")?.value || "").slice(0, 200).trim().toLowerCase();
+      const visibility = $("#products-status")?.value || "all";
+      let shown = 0;
+      rows.forEach((row) => {
+        const product = productById.get(row.dataset.productRow);
+        const matchesState = !!product && (visibility === "all" || (!isDeleted(product) && (visibility === "public" ? product.public === true : visibility === "private" ? product.public !== true : false)));
+        const matches = !!product && matchesState && searchable.get(product.id).includes(query);
+        row.hidden = !matches;
+        if (matches) shown++;
+      });
+      const counter = $("#products-result-count");
+      if (counter) counter.textContent = tr(`显示 ${shown} / ${products.length} 个商品`, `Showing ${shown} of ${products.length} products`);
+      const empty = $("#products-no-match");
+      if (empty) empty.hidden = shown !== 0;
+    };
+    on("#products-search", "input", filterProducts);
+    on("#products-status", "change", filterProducts);
+    on("#products-reset", "click", () => {
+      $("#products-search").value = "";
+      if ($("#products-status")) $("#products-status").value = "all";
+      filterProducts();
+      $("#products-search").focus();
+    });
+    filterProducts();
     let confirmation = 0;
     const reload = async (selectedView = productView) => {
       if (!active()) return;
@@ -363,7 +413,7 @@
     }
     if (!active()) return;
     $("#quick-template").innerHTML =
-      `<option value="random">随机选择模板</option>${templates.map((template) => `<option value="${escape(template.id)}">${escape(localized(template.name, ctx.lang))}</option>`).join("")}${activeProducts.map((product) => `<option value="existing_product:${escape(product.id)}">复制：${escape(product.name)}</option>`).join("")}`;
+      `<option value="random">${tr("随机选择模板", "Choose a random template")}</option>${templates.map((template) => `<option value="${escape(template.id)}">${escape(localized(template.name, ctx.lang))}</option>`).join("")}${activeProducts.map((product) => `<option value="existing_product:${escape(product.id)}">${tr("复制：", "Copy: ")}${escape(product.name)}</option>`).join("")}`;
     $("#quick-product").disabled = !templates.length && !activeProducts.length;
     on("#quick-product", "click", async () => {
       const chosen = $("#quick-template").value;
@@ -378,7 +428,7 @@
           chosen === "random"
             ? templates[Math.floor(Math.random() * templates.length)]?.id
             : chosen;
-        if (!templateId) throw new Error("没有可用的快速新建模板");
+        if (!templateId) throw new Error(tr("没有可用的快速新建模板", "No quick creation templates are available"));
         body = { template_id: templateId };
       }
       const result = await ctx.api("/admin/products/quick", body);
@@ -395,7 +445,7 @@
         productName: result.product.name,
         url: result.management_link.url,
       });
-      if (ctx.isCurrent()) ctx.notify("私有商品草稿已创建");
+      if (ctx.isCurrent()) ctx.notify(tr("私有商品草稿已创建", "Private product draft created"));
     });
   }
 

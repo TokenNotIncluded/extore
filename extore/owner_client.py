@@ -871,6 +871,44 @@ def add_parser(commands):
         _scope(parser)
         if operation == "revoke":
             parser.add_argument("id")
+    commerce = sub.add_parser(
+        "commerce",
+        help="manage shop-scoped storefront connections; OAuth approval stays in the browser",
+    )
+    commerce_groups = commerce.add_subparsers(dest="commerce_command", required=True)
+    for name, operations in (
+        ("clients", ("list", "create", "delete")),
+        ("grants", ("list", "revoke")),
+    ):
+        group = commerce_groups.add_parser(name)
+        actions = group.add_subparsers(dest="operation", required=True)
+        for operation in operations:
+            parser = actions.add_parser(operation)
+            _scope(parser)
+            parser.add_argument(
+                "--shop", help="explicit shop ID; platform owners must select one shop"
+            )
+            parser.add_argument(
+                "--output", type=Path, help="write metadata to a new mode-600 JSON file"
+            )
+            if operation == "create":
+                business._json_arguments(parser)
+                parser.description = (
+                    "Register public OAuth client metadata from private JSON. "
+                    "No secret is issued, and registration does not approve access."
+                )
+            elif operation in ("delete", "revoke"):
+                parser.add_argument("id", help="immutable client or grant ID")
+                parser.add_argument(
+                    "--yes",
+                    action="store_true",
+                    required=True,
+                    help="revoke this storefront connection's access",
+                )
+            elif operation == "list":
+                parser.add_argument(
+                    "--view", choices=("active", "all"), default="active"
+                )
     shop_commands.add_commands(sub)
     from .http_proxy import add_proxy_arguments
 
@@ -942,6 +980,168 @@ def _secret_output(args, prefix, callback):
         result = callback()
         saved = output.write(result)
         return saved
+
+
+def _commerce_shop(owner, selected):
+    if "shop_id" not in owner:
+        raise ManageError("Refresh the pinned owner identity", code="invalid_response")
+    shop = selected or owner["shop_id"]
+    if not isinstance(shop, str) or not re.fullmatch(r"[A-Za-z0-9_-]{1,100}", shop):
+        raise ManageError(
+            "Commerce commands require one explicit --shop for platform owners",
+            code="no_scope",
+        )
+    if owner["shop_id"] is not None and owner["shop_id"] != shop:
+        raise ManageError(
+            "Storefront connection belongs to a different shop", code="no_scope"
+        )
+    return shop
+
+
+def _commerce_metadata(value, *, shop, kind):
+    """Only protocol metadata belongs in stdout; no unexpected OAuth credentials."""
+    value = _object(value)
+    if value.get("shop_id") != shop:
+        raise ManageError("Invalid storefront shop identity", code="invalid_response")
+    fields = (
+        (
+            "id",
+            "client_id",
+            "shop_id",
+            "client_name",
+            "redirect_uris",
+            "token_endpoint_auth_method",
+            "grant_types",
+            "response_types",
+            "created_at",
+            "client_id_issued_at",
+            "enabled",
+        )
+        if kind == "clients"
+        else (
+            "id",
+            "shop_id",
+            "client_id",
+            "client_name",
+            "scopes",
+            "product_ids",
+            "created_at",
+            "expires",
+            "last_used",
+            "revoked",
+        )
+    )
+    result = business._only(value, fields)
+    text_fields = {
+        "id",
+        "client_id",
+        "shop_id",
+        "client_name",
+        "token_endpoint_auth_method",
+    }
+    list_fields = {
+        "redirect_uris",
+        "grant_types",
+        "response_types",
+        "scopes",
+        "product_ids",
+    }
+    number_fields = {"created_at", "client_id_issued_at", "expires", "last_used"}
+    for name, item in result.items():
+        if name in text_fields:
+            valid = isinstance(item, str)
+        elif name in list_fields:
+            valid = isinstance(item, list) and all(
+                isinstance(entry, str) for entry in item
+            )
+        elif name in number_fields:
+            valid = (item is None and name == "last_used") or (
+                type(item) in (int, float) and 0 <= item <= 10**15
+            )
+        else:
+            valid = type(item) is bool
+        if not valid:
+            raise ManageError(
+                "Invalid storefront metadata field", code="invalid_response"
+            )
+    if kind == "grants":
+        for name, names in (
+            ("products", ("id", "name")),
+            (
+                "card_limits",
+                ("product_id", "variant_id", "max_count", "issued_count", "remaining"),
+            ),
+        ):
+            if name in value:
+                rows = []
+                for row in _objects(value[name]):
+                    selected = business._only(row, names)
+                    if any(
+                        type(item) is not int
+                        if field in ("max_count", "issued_count", "remaining")
+                        else not isinstance(item, str)
+                        for field, item in selected.items()
+                    ):
+                        raise ManageError(
+                            "Invalid storefront metadata field", code="invalid_response"
+                        )
+                    rows.append(selected)
+                result[name] = rows
+    return result
+
+
+def _commerce(client, owner, args, shop, body):
+    kind = args.commerce_command
+    path = "/api/admin/commerce/" + kind
+    if args.operation in ("delete", "revoke"):
+        if not getattr(args, "yes", False):
+            raise ManageError(
+                "Confirm connection revocation with --yes", code="confirmation_required"
+            )
+        if not isinstance(args.id, str) or not re.fullmatch(
+            r"[A-Za-z0-9_-]{1,100}", args.id
+        ):
+            raise ManageError("Use one valid connection ID", code="invalid_input")
+        path += "/" + quote(args.id, safe="")
+        method = "DELETE"
+    else:
+        method = "POST" if args.operation == "create" else "GET"
+
+    def request():
+        params = {"shop_id": shop}
+        if args.operation == "list":
+            params["view"] = args.view
+        value = _owner_request(
+            client,
+            owner,
+            method,
+            path,
+            params=params,
+            **({"json": body} if body is not None else {}),
+        )
+        if args.operation == "list":
+            rows = _objects(_object(value).get(kind))
+            return {
+                "ok": True,
+                kind: [_commerce_metadata(row, shop=shop, kind=kind) for row in rows],
+            }
+        if args.operation == "create":
+            return {
+                "ok": True,
+                "client": _commerce_metadata(value, shop=shop, kind=kind),
+            }
+        value = _object(value)
+        if value.get("ok") is not True:
+            raise ManageError(
+                "Invalid connection revocation response", code="invalid_response"
+            )
+        return {"ok": True}
+
+    # Reserve an optional export before registering/revoking anything remotely.
+    if args.output:
+        with business.OutputFile(args, "commerce") as output:
+            return output.write(request())
+    return request()
 
 
 _API_ROUTES = (
@@ -1274,6 +1474,16 @@ def dispatch(client, args):
             removed.append(owner["id"])
         return {"ok": True, "removed": removed}
     owner = client._select(origin, getattr(args, "grant", None))
+    commerce_body = None
+    if command == "commerce":
+        commerce_shop = _commerce_shop(owner, args.shop)
+        if args.operation == "create":
+            commerce_body = shop_commands.private_json(args)
+            if not isinstance(commerce_body, dict) or "shop_id" in commerce_body:
+                raise ManageError(
+                    "Provide client registration metadata; select the shop with --shop",
+                    code="invalid_input",
+                )
     board_request = (
         command == "board"
         or command == "api"
@@ -1342,8 +1552,12 @@ def dispatch(client, args):
                     "Factory update requires only a factory_slogan text field of at most 4000 characters",
                     code="invalid_input",
                 ) from None
-    client.session(owner, refresh_scope=bool(board_request or command == "factory"))
+    client.session(
+        owner, refresh_scope=bool(board_request or command in ("factory", "commerce"))
+    )
     client.active_owner = owner
+    if command == "commerce":
+        return _commerce(client, owner, args, commerce_shop, commerce_body)
     if command == "factory":
         value = _object(
             _owner_request(

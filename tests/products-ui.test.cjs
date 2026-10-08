@@ -224,6 +224,109 @@ const catalog = [{
   configuration: [{ ...fieldDefinition("template", "textarea"), default: "你好，$name！", secret: true }],
 }];
 
+test("product search and visibility filters use only the current authorized snapshot", async () => {
+  const p = page({ role: "staff", products: [
+    product({ id: "first", name: "Research report", public: true, variants: [{ id: "word", name: "Word Plus", price: "25.123456", currency: "CNY", enabled: true }] }),
+    product({ id: "second", name: "Private workshop", public: false, mode: "script", variants: [{ id: "basic", name: "Basic", price: null, enabled: true }] }),
+  ] });
+  p.ctx.lang = "en";
+  const original = JSON.stringify(p.ctx.products);
+  await p.ui.render(p.ctx);
+  assert.equal(p.requests.length, 0);
+  assert.equal(p.node("#products-result-count").textContent, "Showing 2 of 2 products");
+  assert.match(p.workspace.innerHTML, /Reference price 25\.123456 CNY/);
+  assert.match(p.workspace.innerHTML, /Product processor/);
+  assert.match(p.workspace.innerHTML, /Code holders only/);
+  assert.doesNotMatch(p.workspace.innerHTML, /未设置参考价|仅持卡可见|商品处理器/);
+  p.node("#products-search").value = "word PLUS";
+  await p.node("#products-search").emit("input");
+  assert.equal(p.node('[data-product-row="first"]').hidden, false);
+  assert.equal(p.node('[data-product-row="second"]').hidden, true);
+  assert.equal(p.node("#products-result-count").textContent, "Showing 1 of 2 products");
+  p.node("#products-status").value = "private";
+  await p.node("#products-status").emit("change");
+  assert.equal(p.node("#products-no-match").hidden, false);
+  assert.equal(p.node("#products-result-count").textContent, "Showing 0 of 2 products");
+  await p.node("#products-reset").emit("click");
+  assert.equal(p.node("#products-search").value, "");
+  assert.equal(p.node("#products-status").value, "all");
+  assert.equal(p.node("#products-no-match").hidden, true);
+  assert.equal(p.node('[data-product-row="second"]').hidden, false);
+  assert.equal(p.node("#products-search").focused, true);
+  assert.equal(p.requests.length, 0);
+  assert.equal(JSON.stringify(p.ctx.products), original);
+});
+
+test("local filters cannot change recycle-bin cleanup scope or hide its confirmation snapshot", async () => {
+  const p = page({ products: [
+    product({ id: "first", name: "Find me", deleted: true, shop_id: "shop-a" }),
+    product({ id: "second", name: "Hidden by search", deleted: true, shop_id: "shop-a" }),
+  ] });
+  p.ctx.productView = "deleted";
+  await p.ui.render(p.ctx);
+  p.node("#products-search").value = "Find me";
+  await p.node("#products-search").emit("input");
+  assert.equal(p.node('[data-product-row="second"]').hidden, true);
+  assert.equal(p.node("#products-status"), null);
+  assert.equal(p.node("#empty-product-trash").disabled, false);
+  assert.match(p.workspace.innerHTML, /搜索只影响显示/);
+  await p.node("#empty-product-trash").emit("click");
+  assert.match(p.node("#product-lifecycle-confirmation").innerHTML, /Find me/);
+  assert.match(p.node("#product-lifecycle-confirmation").innerHTML, /Hidden by search/);
+  await p.node("#confirm-product-purge").emit("click");
+  assert.equal(p.requests[0].url, "/admin/products/empty-trash?shop_id=shop-a");
+  assert.deepEqual(JSON.parse(JSON.stringify(p.requests[0].body)), { confirmed: true, product_ids: ["first", "second"] });
+});
+
+test("local search never narrows quick-copy template sources and quick creation starts folded", async () => {
+  const p = page({ products: [product({ id: "first", name: "Find me" }), product({ id: "second", name: "Other product" })] });
+  const rendering = p.ui.render(p.ctx, { productId: "first", productName: "Created product", url: "https://example.test/staff#full-link" });
+  assert.equal(p.requests[0].url, "/admin/product-templates");
+  assert.match(p.workspace.innerHTML, /<details class="products-quick-create">/);
+  const quickMarkup = p.workspace.innerHTML.split('<details class="products-quick-create">')[1].split("</details>")[0];
+  assert.doesNotMatch(quickMarkup, /quick-created|quick-management-link/);
+  assert.equal(p.node("#quick-management-link").value, "https://example.test/staff#full-link");
+  p.node("#products-search").value = "Find me";
+  await p.node("#products-search").emit("input");
+  p.requests[0].resolve(templates);
+  await rendering;
+  assert.equal(p.node('[data-product-row="second"]').hidden, true);
+  assert.match(p.node("#quick-template").innerHTML, /existing_product:first/);
+  assert.match(p.node("#quick-template").innerHTML, /existing_product:second/);
+  assert.equal(p.node("#products-search").value, "Find me");
+});
+
+test("product filtering ignores credential-like fields and expired page controls", async () => {
+  const p = page({ role: "staff", products: [product({ name: "Visible name", processor_config: { secret: "NEVER_SEARCH_PRIVATE_CONFIGURATION" } })] });
+  await p.ui.render(p.ctx);
+  const oldSearch = p.node("#products-search");
+  oldSearch.value = "NEVER_SEARCH_PRIVATE_CONFIGURATION";
+  await oldSearch.emit("input");
+  assert.equal(p.node('[data-product-row="product-one"]').hidden, true);
+  assert.doesNotMatch(p.workspace.innerHTML, /NEVER_SEARCH_PRIVATE_CONFIGURATION/);
+  p.leave();
+  p.workspace.innerHTML = '<p id="products-result-count">A different page</p>';
+  const currentCounter = p.node("#products-result-count");
+  currentCounter.textContent = "Keep this page";
+  oldSearch.value = "Visible name";
+  await oldSearch.emit("input");
+  assert.equal(currentCounter.textContent, "Keep this page");
+  assert.equal(p.requests.length, 0);
+});
+
+test("product rows escape long content and keep excess variant details available without expanded cards", async () => {
+  const name = '<img src="x" onerror="PRIVATE_EXECUTION()">' + "LongName".repeat(60);
+  const p = page({ role: "staff", products: [product({ name, logo: 'https://example.test/logo.png" onload="PRIVATE_EXECUTION()', variants: Array.from({ length: 5 }, (_, index) => ({ id: "v" + index, name: "Variant-" + index + "-" + "long".repeat(40), price: index === 4 ? "99.000001" : null, currency: "CNY", enabled: index !== 4 })) })] });
+  await p.ui.render(p.ctx);
+  assert.match(p.workspace.innerHTML, /&lt;img src=&quot;x&quot;/);
+  assert.doesNotMatch(p.workspace.innerHTML, /onload="PRIVATE_EXECUTION|onerror="PRIVATE_EXECUTION/);
+  assert.match(p.workspace.innerHTML, /查看其余 2 个规格/);
+  assert.match(p.workspace.innerHTML, /参考价 99\.000001 CNY/);
+  assert.match(p.workspace.innerHTML, /已停用/);
+  assert.match(p.workspace.innerHTML, /products-workspace/);
+  assert.ok(p.node('[data-edit="product-one"]'));
+});
+
 async function renderOwner(p) {
   const rendering = p.ui.render(p.ctx);
   assert.equal(p.requests[0].url, "/admin/product-templates");
