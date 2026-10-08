@@ -4,9 +4,11 @@ import argparse
 import ipaddress
 import logging
 import os
+import ssl
 from dataclasses import dataclass, field
 from urllib.parse import urlsplit
 
+import certifi
 import httpx
 
 
@@ -66,6 +68,11 @@ def add_proxy_arguments(parser):
         default=argparse.SUPPRESS,
         help="opt in to HTTP_PROXY, HTTPS_PROXY, ALL_PROXY and NO_PROXY",
     )
+    parser.add_argument(
+        "--ca-bundle",
+        default=argparse.SUPPRESS,
+        help="additional trusted PEM CAs for this CLI only (or EXTORE_CA_BUNDLE)",
+    )
     children = next(
         (
             action
@@ -87,6 +94,8 @@ class ProxySettings:
     mode: str = "direct"
     url: str | None = field(default=None, repr=False)
     routes: tuple = field(default=(), repr=False)
+    bypass_networks: tuple = field(default=(), repr=False)
+    tls_context: ssl.SSLContext | None = field(default=None, repr=False, compare=False)
 
 
 class _SocksAuthenticationFilter(logging.Filter):
@@ -111,20 +120,62 @@ def _env(name, environ):
     return environ.get(name.lower(), environ.get(name, ""))
 
 
+def _ca_context(args, environ):
+    path = getattr(args, "ca_bundle", None)
+    if path is None:
+        path = environ.get("EXTORE_CA_BUNDLE", "")
+    if not path:
+        return None
+    try:
+        # Ambient SSL_CERT_FILE/DIR remain disabled. Add explicit trust locally.
+        context = ssl.create_default_context(cafile=certifi.where())
+        context.load_verify_locations(cafile=path)
+        return context
+    except (OSError, ValueError, TypeError):
+        from .manage_client import ManageError
+
+        raise ManageError(
+            "Invalid CLI CA bundle configuration", code="invalid_ca_bundle"
+        ) from None
+
+
+class _CIDRClient(httpx.Client):
+    """CIDR rules match literal IP hosts only; never perform local proxy DNS."""
+
+    def __init__(self, *, bypass_networks, **kwargs):
+        self._bypass_networks = bypass_networks
+        super().__init__(**kwargs)
+
+    def _transport_for_url(self, url):
+        try:
+            address = ipaddress.ip_address(url.host)
+        except ValueError:
+            pass
+        else:
+            if any(address in network for network in self._bypass_networks):
+                return self._transport
+        return super()._transport_for_url(url)
+
+
 def resolve_proxy(args=None, *, environ=None):
     environ = os.environ if environ is None else environ
+    tls_context = _ca_context(args, environ)
     explicit = getattr(args, "proxy", None)
     use_env = getattr(args, "proxy_env", False)
     if explicit is not None and use_env:
         _invalid()
     if explicit is not None:
-        return ProxySettings("explicit", validate_proxy(explicit))
+        return ProxySettings(
+            "explicit", validate_proxy(explicit), tls_context=tls_context
+        )
     if not use_env:
         dedicated = environ.get("EXTORE_PROXY", "")
         return (
-            ProxySettings("explicit", validate_proxy(dedicated))
+            ProxySettings(
+                "explicit", validate_proxy(dedicated), tls_context=tls_context
+            )
             if dedicated
-            else ProxySettings()
+            else ProxySettings(tls_context=tls_context)
         )
     routes = {}
     for scheme in ("http", "https", "all"):
@@ -137,6 +188,7 @@ def resolve_proxy(args=None, *, environ=None):
     if len(bypass) > 16384:
         _invalid()
     bypass_all = False
+    networks = []
     for hostname in (part.strip() for part in bypass.split(",")):
         if not hostname:
             continue
@@ -159,6 +211,9 @@ def resolve_proxy(args=None, *, environ=None):
                 ):
                     _invalid()
                 pattern = hostname.rstrip("/")
+            elif "/" in hostname:
+                networks.append(ipaddress.ip_network(hostname, strict=False))
+                continue
             else:
                 if any(char in hostname for char in "@/?#"):
                     _invalid()
@@ -184,7 +239,10 @@ def resolve_proxy(args=None, *, environ=None):
             _invalid()
         routes[pattern] = None
     return ProxySettings(
-        "environment", routes=() if bypass_all else tuple(routes.items())
+        "environment",
+        routes=() if bypass_all else tuple(routes.items()),
+        bypass_networks=() if bypass_all else tuple(networks),
+        tls_context=tls_context,
     )
 
 
@@ -192,16 +250,23 @@ def make_client(settings=None, *, timeout=30, transport=None):
     settings = resolve_proxy() if settings is None else settings
     _protect_proxy_logging(settings)
     opened = []
+    verify = settings.tls_context or True
+
+    def proxy_url(value):
+        if settings.tls_context is not None and urlsplit(value).scheme == "https":
+            return httpx.Proxy(value, ssl_context=settings.tls_context)
+        return value
+
     try:
         kwargs = {
             "timeout": timeout,
             "transport": transport,
-            "verify": True,
+            "verify": verify,
             "follow_redirects": False,
             "trust_env": False,
         }
         if settings.url is not None:
-            kwargs["proxy"] = settings.url
+            kwargs["proxy"] = proxy_url(settings.url)
         if settings.routes:
             mounts = {}
             for pattern, value in settings.routes:
@@ -209,11 +274,13 @@ def make_client(settings=None, *, timeout=30, transport=None):
                     mounts[pattern] = None
                 else:
                     mount = httpx.HTTPTransport(
-                        proxy=value, verify=True, trust_env=False
+                        proxy=proxy_url(value), verify=verify, trust_env=False
                     )
                     opened.append(mount)
                     mounts[pattern] = mount
             kwargs["mounts"] = mounts
+        if settings.bypass_networks:
+            return _CIDRClient(bypass_networks=settings.bypass_networks, **kwargs)
         return httpx.Client(**kwargs)
     except (ValueError, ImportError, httpx.InvalidURL):
         for opened_transport in opened:

@@ -3,7 +3,13 @@ import logging
 
 import pytest
 
-from extore import customer_cli, manage_client, owner_client
+from extore import (
+    commerce_client,
+    commerce_commands,
+    customer_cli,
+    manage_client,
+    owner_client,
+)
 from extore.http_proxy import (
     ProxySettings,
     make_client,
@@ -18,6 +24,7 @@ def parser():
     commands = result.add_subparsers(dest="command", required=True)
     for module in (manage_client, owner_client, customer_cli):
         module.add_parser(commands)
+    commerce_commands.add_parser(commands)
     return result
 
 
@@ -152,6 +159,9 @@ def test_all_clients_enforce_tls_and_no_redirects_and_never_persist_proxy(monkey
         manage_client.ManageClient(data, proxy_settings=settings),
         owner_client.OwnerClient(data, proxy_settings=settings),
         customer_cli.CustomerClient(data, proxy_settings=settings),
+        commerce_client.CommerceClient(
+            "https://store.example", "test-client", proxy_settings=settings
+        ),
     ]
     for configuration in configurations:
         assert configuration["proxy"] == settings.url
@@ -215,3 +225,134 @@ def test_socks_debug_trace_does_not_log_auth_and_keeps_ordinary_logs(
     assert "synthetic-secret" not in caplog.text
     assert "setup_socks5_connection.complete" in caplog.text
     assert "connect_tcp.started" in caplog.text
+
+
+@pytest.mark.parametrize("role", ["manage", "admin", "customer"])
+@pytest.mark.parametrize("before", [True, False])
+def test_ca_bundle_flag_positions(role, before):
+    command = [role]
+    if before:
+        command += ["--ca-bundle", "explicit.pem"]
+    command += ["login"] if role != "customer" else ["products"]
+    if role != "manage":
+        command += ["--origin", "https://store.example"]
+    if not before:
+        command += ["--ca-bundle", "explicit.pem"]
+    assert parser().parse_args(command).ca_bundle == "explicit.pem"
+
+
+@pytest.mark.parametrize(
+    "network,matching,nonmatching",
+    [
+        ("10.0.0.0/8", "10.12.34.56", "11.12.34.56"),
+        ("192.168.1.42/24", "192.168.1.7", "192.168.2.7"),
+        ("2001:db8::/32", "2001:db8::1234", "2001:db9::1234"),
+    ],
+)
+def test_cidr_routes_match_only_literal_ips(network, matching, nonmatching):
+    import httpx
+
+    settings = resolve_proxy(
+        argparse.Namespace(proxy_env=True),
+        environ={"ALL_PROXY": "http://proxy.example:3128", "NO_PROXY": network},
+    )
+    with make_client(settings) as client:
+
+        def route(host):
+            host = f"[{host}]" if ":" in host else host
+            return client._transport_for_url(httpx.URL(f"https://{host}/"))
+
+        assert route(matching) is client._transport
+        assert route(nonmatching) is not client._transport
+        assert route("service.example") is not client._transport
+
+
+@pytest.mark.parametrize(
+    "value", ["10.0.0.0/99", "host.example/8", "user:secret@host/8", "2001:db8::/999"]
+)
+def test_invalid_cidr_redacted(value):
+    with pytest.raises(ManageError) as caught:
+        resolve_proxy(argparse.Namespace(proxy_env=True), environ={"NO_PROXY": value})
+    assert caught.value.code == "invalid_proxy"
+    assert value not in str(caught.value)
+    assert "secret" not in str(caught.value)
+
+
+@pytest.mark.parametrize("module", [manage_client, owner_client, customer_cli])
+def test_invalid_ca_before_profile_and_redacted(module, tmp_path, monkeypatch):
+    ca = tmp_path / "private-path-secret.pem"
+    ca.write_text("invalid certificate")
+    monkeypatch.setenv("EXTORE_CA_BUNDLE", str(ca))
+    profile = tmp_path / "not-created" / "profile.json"
+    with pytest.raises(ManageError) as caught:
+        module.execute(argparse.Namespace(profile=profile))
+    assert caught.value.code == "invalid_ca_bundle"
+    assert str(ca) not in str(caught.value)
+    assert "secret" not in str(caught.value)
+    assert not profile.parent.exists()
+
+
+def test_explicit_ca_context_preserves_verification_and_ignores_ambient(monkeypatch):
+    import ssl
+
+    import certifi
+
+    monkeypatch.setenv("SSL_CERT_FILE", "/untrusted-ambient.pem")
+    settings = resolve_proxy(
+        argparse.Namespace(ca_bundle=certifi.where()),
+        environ={"EXTORE_CA_BUNDLE": "/ignored.pem"},
+    )
+    assert settings.tls_context.verify_mode == ssl.CERT_REQUIRED
+    assert settings.tls_context.check_hostname is True
+    assert certifi.where() not in repr(settings)
+    with make_client(settings) as client:
+        assert client.follow_redirects is False
+
+
+@pytest.mark.parametrize("scheme", ["https", "HTTPS"])
+def test_ca_bundle_applies_to_https_proxy_and_target(monkeypatch, scheme):
+    import certifi
+
+    captured = {}
+    transports = []
+
+    class CapturedTransport:
+        def __init__(self, **kwargs):
+            transports.append(kwargs)
+
+    monkeypatch.setattr("extore.http_proxy.httpx.HTTPTransport", CapturedTransport)
+    monkeypatch.setattr(
+        "extore.http_proxy.httpx.Client", lambda **kwargs: captured.update(kwargs)
+    )
+    settings = resolve_proxy(
+        argparse.Namespace(proxy_env=True),
+        environ={
+            "EXTORE_CA_BUNDLE": certifi.where(),
+            "HTTPS_PROXY": f"{scheme}://user:synthetic-secret@proxy.example:443",
+        },
+    )
+    make_client(settings)
+    assert captured["verify"] is settings.tls_context
+    assert transports[0]["verify"] is settings.tls_context
+    assert transports[0]["proxy"].ssl_context is settings.tls_context
+    assert captured["trust_env"] is False
+    assert "synthetic-secret" not in repr(settings)
+
+
+@pytest.mark.parametrize("before", [True, False])
+def test_commerce_ca_bundle_flag_positions(before):
+    command = ["commerce"]
+    if before:
+        command += ["--ca-bundle", "explicit.pem"]
+    command += [
+        "metadata",
+        "--origin",
+        "https://store.example",
+        "--client-id",
+        "test-client",
+        "--output",
+        "output.json",
+    ]
+    if not before:
+        command += ["--ca-bundle", "explicit.pem"]
+    assert parser().parse_args(command).ca_bundle == "explicit.pem"

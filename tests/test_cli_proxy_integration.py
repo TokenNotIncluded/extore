@@ -402,3 +402,83 @@ def test_proxy_rejection_does_not_echo_private_proxy_challenge(status):
                 manager._json(ORIGIN, "GET", "/proof")
     assert caught.value.status == status
     assert "synthetic-private-proxy-password" not in json.dumps(caught.value.as_dict())
+
+
+@pytest.mark.parametrize("proxy_env", [False, True])
+def test_explicit_ca_bundle_trusts_server_but_not_wrong_hostname(
+    tmp_path, monkeypatch, proxy_env
+):
+    import httpx
+
+    from extore.http_proxy import make_client
+
+    ca_path, context = _certificate(tmp_path)
+    calls, connects = [], []
+
+    def respond(method, target, headers, body):
+        calls.append(target)
+        return 200, {"ok": True}, {}
+
+    server = _http_server(respond)
+    server.socket = context.wrap_socket(server.socket, server_side=True)
+    _deny_local_remote_dns(monkeypatch)
+    with (
+        _running(server),
+        _running(_connect_proxy(server.server_address, connects)) as proxy,
+    ):
+        proxy_url = f"http://127.0.0.1:{proxy.server_port}"
+        args = argparse.Namespace(proxy_env=proxy_env)
+        env = {"EXTORE_CA_BUNDLE": str(ca_path)}
+        if proxy_env:
+            env.update(HTTPS_PROXY=proxy_url, NO_PROXY="10.0.0.0/8,2001:db8::/32")
+        else:
+            env["EXTORE_PROXY"] = proxy_url
+        settings = resolve_proxy(args, environ=env)
+        with make_client(settings) as client:
+            assert (
+                client.get(
+                    f"https://{REMOTE_HOST}:{server.server_port}/proof"
+                ).status_code
+                == 200
+            )
+            with pytest.raises(httpx.ConnectError):
+                client.get(
+                    f"https://wrong.proxy-test.invalid:{server.server_port}/proof"
+                )
+    assert calls == ["/proof"]
+
+
+def test_cidr_bypasses_real_proxy_only_for_matching_ip():
+    from extore.http_proxy import make_client
+
+    direct, proxied = [], []
+
+    def destination(method, target, headers, body):
+        direct.append(target)
+        return 200, {}, {}
+
+    def relay(method, target, headers, body):
+        proxied.append(target)
+        return 200, {}, {}
+
+    with (
+        _running(_http_server(destination)) as server,
+        _running(_http_server(relay)) as proxy,
+    ):
+        for cidr in ("127.0.0.0/8", "10.0.0.0/8"):
+            settings = resolve_proxy(
+                argparse.Namespace(proxy_env=True),
+                environ={
+                    "HTTP_PROXY": f"http://127.0.0.1:{proxy.server_port}",
+                    "NO_PROXY": cidr,
+                },
+            )
+            with make_client(settings) as client:
+                assert (
+                    client.get(
+                        f"http://127.0.0.1:{server.server_port}/proof"
+                    ).status_code
+                    == 200
+                )
+    assert direct == ["/proof"]
+    assert len(proxied) == 1
