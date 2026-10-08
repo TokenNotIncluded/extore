@@ -377,3 +377,23 @@ extore manage logout --all
 商品可以通过 CLI 移入回收站和恢复：`extore admin product delete --product PRODUCT_ID --yes`、`extore admin product restore --product PRODUCT_ID`。商品授权下使用 `extore manage product delete/restore`，需要明确批准的 `product.delete` 权限；已有授权不会自动扩权。列表的 `--view active|deleted|all|history` 默认显示未删除商品，`history` 还保留永久移出回收站的商品用于履约查询。删除只停售，原卡密、任务、领取链接和附件保留，聚合队列仍包括旧任务。完整示例见 [商品回收站](cli-owner.md#商品回收站)。
 
 清空回收站：`extore admin trash empty --yes`，平台管理员必须另加 `--shop SHOP_ID`；商品授权只可执行 `extore manage trash empty --product PRODUCT_ID --yes`。单商品使用 `product purge --product PRODUCT_ID --yes`。这些操作永久移出商品、不可恢复，需要独立的 `product.purge` 权限，保留原卡密、任务与交付。CLI 提交明确 ID 快照，空回收站不写入，超过 500 个商品拒绝隐式批量。详见 [永久移出回收站](cli-owner.md#永久移出回收站)。
+
+### 私有 CA 与 CIDR 绕过规则
+
+`--proxy-env` 的 `NO_PROXY` 支持 IPv4/IPv6 CIDR，例如 `10.0.0.0/8,2001:db8::/32`。
+CIDR 仅匹配 URL 中的 IP 字面量，不解析域名，避免将代理侧 DNS 泄露到本地。
+域名目标继续使用现有域名绕过规则；非法 CIDR 会在打开私密 profile 前报错。
+
+需要企业或运行环境 CA 时，显式传入 `--ca-bundle /path/to/ca.pem`，或设置
+`EXTORE_CA_BUNDLE`。此 PEM 文件中的 CA 仅添加到当前 CLI 的默认可信 CA，
+适用于目标 HTTPS 和 HTTPS 代理连接，不改变系统信任库，不保存到 profile。
+证书链和主机名校验保持开启；不提供跳过 TLS 校验的开关。
+`SSL_CERT_FILE`、`SSL_CERT_DIR` 不会自动生效。若环境提供了受信任的
+`SSL_CERT_FILE`，可明确选择它：
+
+```sh
+EXTORE_CA_BUNDLE="$SSL_CERT_FILE" extore manage --proxy-env queues
+```
+
+CA 文件无法读取或不是有效 PEM 时，CLI 在打开 profile 前返回
+`invalid_ca_bundle`，不回显文件路径或文件内容。

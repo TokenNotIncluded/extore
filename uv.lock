@@ -338,6 +338,7 @@ version = "0.11.2"
 source = { editable = "." }
 dependencies = [
     { name = "argon2-cffi" },
+    { name = "certifi" },
     { name = "cryptography" },
     { name = "fastapi" },
     { name = "httpx", extra = ["socks"] },
@@ -357,6 +358,7 @@ dev = [
 [package.metadata]
 requires-dist = [
     { name = "argon2-cffi", specifier = ">=25.1.0" },
+    { name = "certifi", specifier = ">=2026.7.22" },
     { name = "cryptography", specifier = ">=50.0.2" },
     { name = "fastapi", specifier = ">=0.142.2" },
     { name = "httpx", extras = ["socks"], specifier = ">=0.28.1" },
