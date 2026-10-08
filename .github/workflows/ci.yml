@@ -25,34 +25,18 @@ jobs:
           sudo meson install -C "$RUNNER_TEMP/extore-bubblewrap-build"
           /usr/bin/bwrap --version
       - run: uv sync --frozen --python 3.12
-      - run: uv run ruff check extore scripts tests
-      - run: uv run ruff format --check extore scripts tests
+      - run: uv run ruff check extore scripts tests examples
+      - run: uv run ruff format --check extore scripts tests examples
       - run: uv run ruff check --config pyproject.toml processors/official/extore_processors processors/official/tests
       - run: uv run ruff format --check --config pyproject.toml processors/official/extore_processors processors/official/tests
       - run: uv run pytest -q
-      - run: uv run python -m compileall -q extore scripts
+      - run: uv run python -m compileall -q extore scripts examples
       - run: uv run python examples/workflows/validate_examples.py
-      - run: node --check extore/static/account.js
-      - run: node --check extore/static/vendor/qrcodegen.js
-      - run: node --check extore/static/totp-qr.js
-      - run: node --check extore/static/device-login.js
-      - run: node --check extore/static/pipeline-authorizations.js
-      - run: |
-          for file in extore/static/{task-flow,task-flow-editor,text-cards,batch-redemption,proxy-routing,proxy-config}.js; do node --check "$file"; done
-      - run: node --check extore/static/app.js
-      - run: node --check extore/static/progress-board.js
-      - run: node --check extore/static/worker-identity.js
-      - run: node --check extore/static/preferences.js
-      - run: node --check extore/static/products.js
-      - run: node --check extore/static/processor-contribution.js
-      - run: node --check extore/static/commerce-connect.js
-      - run: node --check extore/static/cards.js
-      - run: node --check extore/static/webmcp.js
-      - run: node --check extore/static/product-export.js
-      - run: node --check extore/static/customer-motion.js
-      - run: node --check extore/static/source-link.js
-      - run: node --check extore/static/cli-prompts.js
-      - run: node --check extore/static/owner-cli.js
+      - name: Check all shipped JavaScript
+        run: |
+          while IFS= read -r -d '' file; do
+            node --check "$file"
+          done < <(find extore/static -type f -name '*.js' -print0)
       - run: node --test tests/*.test.cjs
       - run: uv run pytest -q processors/official/tests
       - run: uv build -q

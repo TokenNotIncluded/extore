@@ -7,7 +7,10 @@ __pycache__/
 output/
 .playwright-cli/
 .impeccable/config.local.json
-
 dist/
-
+build/
+*.egg-info/
+.coverage
+.coverage.*
+htmlcov/
 .ruff_cache/

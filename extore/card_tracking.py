@@ -177,23 +177,18 @@ def record_issue(
         "INSERT INTO card_meta(card_id,batch_id,code_suffix,expires,variant_id,variant_snapshot) VALUES (?,?,?,?,?,?)",
         [(cid, batch_id, suffix, expires, variant_id, frozen) for cid, suffix in rows],
     )
-    # Issuance tools on pre-migration minimal databases keep their legacy SKU
-    # snapshot. Normal installations always freeze the explicit null policy too.
-    if c.execute(
-        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='card_entitlements'"
-    ).fetchone():
-        from .card_entitlements import freeze_card
-        from .variants import validate_attributes
+    from .card_entitlements import freeze_card
+    from .variants import validate_attributes
 
-        config = json.loads(
-            c.execute("SELECT config FROM products WHERE id=?", (pid,)).fetchone()[0]
-        )
-        effective = validate_attributes(
-            {**snapshot.get("attributes", {}), **(attributes or {})}
-        )
-        policy = config.get("revision_policy")
-        for cid, _ in rows:
-            freeze_card(c, cid, effective, policy)
+    config = json.loads(
+        c.execute("SELECT config FROM products WHERE id=?", (pid,)).fetchone()[0]
+    )
+    effective = validate_attributes(
+        {**snapshot.get("attributes", {}), **(attributes or {})}
+    )
+    policy = config.get("revision_policy")
+    for cid, _ in rows:
+        freeze_card(c, cid, effective, policy)
     return batch_id
 
 

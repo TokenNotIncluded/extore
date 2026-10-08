@@ -67,29 +67,22 @@ def require_disk_space(additional, *, pending=0):
 
 
 def _flow_allocated(c, shop_id=None):
-    tables = {
-        row[0] for row in c.execute("SELECT name FROM sqlite_master WHERE type='table'")
-    }
-    if "card_task_flows" not in tables:
-        return 0
     total = c.execute(
         "SELECT COALESCE(SUM(length(snapshot_ciphertext)),0) FROM card_task_flows "
         "WHERE (? IS NULL OR shop_id=?)",
         (shop_id, shop_id),
     ).fetchone()[0]
-    if "task_flow_steps" in tables:
-        total += c.execute(
-            "SELECT COALESCE(SUM(length(s.payload_ciphertext)),0) FROM task_flow_steps s "
-            "JOIN jobs j ON j.id=s.job_id JOIN card_task_flows f ON f.card_id=j.card_id "
-            "WHERE (? IS NULL OR f.shop_id=?)",
-            (shop_id, shop_id),
-        ).fetchone()[0]
-    if "task_flow_dispatches" in tables:
-        total += c.execute(
-            "SELECT COALESCE(SUM(length(payload_ciphertext)),0) FROM task_flow_dispatches "
-            "WHERE (? IS NULL OR shop_id=?)",
-            (shop_id, shop_id),
-        ).fetchone()[0]
+    total += c.execute(
+        "SELECT COALESCE(SUM(length(s.payload_ciphertext)),0) FROM task_flow_steps s "
+        "JOIN jobs j ON j.id=s.job_id JOIN card_task_flows f ON f.card_id=j.card_id "
+        "WHERE (? IS NULL OR f.shop_id=?)",
+        (shop_id, shop_id),
+    ).fetchone()[0]
+    total += c.execute(
+        "SELECT COALESCE(SUM(length(payload_ciphertext)),0) FROM task_flow_dispatches "
+        "WHERE (? IS NULL OR shop_id=?)",
+        (shop_id, shop_id),
+    ).fetchone()[0]
     return total
 
 

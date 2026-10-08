@@ -1,7 +1,7 @@
 [project]
 name = "extore"
 version = "0.11.2"
-description = "Single-merchant redemption and fulfillment with product queues, Passkeys, and native WebMCP"
+description = "Multi-shop redemption and fulfillment with product queues, Passkeys, and native WebMCP"
 readme = "README.md"
 license = "MIT"
 license-files = ["LICENSE"]
@@ -60,6 +60,10 @@ exclude = [
     "/.env",
     "/.venv",
     "/dist",
+    "/build",
+    "/.coverage",
+    "/.coverage.*",
+    "/htmlcov",
     "/output",
     "/releases",
     "/_etc",

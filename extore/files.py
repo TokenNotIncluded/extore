@@ -123,15 +123,12 @@ def _descriptor(row):
 
 
 def _with_flow_scope(c, row):
-    if c.execute(
-        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='task_flow_files'"
-    ).fetchone():
-        scope = c.execute(
-            "SELECT flow_epoch,node_id FROM task_flow_files WHERE file_id=?",
-            (row["id"],),
-        ).fetchone()
-        if scope:
-            return {**dict(row), **dict(scope)}
+    scope = c.execute(
+        "SELECT flow_epoch,node_id FROM task_flow_files WHERE file_id=?",
+        (row["id"],),
+    ).fetchone()
+    if scope:
+        return {**dict(row), **dict(scope)}
     return row
 
 

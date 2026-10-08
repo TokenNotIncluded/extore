@@ -6,12 +6,13 @@ from pathlib import Path
 from extore.task_flow_definition import validate_definition
 
 
-def main():
-    root = Path(__file__).parent
-    for directory in sorted(root.iterdir()):
-        if not directory.is_dir():
-            continue
-        definition = json.loads((directory / "flow.json").read_text(encoding="utf-8"))
+def main(root=Path(__file__).parent):
+    definitions = sorted(root.glob("*/flow.json"))
+    if not definitions:
+        raise ValueError("No workflow examples found")
+    for path in definitions:
+        directory = path.parent
+        definition = json.loads(path.read_text(encoding="utf-8"))
         product = json.loads((directory / "product.json").read_text(encoding="utf-8"))
         canonical = validate_definition(definition, product)
         assert canonical is not None
