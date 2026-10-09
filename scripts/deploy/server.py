@@ -117,6 +117,12 @@ def prepared(sha):
     return value
 
 
+def pending(sha):
+    if (STATE / "recovery.tar.gz").exists():
+        return {"status": "pending_backup", **load("prepared.json")}
+    return {"status": "clear", "sha": sha}
+
+
 def prepare(sha):
     if sha != main_sha():
         return {"status": "superseded", "sha": sha}
@@ -240,7 +246,7 @@ def snapshot(sha):
                     "sha": sha,
                     "database": summary,
                     "archive_sha256": digest(archive),
-                    "local_verified": False,
+                    "offhost_verified": False,
                 },
             )
             value["old_database"] = summary
@@ -264,7 +270,7 @@ def snapshot_info(sha):
 
 def acknowledge(sha):
     value = snapshot_info(sha)
-    value["local_verified"] = True
+    value["offhost_verified"] = True
     save("snapshot.json", value)
     return {"status": "backup_verified", "sha": sha}
 
@@ -323,8 +329,8 @@ def activate(sha):
     value = prepared(sha)
     if sha != main_sha():
         return {"status": "superseded", "sha": sha}
-    if not snapshot_info(sha).get("local_verified"):
-        raise RuntimeError("The recovery snapshot has not been verified locally")
+    if not snapshot_info(sha).get("offhost_verified"):
+        raise RuntimeError("The recovery snapshot has not been uploaded and verified")
     run("systemctl", "stop", "extore-worker.service", stdout=sys.stderr)
     run("systemctl", "stop", "extore-api.service", stdout=sys.stderr)
     run("pacman", "-U", "--noconfirm", str(WORK / value["package"]), stdout=sys.stderr)
@@ -346,7 +352,7 @@ def cleanup(sha):
     if (STATE / "prepared.json").exists() and load("prepared.json")["sha"] != sha:
         raise RuntimeError("Cleanup would affect another deployment")
     if (STATE / "recovery.tar.gz").exists() and not snapshot_info(sha).get(
-        "local_verified"
+        "offhost_verified"
     ):
         return {"status": "pending_backup", "sha": sha}
     for name in ["recovery.tar.gz", "recovery.partial"]:
@@ -366,7 +372,7 @@ def rollback(sha):
     run("systemctl", "stop", *SERVICES, stdout=sys.stderr)
     if database_summary()["schema_sha256"] != value["old_database"]["schema_sha256"]:
         raise RuntimeError(
-            "Schema changed; preserve data and recover manually from the local backup"
+            "Schema changed; preserve data and recover manually from the encrypted artifact"
         )
     # Restore program/config files only. Never overwrite new business transactions.
     shutil.rmtree("/usr/lib/extore")
@@ -405,6 +411,7 @@ def main():
     if os.geteuid() != 0:
         raise RuntimeError("The deployment endpoint must run as root")
     operations = {
+        "pending": pending,
         "prepare": prepare,
         "snapshot": snapshot,
         "snapshot_info": snapshot_info,

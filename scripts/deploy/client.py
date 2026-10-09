@@ -1,8 +1,7 @@
-"""Trusted local deployment coordinator; never executed from a runner checkout."""
+"""GitHub-hosted deployment coordinator using repository Secrets over SSH."""
 
 import argparse
 import concurrent.futures
-import fcntl
 import gzip
 import hashlib
 import json
@@ -14,11 +13,8 @@ import subprocess
 import sys
 import tarfile
 import tempfile
-import time
 from pathlib import Path
 
-CONFIG = Path("/etc/extore-deploy/config.json")
-LOCK = Path("/var/lib/extore-deploy/deploy.lock")
 SHA_PATTERN = re.compile(r"[0-9a-f]{40}")
 
 
@@ -54,8 +50,6 @@ def command(config, operation, sha):
         "-o",
         f"UserKnownHostsFile={config['known_hosts']}",
     ]
-    if config.get("proxy_command"):
-        argv.extend(["-o", "ProxyCommand=" + config["proxy_command"]])
     return argv + [config["target"], f"{operation} {require_sha(sha)}"]
 
 
@@ -166,94 +160,128 @@ def public_check(config, value):
         list(pool.map(check_asset, value["files"].items()))
 
 
-def handover(backup, config):
-    owner = config.get("backup_owner")
-    if owner:
-        for path in backup.rglob("*"):
-            path.chmod(0o700 if path.is_dir() else 0o600)
-            shutil.chown(path, owner, owner)
-        shutil.chown(backup, owner, owner)
+def output(name, value):
+    with Path(os.environ["GITHUB_OUTPUT"]).open("a") as file:
+        file.write(f"{name}={value}\n")
 
 
-def make_backup(value, config, backup_root):
+def save_state(directory, value):
+    directory.mkdir(parents=True, exist_ok=True, mode=0o700)
+    (directory / "state.json").write_text(json.dumps(value, sort_keys=True) + "\n")
+
+
+def load_state(directory):
+    return json.loads((directory / "state.json").read_text())
+
+
+def make_backup(value, config, directory):
+    """Verify a snapshot and encrypt it; acknowledgement follows artifact upload."""
     sha = value["sha"]
-    backup = backup_root / (time.strftime("%Y%m%d-%H%M%S") + "-" + sha[:12])
-    backup.mkdir(parents=True, mode=0o700)
-    archive = backup / "recovery.tar.gz"
-    (backup / "prepared.json").write_text(
-        json.dumps(value, sort_keys=True, indent=2) + "\n"
+    directory.mkdir(parents=True, exist_ok=True, mode=0o700)
+    archive = directory / "recovery.tar.gz"
+    emit("Creating a consistent snapshot; services resume before the SSH transfer")
+    with archive.open("wb") as file:
+        remote(config, "snapshot", sha, stdout=file, timeout=360)
+    with tempfile.TemporaryDirectory(prefix="restore-check-", dir=directory) as restore:
+        restored = verify_backup(archive, Path(restore))
+    info = rpc(config, "snapshot_info", sha)
+    archive_hash = digest(archive)
+    if archive_hash != info["archive_sha256"]:
+        raise RuntimeError("Runner and server backup checksums differ")
+    value["old_database"] = info["database"]
+    artifact = directory / "artifact"
+    artifact.mkdir(mode=0o700)
+    encrypted = artifact / "recovery.tar.gz.age"
+    subprocess.run(
+        [
+            "age",
+            "--recipient",
+            config["backup_recipient"],
+            "--output",
+            str(encrypted),
+            str(archive),
+        ],
+        check=True,
+        timeout=120,
     )
-    try:
-        emit(
-            "Creating a consistent snapshot, restoring services, then transferring it locally"
+    (artifact / "SHA256SUMS").write_text(f"{digest(encrypted)}  recovery.tar.gz.age\n")
+    (artifact / "manifest.json").write_text(
+        json.dumps(
+            {"sha": sha, "version": value["version"], "archive_sha256": archive_hash},
+            sort_keys=True,
         )
-        with archive.open("wb") as output:
-            remote(config, "snapshot", sha, stdout=output, timeout=360)
-        with tempfile.TemporaryDirectory(
-            prefix="restore-check-", dir=backup
-        ) as directory:
-            restored = verify_backup(archive, Path(directory))
-        archive_hash = digest(archive)
-        info = rpc(config, "snapshot_info", sha)
-        if archive_hash != info["archive_sha256"]:
-            raise RuntimeError("Local and server backup checksums differ")
-        (backup / "SHA256SUMS").write_text(f"{archive_hash}  recovery.tar.gz\n")
-        (backup / "backup-verification.json").write_text(
-            json.dumps(
-                {
-                    "sha": sha,
-                    "archive_sha256": archive_hash,
-                    "restored_database": restored,
-                    "database": info["database"],
-                },
-                sort_keys=True,
-                indent=2,
-            )
-            + "\n"
-        )
-        rpc(config, "acknowledge", sha)
-        value["old_database"] = info["database"]
-        emit(f"Backup archive and independently restored SQLite verified: {backup}")
-        return backup, restored, archive_hash
-    finally:
-        handover(backup, config)
+        + "\n"
+    )
+    save_state(
+        directory,
+        {"value": value, "restored_database": restored, "archive_sha256": archive_hash},
+    )
+    output("backup", "true")
+    emit(
+        "Snapshot checksum and independently restored SQLite verified; encrypted artifact ready"
+    )
 
 
-def deploy(sha, config):
-    require_sha(sha)
-    backup_root = Path(config["backup_root"]).resolve()
-    if not backup_root.is_relative_to("/home/lightjunction/Backups"):
-        raise RuntimeError("Backups must stay under /home/lightjunction/Backups")
-    emit(f"Preparing main {sha}")
+def require_artifact(artifact_id):
+    if not re.fullmatch(r"[1-9][0-9]*", artifact_id or ""):
+        raise RuntimeError("A successfully uploaded recovery artifact is required")
+
+
+def recover(sha, config, directory):
+    value = rpc(config, "pending", sha)
+    if value["status"] == "pending_backup":
+        emit("Preserving the recovery snapshot left by an interrupted deployment")
+        make_backup(value, config, directory)
+    else:
+        output("backup", "false")
+
+
+def drain(config, directory, artifact_id):
+    require_artifact(artifact_id)
+    sha = load_state(directory)["value"]["sha"]
+    rpc(config, "acknowledge", sha)
+    rpc(config, "cleanup", sha)
+    shutil.rmtree(directory)
+    emit(
+        "Previous recovery snapshot uploaded and verified; server temporary copy cleared"
+    )
+
+
+def prepare(sha, config, directory):
+    emit(f"Preparing main {require_sha(sha)}")
     try:
         value = rpc(config, "prepare", sha)
         if value["status"] == "pending_backup":
-            emit(
-                "Archiving a previous interrupted snapshot before preparing this deployment"
+            raise RuntimeError(
+                "An interrupted snapshot must be recovered before preparing"
             )
-            make_backup(value, config, backup_root)
-            rpc(config, "cleanup", value["sha"])
-            value = rpc(config, "prepare", sha)
-    except Exception:
-        emit("Preparation failed; preserving any unverified server recovery snapshot")
-        try:
+        if value["status"] == "current":
+            public_check(config, value)
             rpc(config, "cleanup", sha)
-        except Exception:
-            emit("Preparation cleanup needs attention")
-        raise
-    if value["status"] == "superseded":
-        emit("A newer main commit exists; this deployment was skipped")
-        return "superseded"
-    if value["status"] == "current":
-        public_check(config, value)
+            emit(f"Already deployed and verified: {sha}")
+        elif value["status"] == "superseded":
+            emit("A newer main commit exists; this deployment was skipped")
+        else:
+            make_backup(value, config, directory)
+        output("status", value["status"])
+    except Exception:
+        emit("Preparation failed; unverified server recovery snapshots are retained")
         rpc(config, "cleanup", sha)
-        emit(f"Already deployed and verified: {sha}")
-        return "current"
+        raise
+
+
+def activate(sha, config, directory, artifact_id):
+    require_artifact(artifact_id)
+    state = load_state(directory)
+    value = state["value"]
+    if value["sha"] != require_sha(sha):
+        raise RuntimeError("Prepared deployment does not match the requested commit")
+    archive = directory / "recovery.tar.gz"
+    if digest(archive) != state["archive_sha256"]:
+        raise RuntimeError("Verified recovery archive changed before activation")
+    rpc(config, "acknowledge", sha)
     activated = False
-    backup = None
     try:
-        backup, restored, archive_hash = make_backup(value, config, backup_root)
-        archive = backup / "recovery.tar.gz"
         activated = True
         result = rpc(config, "activate", sha)
         if result["status"] == "superseded":
@@ -262,21 +290,25 @@ def deploy(sha, config):
             return "superseded"
         public_check(config, value)
         final = rpc(config, "confirm", sha)
+        count = sum(name.startswith("extore/static/") for name in value["files"])
         report = {
             "sha": sha,
             "version": value["version"],
-            "backup_sha256": archive_hash,
-            "restored_database": restored,
+            "backup_artifact_id": artifact_id,
+            "backup_sha256": state["archive_sha256"],
+            "restored_database": state["restored_database"],
             "before": value["old_database"],
             "after": final["database"],
             "package": final["package"],
-            "public_static_files_verified": sum(
-                name.startswith("extore/static/") for name in value["files"]
-            ),
+            "public_static_files_verified": count,
         }
-        (backup / "result.json").write_text(
-            json.dumps(report, sort_keys=True, indent=2) + "\n"
+        (directory / "result.json").write_text(
+            json.dumps(report, sort_keys=True) + "\n"
         )
+        with Path(os.environ["GITHUB_STEP_SUMMARY"]).open("a") as file:
+            file.write(
+                f"Deployed `{sha}`: `{final['package']}`. API, worker, SQLite and {count} public assets verified. Recovery artifact: `{artifact_id}`.\n"
+            )
         emit(
             f"Deployed {final['package']} at {sha}; API, worker, database and public assets verified"
         )
@@ -299,45 +331,65 @@ def deploy(sha, config):
                 emit("Previous program files restored; current business data preserved")
             except Exception:
                 emit(
-                    f"Automatic rollback could not finish; recovery archive: {archive}"
+                    f"Automatic rollback could not finish; encrypted recovery artifact: {artifact_id}"
                 )
         raise
     finally:
-        try:
-            cleanup = rpc(config, "cleanup", sha)
-            if cleanup["status"] == "pending_backup":
-                emit(
-                    "Unverified recovery snapshot retained on the server for the next transfer"
-                )
-        except Exception:
-            emit("Remote cleanup needs attention")
-            raise
-        finally:
-            if backup is not None:
-                handover(backup, config)
+        rpc(config, "cleanup", sha)
+
+
+def configuration(directory):
+    directory.mkdir(parents=True, exist_ok=True, mode=0o700)
+    host = os.environ["EXTORE_DEPLOY_HOST"]
+    user = os.environ["EXTORE_DEPLOY_USER"]
+    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9.:-]*", host) or not re.fullmatch(
+        r"[a-z_][a-z0-9_-]*", user
+    ):
+        raise ValueError("Invalid deployment host or SSH user")
+    identity = directory / "id_ed25519"
+    identity.write_text(os.environ["EXTORE_DEPLOY_SSH_KEY"].strip() + "\n")
+    identity.chmod(0o600)
+    known_hosts = directory / "known_hosts"
+    known_hosts.write_text(os.environ["EXTORE_DEPLOY_KNOWN_HOSTS"].strip() + "\n")
+    known_hosts.chmod(0o600)
+    return {
+        "identity": str(identity),
+        "known_hosts": str(known_hosts),
+        "target": f"{user}@{host}",
+        "origin": "https://extore.lmm.best",
+        "backup_recipient": os.environ["EXTORE_BACKUP_RECIPIENT"],
+    }
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("sha", nargs="?")
-    parser.add_argument("--socket", action="store_true")
+    parser.add_argument(
+        "stage", choices=["recover", "drain", "prepare", "activate", "clean"]
+    )
+    parser.add_argument("sha")
     args = parser.parse_args()
-    sha = args.sha
-    if args.socket:
-        raw = sys.stdin.buffer.readline(42)
-        if len(raw) != 41 or not raw.endswith(b"\n"):
-            raise ValueError("Expected exactly one commit SHA")
-        sha = raw[:-1].decode("ascii")
-    require_sha(sha or "")
-    if os.geteuid() != 0:
-        raise RuntimeError("The coordinator must run as root")
+    require_sha(args.sha)
     os.umask(0o077)
-    config = json.loads(CONFIG.read_text())
-    LOCK.parent.mkdir(mode=0o700, exist_ok=True)
-    with LOCK.open("a") as lock:
-        fcntl.flock(lock, fcntl.LOCK_EX)
-        status = deploy(sha, config)
-    emit(f"EXTORE_DEPLOY_RESULT={status}")
+    work = Path(os.environ["RUNNER_TEMP"]) / "extore-deploy"
+    if args.stage == "clean":
+        if work.exists():
+            shutil.rmtree(work)
+        return
+    config = configuration(work / "ssh")
+    if args.stage == "recover":
+        recover(args.sha, config, work / "recovery")
+    elif args.stage == "drain":
+        drain(config, work / "recovery", os.environ.get("EXTORE_BACKUP_ARTIFACT_ID"))
+    elif args.stage == "prepare":
+        prepare(args.sha, config, work / "deployment")
+    else:
+        status = activate(
+            args.sha,
+            config,
+            work / "deployment",
+            os.environ.get("EXTORE_BACKUP_ARTIFACT_ID"),
+        )
+        emit(f"EXTORE_DEPLOY_RESULT={status}")
 
 
 if __name__ == "__main__":

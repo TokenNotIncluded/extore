@@ -3,7 +3,9 @@
 import io
 import json
 import runpy
+import shutil
 import sqlite3
+import subprocess
 import tarfile
 from pathlib import Path
 from types import SimpleNamespace
@@ -74,8 +76,64 @@ def test_backup_rejects_path_traversal(tmp_path):
         CLIENT["verify_backup"](archive, tmp_path)
 
 
-def test_failed_backup_never_activates(tmp_path, monkeypatch):
-    namespace = CLIENT["deploy"].__globals__
+@pytest.mark.skipif(shutil.which("age") is None, reason="age is not installed")
+def test_encrypted_artifact_round_trip_without_early_acknowledgement(
+    tmp_path, monkeypatch
+):
+    archive = make_backup(tmp_path)
+    key = tmp_path / "backup.agekey"
+    subprocess.run(["age-keygen", "-o", str(key)], check=True, capture_output=True)
+    recipient = subprocess.check_output(
+        ["age-keygen", "-y", str(key)], text=True
+    ).strip()
+    namespace = CLIENT["make_backup"].__globals__
+    calls = []
+
+    def remote(config, operation, sha, **kwargs):
+        calls.append(operation)
+        kwargs["stdout"].write(archive.read_bytes())
+
+    def rpc(config, operation, sha):
+        calls.append(operation)
+        return {"archive_sha256": CLIENT["digest"](archive), "database": {}}
+
+    monkeypatch.setitem(namespace, "remote", remote)
+    monkeypatch.setitem(namespace, "rpc", rpc)
+    monkeypatch.setenv("GITHUB_OUTPUT", str(tmp_path / "outputs"))
+    destination = tmp_path / "deployment"
+    CLIENT["make_backup"](
+        {"sha": "a" * 40, "version": "0.11.3"},
+        {"backup_recipient": recipient},
+        destination,
+    )
+    artifact = destination / "artifact"
+    assert {path.name for path in artifact.iterdir()} == {
+        "recovery.tar.gz.age",
+        "SHA256SUMS",
+        "manifest.json",
+    }
+    decrypted = subprocess.check_output(
+        ["age", "-d", "-i", str(key), str(artifact / "recovery.tar.gz.age")]
+    )
+    assert decrypted == archive.read_bytes()
+    assert calls == ["snapshot", "snapshot_info"]
+
+
+def test_changed_recovery_archive_blocks_activation(tmp_path, monkeypatch):
+    namespace = CLIENT["activate"].__globals__
+    monkeypatch.setitem(
+        namespace, "rpc", lambda *args: pytest.fail("No remote mutation")
+    )
+    (tmp_path / "recovery.tar.gz").write_bytes(b"changed after verification")
+    CLIENT["save_state"](
+        tmp_path, {"value": {"sha": "a" * 40}, "archive_sha256": "0" * 64}
+    )
+    with pytest.raises(RuntimeError, match="archive changed"):
+        CLIENT["activate"]("a" * 40, {}, tmp_path, "123")
+
+
+def test_failed_backup_never_acknowledges_or_activates(tmp_path, monkeypatch):
+    namespace = CLIENT["prepare"].__globals__
     calls = []
     value = {"status": "prepared", "sha": "a" * 40}
 
@@ -88,19 +146,9 @@ def test_failed_backup_never_activates(tmp_path, monkeypatch):
 
     monkeypatch.setitem(namespace, "rpc", rpc)
     monkeypatch.setitem(namespace, "remote", remote)
-
-    class BackupPath(type(tmp_path)):
-        def is_relative_to(self, *args):
-            return True
-
-    monkeypatch.setitem(namespace, "Path", BackupPath)
     with pytest.raises(RuntimeError, match="transfer interrupted"):
-        CLIENT["deploy"]("a" * 40, {"backup_root": str(tmp_path)})
+        CLIENT["prepare"]("a" * 40, {}, tmp_path)
     assert calls == ["prepare", "cleanup"]
-    assert (
-        json.loads(next(tmp_path.glob("*/prepared.json")).read_text())["sha"]
-        == "a" * 40
-    )
 
 
 def test_newer_main_cannot_install_an_older_prepared_commit(monkeypatch):
@@ -175,23 +223,24 @@ def test_snapshot_restarts_services_before_network_transfer(monkeypatch, tmp_pat
     SERVER["snapshot"]("a" * 40)
     assert output.getvalue() == b"a consistent recovery archive"
     assert (
-        json.loads((tmp_path / "snapshot.json").read_text())["local_verified"] is False
+        json.loads((tmp_path / "snapshot.json").read_text())["offhost_verified"]
+        is False
     )
 
 
-def test_install_requires_local_backup_acknowledgement(monkeypatch):
+def test_install_requires_uploaded_backup_acknowledgement(monkeypatch):
     namespace = SERVER["activate"].__globals__
     monkeypatch.setitem(namespace, "prepared", lambda sha: {"sha": sha})
     monkeypatch.setitem(namespace, "main_sha", lambda: "a" * 40)
     monkeypatch.setitem(
-        namespace, "snapshot_info", lambda sha: {"local_verified": False}
+        namespace, "snapshot_info", lambda sha: {"offhost_verified": False}
     )
     monkeypatch.setitem(
         namespace,
         "run",
         lambda *args, **kwargs: pytest.fail("No installation is allowed"),
     )
-    with pytest.raises(RuntimeError, match="not been verified locally"):
+    with pytest.raises(RuntimeError, match="not been uploaded and verified"):
         SERVER["activate"]("a" * 40)
 
 
@@ -203,22 +252,36 @@ def test_cleanup_preserves_unverified_server_archive(monkeypatch, tmp_path):
     monkeypatch.setitem(namespace, "WORK", work)
     (tmp_path / "recovery.tar.gz").write_bytes(b"only recovery copy")
     (tmp_path / "snapshot.json").write_text(
-        json.dumps({"sha": "a" * 40, "local_verified": False})
+        json.dumps({"sha": "a" * 40, "offhost_verified": False})
     )
     assert SERVER["cleanup"]("a" * 40)["status"] == "pending_backup"
     assert work.is_dir()
     assert (tmp_path / "recovery.tar.gz").read_bytes() == b"only recovery copy"
 
 
-def test_wrong_backup_destination_is_rejected_before_remote_work(monkeypatch):
-    namespace = CLIENT["deploy"].__globals__
+@pytest.mark.parametrize("artifact_id", [None, "", "0", "not-uploaded"])
+def test_missing_uploaded_artifact_blocks_installation(
+    tmp_path, monkeypatch, artifact_id
+):
+    namespace = CLIENT["activate"].__globals__
     monkeypatch.setitem(
         namespace, "rpc", lambda *args: pytest.fail("No remote work is allowed")
     )
-    with pytest.raises(RuntimeError, match="Backups must stay"):
-        CLIENT["deploy"](
-            "a" * 40, {"backup_root": "/home/lightjunction/Backups/../../tmp"}
-        )
+    with pytest.raises(RuntimeError, match="successfully uploaded"):
+        CLIENT["activate"]("a" * 40, {}, tmp_path, artifact_id)
+
+
+def test_missing_uploaded_artifact_cannot_clear_interrupted_snapshot(
+    tmp_path, monkeypatch
+):
+    namespace = CLIENT["drain"].__globals__
+    monkeypatch.setitem(
+        namespace,
+        "rpc",
+        lambda *args: pytest.fail("The only server recovery copy must stay"),
+    )
+    with pytest.raises(RuntimeError, match="successfully uploaded"):
+        CLIENT["drain"]({}, tmp_path, "")
 
 
 def test_new_deployment_drains_a_verified_leftover_before_building(
@@ -232,7 +295,7 @@ def test_new_deployment_drains_a_verified_leftover_before_building(
     )
     (tmp_path / "prepared.json").write_text(json.dumps({"sha": "a" * 40}))
     (tmp_path / "snapshot.json").write_text(
-        json.dumps({"sha": "a" * 40, "local_verified": True})
+        json.dumps({"sha": "a" * 40, "offhost_verified": True})
     )
     result = SERVER["prepare"]("b" * 40)
     assert result == {"status": "pending_backup", "sha": "a" * 40}

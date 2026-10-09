@@ -19,15 +19,71 @@ jobs:
       github.repository == 'TokenNotIncluded/extore' &&
       github.ref == 'refs/heads/main' &&
       (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
-    runs-on: [self-hosted, linux, x64, extore-deploy]
+    runs-on: ubuntu-24.04
     timeout-minutes: 25
     environment:
       name: production
       url: https://extore.lmm.best
+    env:
+      EXTORE_DEPLOY_SHA: ${{ github.sha }}
+      EXTORE_DEPLOY_HOST: ${{ secrets.EXTORE_DEPLOY_HOST }}
+      EXTORE_DEPLOY_USER: ${{ secrets.EXTORE_DEPLOY_USER }}
+      EXTORE_DEPLOY_SSH_KEY: ${{ secrets.EXTORE_DEPLOY_SSH_KEY }}
+      EXTORE_DEPLOY_KNOWN_HOSTS: ${{ secrets.EXTORE_DEPLOY_KNOWN_HOSTS }}
+      EXTORE_BACKUP_RECIPIENT: ${{ secrets.EXTORE_BACKUP_RECIPIENT }}
     steps:
-      # The runner has no SSH keys, backup access, sudo or source checkout.
-      # This root-owned entry point talks to a restricted local socket service.
-      - name: Build, back up, deploy and verify the current main commit
+      - name: Check out deployment scripts
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+
+      - name: Install backup encryption tool
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install --no-install-recommends -y age
+
+      - name: Recover any interrupted deployment snapshot
+        id: recover
+        run: python3 scripts/deploy/client.py recover "$EXTORE_DEPLOY_SHA"
+
+      - name: Upload previous encrypted recovery snapshot
+        if: steps.recover.outputs.backup == 'true'
+        id: recovered-backup
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: extore-recovery-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/extore-deploy/recovery/artifact/*
+          if-no-files-found: error
+          retention-days: 30
+          compression-level: 0
+
+      - name: Clear the archived server snapshot
+        if: steps.recover.outputs.backup == 'true'
         env:
-          EXTORE_DEPLOY_SHA: ${{ github.sha }}
-        run: python3 /usr/local/lib/extore-deploy/request.py "$EXTORE_DEPLOY_SHA"
+          EXTORE_BACKUP_ARTIFACT_ID: ${{ steps.recovered-backup.outputs.artifact-id }}
+        run: python3 scripts/deploy/client.py drain "$EXTORE_DEPLOY_SHA"
+
+      - name: Build and verify the recovery backup
+        id: prepare
+        run: python3 scripts/deploy/client.py prepare "$EXTORE_DEPLOY_SHA"
+
+      - name: Upload encrypted recovery backup before installation
+        if: steps.prepare.outputs.backup == 'true'
+        id: backup
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: extore-before-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/extore-deploy/deployment/artifact/*
+          if-no-files-found: error
+          retention-days: 30
+          compression-level: 0
+
+      - name: Install and verify production
+        if: steps.prepare.outputs.status == 'prepared'
+        env:
+          EXTORE_BACKUP_ARTIFACT_ID: ${{ steps.backup.outputs.artifact-id }}
+        run: python3 scripts/deploy/client.py activate "$EXTORE_DEPLOY_SHA"
+
+      - name: Remove temporary SSH keys and plaintext backups
+        if: always()
+        run: python3 scripts/deploy/client.py clean "$EXTORE_DEPLOY_SHA"
