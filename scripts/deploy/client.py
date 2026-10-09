@@ -33,7 +33,7 @@ def emit(message):
 
 
 def command(config, operation, sha):
-    return [
+    argv = [
         "ssh",
         "-F",
         "/dev/null",
@@ -53,9 +53,10 @@ def command(config, operation, sha):
         "ServerAliveCountMax=3",
         "-o",
         f"UserKnownHostsFile={config['known_hosts']}",
-        config["target"],
-        f"{operation} {require_sha(sha)}",
     ]
+    if config.get("proxy_command"):
+        argv.extend(["-o", "ProxyCommand=" + config["proxy_command"]])
+    return argv + [config["target"], f"{operation} {require_sha(sha)}"]
 
 
 def remote(config, operation, sha, **kwargs):
@@ -165,19 +166,80 @@ def public_check(config, value):
         list(pool.map(check_asset, value["files"].items()))
 
 
+def handover(backup, config):
+    owner = config.get("backup_owner")
+    if owner:
+        for path in backup.rglob("*"):
+            path.chmod(0o700 if path.is_dir() else 0o600)
+            shutil.chown(path, owner, owner)
+        shutil.chown(backup, owner, owner)
+
+
+def make_backup(value, config, backup_root):
+    sha = value["sha"]
+    backup = backup_root / (time.strftime("%Y%m%d-%H%M%S") + "-" + sha[:12])
+    backup.mkdir(parents=True, mode=0o700)
+    archive = backup / "recovery.tar.gz"
+    (backup / "prepared.json").write_text(
+        json.dumps(value, sort_keys=True, indent=2) + "\n"
+    )
+    try:
+        emit(
+            "Creating a consistent snapshot, restoring services, then transferring it locally"
+        )
+        with archive.open("wb") as output:
+            remote(config, "snapshot", sha, stdout=output, timeout=360)
+        with tempfile.TemporaryDirectory(
+            prefix="restore-check-", dir=backup
+        ) as directory:
+            restored = verify_backup(archive, Path(directory))
+        archive_hash = digest(archive)
+        info = rpc(config, "snapshot_info", sha)
+        if archive_hash != info["archive_sha256"]:
+            raise RuntimeError("Local and server backup checksums differ")
+        (backup / "SHA256SUMS").write_text(f"{archive_hash}  recovery.tar.gz\n")
+        (backup / "backup-verification.json").write_text(
+            json.dumps(
+                {
+                    "sha": sha,
+                    "archive_sha256": archive_hash,
+                    "restored_database": restored,
+                    "database": info["database"],
+                },
+                sort_keys=True,
+                indent=2,
+            )
+            + "\n"
+        )
+        rpc(config, "acknowledge", sha)
+        value["old_database"] = info["database"]
+        emit(f"Backup archive and independently restored SQLite verified: {backup}")
+        return backup, restored, archive_hash
+    finally:
+        handover(backup, config)
+
+
 def deploy(sha, config):
     require_sha(sha)
-    backup_root = Path(config["backup_root"])
+    backup_root = Path(config["backup_root"]).resolve()
     if not backup_root.is_relative_to("/home/lightjunction/Backups"):
         raise RuntimeError("Backups must stay under /home/lightjunction/Backups")
     emit(f"Preparing main {sha}")
     try:
         value = rpc(config, "prepare", sha)
+        if value["status"] == "pending_backup":
+            emit(
+                "Archiving a previous interrupted snapshot before preparing this deployment"
+            )
+            make_backup(value, config, backup_root)
+            rpc(config, "cleanup", value["sha"])
+            value = rpc(config, "prepare", sha)
     except Exception:
+        emit("Preparation failed; preserving any unverified server recovery snapshot")
         try:
             rpc(config, "cleanup", sha)
         except Exception:
-            emit("Failed build cleanup needs attention")
+            emit("Preparation cleanup needs attention")
         raise
     if value["status"] == "superseded":
         emit("A newer main commit exists; this deployment was skipped")
@@ -187,24 +249,11 @@ def deploy(sha, config):
         rpc(config, "cleanup", sha)
         emit(f"Already deployed and verified: {sha}")
         return "current"
-    backup = backup_root / (time.strftime("%Y%m%d-%H%M%S") + "-" + sha[:12])
-    backup.mkdir(parents=True, mode=0o700)
-    archive = backup / "recovery.tar.gz"
-    (backup / "prepared.json").write_text(
-        json.dumps(value, sort_keys=True, indent=2) + "\n"
-    )
     activated = False
+    backup = None
     try:
-        emit("Streaming the stopped-service recovery snapshot to the local backup root")
-        with archive.open("wb") as output:
-            remote(config, "snapshot", sha, stdout=output, timeout=360)
-        with tempfile.TemporaryDirectory(
-            prefix="restore-check-", dir=backup
-        ) as directory:
-            restored = verify_backup(archive, Path(directory))
-        archive_hash = digest(archive)
-        (backup / "SHA256SUMS").write_text(f"{archive_hash}  recovery.tar.gz\n")
-        emit(f"Backup archive and independently restored SQLite verified: {backup}")
+        backup, restored, archive_hash = make_backup(value, config, backup_root)
+        archive = backup / "recovery.tar.gz"
         activated = True
         result = rpc(config, "activate", sha)
         if result["status"] == "superseded":
@@ -255,17 +304,17 @@ def deploy(sha, config):
         raise
     finally:
         try:
-            rpc(config, "cleanup", sha)
+            cleanup = rpc(config, "cleanup", sha)
+            if cleanup["status"] == "pending_backup":
+                emit(
+                    "Unverified recovery snapshot retained on the server for the next transfer"
+                )
         except Exception:
             emit("Remote cleanup needs attention")
             raise
         finally:
-            owner = config.get("backup_owner")
-            if owner:
-                for path in backup.rglob("*"):
-                    path.chmod(0o700 if path.is_dir() else 0o600)
-                    shutil.chown(path, owner, owner)
-                shutil.chown(backup, owner, owner)
+            if backup is not None:
+                handover(backup, config)
 
 
 def main():

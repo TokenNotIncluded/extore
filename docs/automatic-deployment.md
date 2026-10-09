@@ -8,6 +8,8 @@
 
 `extore-deploy` 专用 runner 在本机运行，systemd 服务 `extore-actions-runner.service` 开机自启。**本机需要开机联网**；离线时 GitHub 的部署任务等待 runner 上线。
 
+当前 SSH 连接通过本机 `127.0.0.1:7897` 的 HTTP 代理，避免直连生产机时的丢包。代理需保持可用；连接路径在 root 所有的 `/etc/extore-deploy/config.json` 的 `proxy_command` 中配置。
+
 runner 使用独立的 `extore-runner` 用户，没有 SSH 私钥、备份目录权限或 sudo。工作流不检出源码，只调用 root 所有的 `/usr/local/lib/extore-deploy/request.py`，通过受限 Unix socket 请求部署。
 
 独立的 `extore-deploy@.service` 负责部署。它只能接受完整提交 SHA；服务器再次核对它是否为远程 `main` 的当前提交。部署使用单独 SSH 密钥、固定主机公钥和 forced command，不允许任意远程 Shell。源码和原生包由生产机独立的 `extore-build` 用户构建。
@@ -17,11 +19,11 @@ runner 使用独立的 `extore-runner` 用户，没有 SSH 私钥、备份目录
 ## 部署步骤
 
 1. 核对远程 `main`，拉取准确源码和固定子模块，构建原生包并记录 SHA256。
-2. 短暂停止 API 和 worker，将程序、配置、数据库、两把业务密钥、权限、链接和旧包管理信息直接流式写入 `/home/lightjunction/Backups/servers/archczy/extore/日期时间-提交/`，随后恢复旧服务。
-3. 完整读取归档并在独立目录恢复 SQLite，执行 `integrity_check`；传输或校验失败不会安装新版本。
+2. 短暂停止 API 和 worker，在服务器私密临时目录生成包含程序、配置、数据库、两把业务密钥、权限、链接和旧包管理信息的一致归档，随后立即恢复旧服务。网络传输期间旧服务继续运行。
+3. 将归档传到 `/home/lightjunction/Backups/servers/archczy/extore/日期时间-提交/`，比较两端 SHA256，完整读取归档并在独立目录恢复 SQLite，执行 `integrity_check`。本机确认通过前禁止安装新版本；传输失败会保留服务器临时归档，下次任务先完成归档再部署。
 4. 再次核对 `main`，安装包并启动 API 和 worker。
 5. 核对全部安装源码 SHA256、两项服务状态与重启次数、SQLite 完整性、本机与公开 HTTPS 的健康状态和 API 版本，以及所有公开静态文件 SHA256。
-6. 保存当前部署提交和本机 `result.json`，清理本次服务器构建和依赖缓存。服务器不留历史备份副本。
+6. 保存当前部署提交和本机 `result.json`，清理本次服务器构建、依赖缓存和已经过本机校验的临时归档。服务器不留历史备份副本。
 
 失败时，数据库结构未变化则自动恢复旧程序、配置和包管理信息，保留最新业务数据。结构已变化时停止服务并保留业务数据，报告本机恢复归档位置，避免用旧数据库覆盖部署后的交易。回滚需要从本机传回归档。
 

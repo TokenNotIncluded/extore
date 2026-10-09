@@ -120,6 +120,8 @@ def prepared(sha):
 def prepare(sha):
     if sha != main_sha():
         return {"status": "superseded", "sha": sha}
+    if (STATE / "recovery.tar.gz").exists():
+        return {"status": "pending_backup", **load("prepared.json")}
     if (STATE / "current.json").exists():
         current = load("current.json")
         if current["sha"] == sha:
@@ -191,6 +193,7 @@ def prepare(sha):
         "version": version,
         "package": packages[0].name,
         "package_sha256": digest(packages[0]),
+        "package_id": capture("pacman", "-Qp", str(packages[0])),
         "source_sha256": archive_sha256,
         "files": files,
         "old_package": capture("pacman", "-Q", "extore"),
@@ -207,35 +210,70 @@ def prepare(sha):
 
 def snapshot(sha):
     value = prepared(sha)
-    # No on-server backup file: tar is streamed directly to the local backup root.
-    try:
-        run("systemctl", "stop", "extore-worker.service", stdout=sys.stderr)
-        run("systemctl", "stop", "extore-api.service", stdout=sys.stderr)
-        summary = database_summary()
-        save("snapshot.json", {"sha": sha, "database": summary})
-        value = load("prepared.json")
-        value["old_database"] = summary
-        save("prepared.json", value)
-        paths = RUNTIME_PATHS + ["var/lib/extore", value["old_pacman_entry"]]
-        if (STATE / "current.json").exists():
-            paths.append("var/lib/extore-deploy/current.json")
-        run(
-            "tar",
-            "--acls",
-            "--xattrs",
-            "--numeric-owner",
-            "-czf",
-            "-",
-            "-C",
-            "/",
-            *paths,
-        )
-    finally:
-        run("systemctl", "start", *SERVICES, stdout=sys.stderr)
+    archive = STATE / "recovery.tar.gz"
+    if not archive.exists():
+        temporary = STATE / "recovery.partial"
+        try:
+            run("systemctl", "stop", "extore-worker.service", stdout=sys.stderr)
+            run("systemctl", "stop", "extore-api.service", stdout=sys.stderr)
+            summary = database_summary()
+            paths = RUNTIME_PATHS + ["var/lib/extore", value["old_pacman_entry"]]
+            if (STATE / "current.json").exists():
+                paths.append("var/lib/extore-deploy/current.json")
+            run(
+                "tar",
+                "--acls",
+                "--xattrs",
+                "--numeric-owner",
+                "-czf",
+                str(temporary),
+                "-C",
+                "/",
+                *paths,
+                stdout=sys.stderr,
+            )
+            temporary.chmod(0o600)
+            temporary.replace(archive)
+            save(
+                "snapshot.json",
+                {
+                    "sha": sha,
+                    "database": summary,
+                    "archive_sha256": digest(archive),
+                    "local_verified": False,
+                },
+            )
+            value["old_database"] = summary
+            save("prepared.json", value)
+        finally:
+            run("systemctl", "start", *SERVICES, stdout=sys.stderr)
+    info = snapshot_info(sha)
+    if digest(archive) != info["archive_sha256"]:
+        raise RuntimeError("Recovery archive checksum mismatch")
+    # Network transfer happens only after the previous services are running again.
+    with archive.open("rb") as source:
+        shutil.copyfileobj(source, sys.stdout.buffer)
+
+
+def snapshot_info(sha):
+    value = load("snapshot.json")
+    if value["sha"] != sha:
+        raise RuntimeError("No matching recovery snapshot")
+    return value
+
+
+def acknowledge(sha):
+    value = snapshot_info(sha)
+    value["local_verified"] = True
+    save("snapshot.json", value)
+    return {"status": "backup_verified", "sha": sha}
 
 
 def verify(sha, value=None):
     value = value or prepared(sha)
+    installed_package = capture("pacman", "-Q", "extore")
+    if value.get("package_id") and installed_package != value["package_id"]:
+        raise RuntimeError("Installed native package version mismatch")
     sites = list(Path("/usr/lib/extore/.venv/lib").glob("python*/site-packages"))
     if len(sites) != 1:
         raise RuntimeError("Expected exactly one installed Python site directory")
@@ -276,7 +314,7 @@ def verify(sha, value=None):
         "status": "verified",
         "sha": sha,
         "version": value["version"],
-        "package": capture("pacman", "-Q", "extore"),
+        "package": installed_package,
         "database": database_summary(),
     }
 
@@ -285,8 +323,8 @@ def activate(sha):
     value = prepared(sha)
     if sha != main_sha():
         return {"status": "superseded", "sha": sha}
-    if load("snapshot.json")["sha"] != sha:
-        raise RuntimeError("Deployment snapshot is missing")
+    if not snapshot_info(sha).get("local_verified"):
+        raise RuntimeError("The recovery snapshot has not been verified locally")
     run("systemctl", "stop", "extore-worker.service", stdout=sys.stderr)
     run("systemctl", "stop", "extore-api.service", stdout=sys.stderr)
     run("pacman", "-U", "--noconfirm", str(WORK / value["package"]), stdout=sys.stderr)
@@ -307,6 +345,12 @@ def confirm(sha):
 def cleanup(sha):
     if (STATE / "prepared.json").exists() and load("prepared.json")["sha"] != sha:
         raise RuntimeError("Cleanup would affect another deployment")
+    if (STATE / "recovery.tar.gz").exists() and not snapshot_info(sha).get(
+        "local_verified"
+    ):
+        return {"status": "pending_backup", "sha": sha}
+    for name in ["recovery.tar.gz", "recovery.partial"]:
+        (STATE / name).unlink(missing_ok=True)
     if WORK.exists():
         shutil.rmtree(WORK)
     cache = Path("/var/lib/extore-build/cache")
@@ -363,6 +407,8 @@ def main():
     operations = {
         "prepare": prepare,
         "snapshot": snapshot,
+        "snapshot_info": snapshot_info,
+        "acknowledge": acknowledge,
         "activate": activate,
         "verify": verify,
         "confirm": confirm,
