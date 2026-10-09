@@ -1,0 +1,21 @@
+name: Source review snapshot
+on:
+  push:
+    branches: [fix/open-layout-direct-delete-20261009]
+permissions:
+  contents: read
+jobs:
+  snapshot:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+          submodules: recursive
+      - name: Export source without credentials or repository metadata
+        run: tar --exclude=.git --exclude=.venv -czf "$RUNNER_TEMP/extore-source.tar.gz" .
+      - uses: actions/upload-artifact@v4
+        with:
+          name: extore-source-review
+          path: ${{ runner.temp }}/extore-source.tar.gz
+          retention-days: 1
