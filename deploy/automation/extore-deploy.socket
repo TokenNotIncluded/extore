@@ -1,0 +1,14 @@
+[Unit]
+Description=Restricted Extore deployment trigger
+
+[Socket]
+ListenStream=/run/extore-deploy/trigger.sock
+SocketUser=extore-runner
+SocketGroup=extore-runner
+SocketMode=0600
+DirectoryMode=0755
+Accept=yes
+MaxConnections=2
+
+[Install]
+WantedBy=sockets.target

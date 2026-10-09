@@ -246,6 +246,8 @@ node --check extore/static/app.js
 
 ## Arch Linux 原生部署
 
+需要推送 `main` 后自动部署时，见[自动部署](automatic-deployment.md)。它使用专用执行服务，将升级前的恢复材料留在本机统一备份目录，并验证实际上线提交。
+
 [`deploy/arch/PKGBUILD`](../deploy/arch/PKGBUILD) 在目标机用锁定依赖构建运行环境，以 pacman 包管理文件；不复制本地虚拟环境。API 与 worker 使用独立 systemd 服务、低权限 `extore` 用户、只写 `/var/lib/extore`。程序包包含固定版本的预设处理器，不从商家指定的目录加载程序。
 
 首次无人值守部署可执行 `sudo -u extore extore-admin bootstrap`：生成随机首次密码，存于 `/var/lib/extore/bootstrap-password.txt`，权限 0600，不输出到日志。由服务器操作人员私密读取并完成 Passkey 注册；注册成功后密码文件也会删除。

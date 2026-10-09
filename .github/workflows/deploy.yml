@@ -1,0 +1,33 @@
+name: Deploy production
+run-name: Deploy main ${{ github.sha }}
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: extore-production
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    if: >-
+      github.repository == 'TokenNotIncluded/extore' &&
+      github.ref == 'refs/heads/main' &&
+      (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
+    runs-on: [self-hosted, linux, x64, extore-deploy]
+    timeout-minutes: 25
+    environment:
+      name: production
+      url: https://extore.lmm.best
+    steps:
+      # The runner has no SSH keys, backup access, sudo or source checkout.
+      # This root-owned entry point talks to a restricted local socket service.
+      - name: Build, back up, deploy and verify the current main commit
+        env:
+          EXTORE_DEPLOY_SHA: ${{ github.sha }}
+        run: python3 /usr/local/lib/extore-deploy/request.py "$EXTORE_DEPLOY_SHA"

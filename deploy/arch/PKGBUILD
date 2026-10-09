@@ -1,6 +1,6 @@
 pkgname=extore
 pkgver=0.11.3
-pkgrel=2
+pkgrel=3
 pkgdesc='Single-merchant redemption and fulfillment service'
 arch=('x86_64')
 url='https://github.com/TokenNotIncluded/extore'

@@ -13,6 +13,7 @@
 
 <p align="center">
   <a href="https://github.com/TokenNotIncluded/extore/actions/workflows/ci.yml"><img src="https://github.com/TokenNotIncluded/extore/actions/workflows/ci.yml/badge.svg?branch=main" alt="CI"></a>
+  <a href="https://github.com/TokenNotIncluded/extore/actions/workflows/deploy.yml"><img src="https://github.com/TokenNotIncluded/extore/actions/workflows/deploy.yml/badge.svg?branch=main" alt="Deployment"></a>
   <a href="https://pypi.org/project/extore/"><img src="https://img.shields.io/pypi/v/extore?color=245449" alt="PyPI version"></a>
   <a href="https://github.com/TokenNotIncluded/extore/blob/main/pyproject.toml"><img src="https://img.shields.io/badge/Python-3.12%2B-3776AB?logo=python&amp;logoColor=white" alt="Python 3.12+"></a>
   <a href="https://github.com/TokenNotIncluded/extore/blob/main/docs/webmcp.md"><img src="https://img.shields.io/badge/WebMCP-native-245449" alt="Native WebMCP"></a>
