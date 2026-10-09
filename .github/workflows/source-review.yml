@@ -1,11 +1,11 @@
-name: Source review snapshot
+name: Source review tools
 on:
   push:
     branches: [fix/open-layout-direct-delete-20261009]
 permissions:
   contents: read
 jobs:
-  snapshot:
+  tools:
     runs-on: ubuntu-22.04
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
@@ -16,10 +16,8 @@ jobs:
         with:
           version: "0.12.20"
       - run: uv sync --frozen --python 3.13
-      - name: Export locked test dependencies without source or credentials
-        run: tar -C .venv/lib/python3.13/site-packages -czf "$RUNNER_TEMP/extore-test-dependencies.tar.gz" .
       - uses: actions/upload-artifact@v4
         with:
-          name: extore-test-dependencies
-          path: ${{ runner.temp }}/extore-test-dependencies.tar.gz
+          name: extore-formatter
+          path: .venv/bin/ruff
           retention-days: 1
