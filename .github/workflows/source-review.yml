@@ -12,10 +12,14 @@ jobs:
         with:
           persist-credentials: false
           submodules: recursive
-      - name: Export source without credentials or repository metadata
-        run: tar --exclude=.git --exclude=.venv -czf "$RUNNER_TEMP/extore-source.tar.gz" .
+      - uses: astral-sh/setup-uv@94527f2e458b27549849d47d273a16bec83a01e9
+        with:
+          version: "0.12.20"
+      - run: uv sync --frozen --python 3.13
+      - name: Export locked test dependencies without source or credentials
+        run: tar -C .venv/lib/python3.13/site-packages -czf "$RUNNER_TEMP/extore-test-dependencies.tar.gz" .
       - uses: actions/upload-artifact@v4
         with:
-          name: extore-source-review
-          path: ${{ runner.temp }}/extore-source.tar.gz
+          name: extore-test-dependencies
+          path: ${{ runner.temp }}/extore-test-dependencies.tar.gz
           retention-days: 1
