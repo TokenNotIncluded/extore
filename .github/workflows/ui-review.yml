@@ -21,7 +21,7 @@ jobs:
           mkdir -p /tmp/ui-review/wheels
           uv sync --frozen --python 3.12
           uv export --frozen --no-emit-project --no-hashes > /tmp/ui-review/requirements.txt
-          python3 -m pip download --python-version 311 --only-binary=:all: -r /tmp/ui-review/requirements.txt -d /tmp/ui-review/wheels
+          python3 -m pip download --python-version 313 --only-binary=:all: -r /tmp/ui-review/requirements.txt -d /tmp/ui-review/wheels
           tar -czf /tmp/ui-review/official-processors.tar.gz processors/official/extore_processors
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
         with:
