@@ -1,0 +1,37 @@
+name: Management UI and identity
+on:
+  pull_request:
+    paths:
+      - 'extore/auth.py'
+      - 'extore/static/**'
+      - 'tests/**'
+      - 'scripts/check_management_ui.py'
+      - '.github/workflows/ui-checks.yml'
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  check:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          persist-credentials: false
+          submodules: recursive
+      - uses: astral-sh/setup-uv@94527f2e458b27549849d47d273a16bec83a01e9
+        with:
+          version: "0.12.20"
+      - run: uv sync --frozen --python 3.12
+      - run: uv run ruff check extore scripts tests examples
+      - run: uv run ruff format --check extore scripts tests examples
+      - run: node --test tests/*.test.cjs
+      - run: uv run pytest -q tests/test_passkeys.py tests/test_passkey_reauth.py tests/test_shop_account_auth.py tests/test_browser_shop_scope.py
+      - run: uv run --with playwright==1.57.0 playwright install --with-deps chromium
+      - run: uv run --with playwright==1.57.0 python scripts/check_management_ui.py
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        if: always()
+        with:
+          name: management-ui-review
+          path: output/ui-review
+          retention-days: 7

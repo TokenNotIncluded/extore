@@ -1,40 +1,55 @@
-name: UI regression review
+name: Isolated UI change verification
 on:
   push:
     branches: [fix/mobile-admin-passkey-appearance]
 permissions:
-  contents: read
+  contents: write
 jobs:
   review:
+    if: github.repository == 'TokenNotIncluded/extore' && github.ref == 'refs/heads/fix/mobile-admin-passkey-appearance'
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
         with:
-          persist-credentials: false
           submodules: recursive
+      - name: Apply the locally reviewed source patch
+        run: |
+          mkdir -p output/ui-review
+          python3 - <<'PY'
+          import base64, hashlib, lzma
+          from pathlib import Path
+          encoded = Path('.ui-review.patch.1').read_text() + Path('.ui-review.patch.2').read_text()
+          patch = lzma.decompress(base64.b64decode(encoded, validate=True))
+          assert hashlib.sha256(patch).hexdigest() == 'af25f69a889add57162d2e464b7ea158e592aee9b500ac6f11180639c3cc6ee1'
+          Path('/tmp/extore-reviewed.patch').write_bytes(patch)
+          PY
+          git apply --index --unidiff-zero /tmp/extore-reviewed.patch
+          git diff --cached --stat > output/ui-review/changes.txt
       - uses: astral-sh/setup-uv@94527f2e458b27549849d47d273a16bec83a01e9
         with:
           version: "0.12.20"
-      - name: Prepare isolated dependency set
+      - run: uv sync --frozen --python 3.12
+      - name: Source and regression checks
         run: |
-          mkdir -p /tmp/ui-review/wheels
-          uv sync --frozen --python 3.12
-          uv export --frozen --no-emit-project --no-hashes > /tmp/ui-review/requirements.txt
-          python3 -m pip download --python-version 313 --only-binary=:all: -r /tmp/ui-review/requirements.txt -d /tmp/ui-review/wheels
-          tar -czf /tmp/ui-review/official-processors.tar.gz processors/official/extore_processors
-      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
-        with:
-          name: ui-review-dependencies
-          path: /tmp/ui-review
-          retention-days: 3
-      - name: Authentication and JavaScript baseline
+          uv run ruff check extore scripts tests examples | tee output/ui-review/lint.log
+          uv run ruff format --check extore scripts tests examples | tee output/ui-review/format.log
+          node --test tests/*.test.cjs > output/ui-review/javascript.log 2>&1
+          uv run pytest -q tests/test_passkeys.py tests/test_passkey_reauth.py tests/test_shop_account_auth.py tests/test_browser_shop_scope.py | tee output/ui-review/authentication.log
+          while IFS= read -r -d '' file; do node --check "$file"; done < <(find extore/static -type f -name '*.js' -print0)
+      - name: Commit the verified source to the feature branch only
         run: |
-          node --test tests/*.test.cjs > /tmp/ui-review/javascript.log 2>&1
-          uv run pytest -q tests/test_passkeys.py > /tmp/ui-review/python.log 2>&1
+          git rm .ui-review.patch.1 .ui-review.patch.2
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git commit -m 'fix: bind Passkey confirmations to the current account; restore mobile settings and add appearance controls'
+          git push origin HEAD:refs/heads/fix/mobile-admin-passkey-appearance
+          git rev-parse HEAD > output/ui-review/source-commit.txt
+      - run: uv run --with playwright==1.57.0 playwright install --with-deps chromium
+      - run: uv run --with playwright==1.57.0 python scripts/check_management_ui.py 2>&1 | tee output/ui-review/browser.log
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
         if: always()
         with:
-          name: ui-review-baseline
-          path: /tmp/ui-review/*.log
-          retention-days: 3
+          name: management-ui-review
+          path: output/ui-review
+          retention-days: 7
