@@ -1,13 +1,13 @@
-.management-shell { --management-gap: 2rem; }
-.management-shell .admin-top { padding-bottom: 1.5rem; margin-bottom: 1.75rem; border-bottom: 1px dashed var(--dashed-line); align-items: start; }
+.management-shell { --management-gap: 3rem; }
+.management-shell .admin-top { padding-bottom: 1.5rem; margin-bottom: 1.75rem; align-items: start; border: 0; }
 .management-shell .admin-top h1 { margin: 0 0 .35rem; font-size: 2rem; line-height: 1.35; }
 .management-shell .admin-top p { margin: 0; font-size: .88rem; }
 .management-shell .admin-top > button { min-height: 44px; flex: 0 0 auto; font-size: .85rem; }
 .management-layout { display: grid; grid-template-columns: 184px minmax(0, 1fr); align-items: start; gap: var(--management-gap); }
-.management-navigation { min-width: 0; position: sticky; top: 1.5rem; }
-.management-navigation-group + .management-navigation-group { margin-top: 1.35rem; }
-.management-navigation-group h2 { margin: 0 0 .4rem .7rem; color: var(--muted); font-size: .75rem; font-weight: 500; }
-.management-navigation-group button { display: block; width: 100%; text-align: start; min-height: 44px; padding: .65rem .7rem; margin: .2rem 0; border-radius: 6px; background: transparent; color: var(--muted); font-size: .9rem; font-weight: 500; line-height: 1.45; }
+.management-navigation { min-width: 0; position: sticky; top: 1.5rem; max-height: calc(100dvh - 3rem); overflow: auto; scrollbar-width: thin; }
+.management-navigation-group + .management-navigation-group { margin-top: 1.5rem; }
+.management-navigation-group h2 { margin: 0 0 .5rem .8rem; color: var(--muted); font-size: .75rem; font-weight: 500; }
+.management-navigation-group button { display: block; width: 100%; text-align: start; min-height: 44px; padding: .7rem .8rem; margin: .2rem 0; border-radius: 10px; background: transparent; color: var(--muted); font-size: .9rem; font-weight: 500; line-height: 1.45; }
 .management-navigation-group button:hover { background: var(--warm); color: var(--ink); }
 .management-navigation-group button.active { background: var(--status-bg); color: var(--green); font-weight: 600; }
 .management-mobile-navigation { display: none; }
@@ -21,18 +21,22 @@
 .management-workspace :is(button, summary, select) { min-height: 44px; }
 .management-workspace :is(input:not([type="checkbox"]), textarea, select) { font-size: 16px; }
 @media (max-width: 980px) {
-  .management-shell { --management-gap: 1.25rem; }
+  .management-shell { --management-gap: 1.75rem; }
   .management-layout { grid-template-columns: 160px minmax(0, 1fr); }
 }
 @media (max-width: 860px) {
-  .management-shell .admin-top { margin-bottom: 1.25rem; padding-bottom: 1.25rem; }
+  .management-shell .admin-top { margin-bottom: .75rem; padding-bottom: .75rem; }
   .management-shell .admin-top h1 { font-size: 1.7rem; }
   .management-layout { display: block; }
-  .management-navigation { position: static; margin-bottom: 1.75rem; }
+  .management-navigation { position: sticky; top: 0; z-index: 10; margin-bottom: 1.75rem; padding-block: .75rem; background: var(--paper); max-height: calc(100dvh - 1rem); overflow: visible; }
   .management-desktop-navigation { display: none; }
-  .management-mobile-navigation { display: block; }
+  .management-desktop-navigation[data-open] { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 20px 10px; margin-top: 14px; padding: 20px 12px; max-height: calc(100dvh - 140px); overflow: auto; overscroll-behavior: contain; background: var(--white); border-radius: 16px; box-shadow: 0 10px 30px rgb(0 0 0 / 10%); }
+  .management-navigation-group + .management-navigation-group { margin-top: 0; }
+  .management-mobile-navigation { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: end; gap: 12px; }
   .management-mobile-navigation label { display: block; color: var(--muted); font-size: .8rem; margin-bottom: .4rem; }
-  .management-mobile-navigation select { width: 100%; font-size: 16px; min-height: 46px; }
+  .management-mobile-navigation select { width: 100%; font-size: 16px; min-height: 46px; border-color: var(--line); border-radius: 10px; }
+  #management-menu-toggle { min-height: 46px; padding-inline: 16px; color: var(--green); background: var(--status-bg); border-radius: 10px; }
+  #management-menu-toggle[aria-expanded="true"] { outline: 2px solid var(--green); outline-offset: -2px; }
   .management-workspace h2 { font-size: 1.4rem; }
 }
 @media (max-width: 420px) {

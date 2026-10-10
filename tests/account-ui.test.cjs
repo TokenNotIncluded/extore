@@ -102,7 +102,7 @@ function fixture(options = {}) {
   const ui = context.window.ExtoreAccount;
   const instance = ui.mount({ root, auth: options.auth || {}, mode: options.mode || "login", token: options.token || "", isCurrent: () => current,
     language: options.language || "zh-CN",
-    navigate: (url) => navigations.push(url), passkey: async () => { passkeyCalls++; return options.verified; }, onAuth: (auth) => adopted.push(auth),
+    navigate: (url) => navigations.push(url), passkey: async (...args) => { passkeyCalls++; options.onPasskey?.(...args); return options.verified; }, onAuth: (auth) => adopted.push(auth),
     copyProcessorPrompt: options.copyProcessorPrompt,
     api(url, body, method, extra) { return new Promise((resolve, reject) => requests.push({ url, body, method, extra, resolve, reject })); },
   });
@@ -1101,19 +1101,20 @@ test("password change adopts only a new session for the verified original shop",
   assert.doesNotMatch(p.root.innerHTML, /old-private-password|new-private-password/);
 });
 
-test("fresh Passkey may replace the session but cannot change the target shop", async () => {
-  const auth = { ...shopAuth, session_id: "old-session" };
-  const verified = { ...auth, session_id: "new-session" };
-  const p = fixture({ auth, verified, mode: "confirm" });
+test("fresh Passkey keeps the original session and rejects both session and shop changes", async () => {
+  const auth = { ...shopAuth, session_id: "current-session" };
+  const p = fixture({ auth, verified: auth, mode: "confirm" });
   let called = 0;
   p.instance.confirmFresh(async () => { called++; });
   await p.node("#account-fresh-passkey").emit("click");
-  assert.equal(called, 1); assert.equal(p.adopted[0].session_id, "new-session");
-  const q = fixture({ auth, verified: { ...verified, shop_id: "shop-two" }, mode: "confirm" });
-  q.instance.confirmFresh(async () => { called++; });
-  await q.node("#account-fresh-passkey").emit("click");
-  assert.equal(called, 1); assert.equal(q.adopted.length, 0);
-  assert.match(q.node("#account-error").textContent, /账户或店铺已改变/);
+  assert.equal(called, 1); assert.equal(p.adopted[0].session_id, "current-session");
+  for (const verified of [{ ...auth, session_id: "different-session" }, { ...auth, shop_id: "shop-two" }, rootAuth]) {
+    const q = fixture({ auth, verified, mode: "confirm" });
+    q.instance.confirmFresh(async () => { called++; });
+    await q.node("#account-fresh-passkey").emit("click");
+    assert.equal(called, 1); assert.equal(q.adopted.length, 0);
+    assert.match(q.node("#account-error").textContent, /账户或店铺已改变/);
+  }
 });
 
 test("fresh confirmation displays the owner shop name and email as escaped, separately wrapping text", () => {
@@ -1154,4 +1155,20 @@ test("display metadata changes cannot replace the authenticated shop or affect s
   assert.equal(writes, 1);
   assert.equal(q.adopted.length, 0);
   assert.match(q.node("#account-error").textContent, /账户或店铺已改变/);
+});
+
+
+test("root and merchant confirmations bind Passkey to the captured account and session", async () => {
+  for (const auth of [{ ...rootAuth, session_id: "root-session" }, { ...shopAuth, session_id: "shop-session" }]) {
+    let captured;
+    const p = fixture({ auth, verified: auth, mode: "confirm", onPasskey: (...args) => { captured = args; } });
+    let writes = 0;
+    p.instance.confirmFresh(async () => { writes++; });
+    await p.node("#account-fresh-passkey").emit("click");
+    assert.equal(captured[0], false);
+    assert.equal(captured[2].reauthenticate, true);
+    assert.equal(captured[2].expectedScope, auth.shop_id || "platform");
+    assert.equal(captured[2].expectedSessionId, auth.session_id);
+    assert.equal(writes, 1);
+  }
 });

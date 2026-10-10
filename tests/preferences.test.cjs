@@ -94,6 +94,7 @@ function browser(options = {}) {
 test("defaults follow browser appearance and the first supported preferred language", () => {
   const b = browser({ dark: true, languages: ["fr-FR", "en-GB", "zh-CN"] });
   assert.deepEqual(plain(b.preferences.settings), {
+    accent: "green",
     theme: "auto",
     language: "auto",
   });
@@ -137,7 +138,7 @@ test("automatic settings update live and notify only when preference state chang
   assert.equal(notifications.length, 2);
   assert.equal(b.element.lang, "zh-CN");
   assert.deepEqual(notifications[1], {
-    settings: { theme: "auto", language: "auto" },
+    settings: { theme: "auto", accent: "green", language: "auto" },
     resolved: { theme: "dark", language: "zh-CN" },
   });
   b.preferences.setTheme("auto");
@@ -192,6 +193,7 @@ test("existing explicit language selections are preserved and invalid stored val
     languages: ["en-US"],
   });
   assert.deepEqual(plain(b.preferences.settings), {
+    accent: "green",
     theme: "auto",
     language: "auto",
   });
@@ -221,6 +223,7 @@ test("changes from another tab resolve immediately and unrelated storage is igno
   b.storageCleared();
   assert.equal(notified, 4);
   assert.deepEqual(plain(b.preferences.settings), {
+    accent: "green",
     theme: "auto",
     language: "auto",
   });
@@ -238,6 +241,7 @@ test("blocked storage does not prevent selecting preferences for the current pag
     b.preferences.setTheme("light");
     b.preferences.setLanguage("zh-CN");
     assert.deepEqual(plain(b.preferences.settings), {
+      accent: "green",
       theme: "light",
       language: "zh-CN",
     });
@@ -276,4 +280,47 @@ test("getter snapshots cannot mutate preferences and invalid choices are rejecte
   b.preferences.subscribe(() => notified++);
   assert.doesNotThrow(() => b.preferences.setTheme("dark"));
   assert.equal(notified, 1);
+});
+
+
+test("each accent persists independently of theme and language without inline styles", () => {
+  for (const accent of ["green", "blue", "violet", "rose", "amber", "graphite"]) {
+    const b = browser({ dark: true, languages: ["en-US"] });
+    const resolved = plain(b.preferences.resolved);
+    let notifications = 0;
+    b.preferences.subscribe(() => notifications++);
+    b.preferences.setAccent(accent);
+    assert.equal(b.preferences.settings.accent, accent);
+    assert.equal(b.element.dataset.accent, accent);
+    assert.equal(b.values.get("extore_accent"), accent);
+    assert.deepEqual(plain(b.preferences.resolved), resolved);
+    assert.equal(notifications, accent === "green" ? 0 : 1);
+    b.preferences.setAccent(accent);
+    assert.equal(notifications, accent === "green" ? 0 : 1);
+    const reloaded = browser({ stored: Object.fromEntries(b.values) });
+    assert.equal(reloaded.element.dataset.accent, accent);
+  }
+});
+
+test("accent storage changes and clear are live, invalid values fall back safely", () => {
+  const b = browser({ stored: { extore_accent: "invalid" } });
+  assert.equal(b.element.dataset.accent, "green");
+  assert.throws(() => b.preferences.setAccent("url(javascript:bad)"), /Invalid accent/);
+  assert.equal(b.values.get("extore_accent"), "invalid");
+  b.storageChanged("extore_accent", "violet");
+  assert.equal(b.element.dataset.accent, "violet");
+  b.storageChanged("extore_accent", "blue", {});
+  assert.equal(b.element.dataset.accent, "violet");
+  b.storageChanged("extore_accent", "unknown");
+  assert.equal(b.element.dataset.accent, "green");
+  b.preferences.setAccent("rose");
+  b.storageCleared();
+  assert.equal(b.element.dataset.accent, "green");
+  for (const options of [{ denyStorage: true }, { denyRead: true, denyWrite: true }]) {
+    const privateBrowser = browser(options);
+    privateBrowser.preferences.setAccent("blue");
+    assert.equal(privateBrowser.element.dataset.accent, "blue");
+    privateBrowser.themeChanged(true);
+    assert.equal(privateBrowser.element.dataset.accent, "blue");
+  }
 });

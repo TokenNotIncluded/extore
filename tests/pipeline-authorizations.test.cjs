@@ -291,8 +291,8 @@ test("an upgrade between reviewing metadata and DELETE is version-pinned and res
   assert.equal(p.requests.filter((request) => request.method === "DELETE").length, 1);
 });
 
-test("real account Passkey verification rotates the session before the pinned revoke requests", async () => {
-  const fresh = { ...shopAuth, session_id: "real-fresh-session" };
+test("real account Passkey verification keeps the same session for pinned revoke requests", async () => {
+  const fresh = { ...shopAuth };
   const p = fixture({ realAccount: true, passkey: async () => fresh }), value = row(); await confirmation(p, value);
   const pending = p.node("#account-fresh-passkey").emit("click"); await flush();
   assert.equal(p.requests[2].url, "/auth/status"); assert.equal(p.requests[2].extra.expectedSessionId, fresh.session_id);

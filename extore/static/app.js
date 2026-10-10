@@ -287,7 +287,7 @@ function managementAuthority(auth = authStatus) {
   return JSON.stringify([auth.role, auth.shop_id, auth.superadmin === true, auth.link_id || auth.staff_id || null]);
 }
 function managementHeaders(path, options = {}, headers = {}) {
-  const bound = /^\/(?:admin|manage|platform|shop)(?:\/|\?|$)/.test(path) || /^\/auth\/(?:passkeys|register\/(?:options|verify)|password\/change|totp|reauth\/password|logout)(?:\/|\?|$)/.test(path);
+  const bound = /^\/(?:admin|manage|platform|shop)(?:\/|\?|$)/.test(path) || /^\/auth\/(?:passkeys|register\/(?:options|verify)|password\/change|totp|reauth\/(?:password|passkey\/(?:options|verify))|logout)(?:\/|\?|$)/.test(path);
   if (bound) {
     const { expectedScope: scope, expectedSessionId: sessionId } = managementOptions(options);
     if (typeof scope === "string") headers["X-Extore-Shop-Scope"] = scope;
@@ -573,6 +573,15 @@ $("#brand").addEventListener("click", () => {
 });
 function syncPreferenceControls() {
   $("#theme").value = preferences.settings.theme;
+  $("#accent").value = preferences.settings.accent || "green";
+  $("#appearance-label").textContent = tr("外观", "Appearance");
+  $("#theme-label").textContent = tr("颜色主题", "Color theme");
+  $("#accent-label").textContent = tr("强调色", "Accent color");
+  $("#language-label").textContent = tr("语言", "Language");
+  $("#appearance-note").textContent = tr("自动保存到此浏览器。", "Saved in this browser.");
+  $("#accent").setAttribute("aria-label", tr("强调色", "Accent color"));
+  for (const [value, cn, en] of [["green", "松绿", "Pine"], ["blue", "海蓝", "Ocean"], ["violet", "紫罗兰", "Violet"], ["rose", "玫瑰", "Rose"], ["amber", "琥珀", "Amber"], ["graphite", "石墨", "Graphite"]])
+    $(`#accent option[value=${value}]`).textContent = tr(cn, en);
   $("#language").value = preferences.settings.language;
   $("#theme").setAttribute("aria-label", tr("主题", "Theme"));
   $("#language").setAttribute("aria-label", tr("语言", "Language"));
@@ -598,6 +607,14 @@ $("#language").addEventListener("change", () =>
 $("#theme").addEventListener("change", () =>
   preferences.setTheme($("#theme").value),
 );
+$("#accent").addEventListener("change", () => preferences.setAccent($("#accent").value));
+$("#appearance").addEventListener("keydown", (event) => {
+  if (event.key === "Escape") { $("#appearance").open = false; $("#appearance summary").focus(); }
+});
+document.addEventListener?.("click", (event) => {
+  const appearance = $("#appearance");
+  if (appearance.open && !appearance.contains(event.target)) appearance.open = false;
+});
 window.addEventListener("popstate", start);
 window.addEventListener("hashchange", () => {
   if (location.pathname === "/cli/owner") start();
@@ -1384,8 +1401,9 @@ async function passkey(register = false, name = null, options = {}) {
   options = managementOptions(options);
   const generation = routeLoadId, pathname = location.pathname;
   const active = () => (options.isCurrent ? options.isCurrent() : generation === routeLoadId && pathname === location.pathname);
+  const ceremony = register ? "register" : options.reauthenticate ? "reauth/passkey" : "login";
   const publicOptions = await api(
-    "/auth/" + (register ? "register" : "login") + "/options",
+    "/auth/" + ceremony + "/options",
     {}, "POST", options,
   );
   if (!active()) throw new DOMException("Account page changed", "AbortError");
@@ -1409,7 +1427,7 @@ async function passkey(register = false, name = null, options = {}) {
       ? encode(c.response.userHandle)
       : null;
   }
-  await api("/auth/" + (register ? "register" : "login") + "/verify", {
+  await api("/auth/" + ceremony + "/verify", {
     credential: {
       id: c.id,
       rawId: encode(c.rawId),
@@ -1420,7 +1438,7 @@ async function passkey(register = false, name = null, options = {}) {
     name: name || $("#key-name")?.value || "我的 Passkey",
   }, "POST", options);
   if (!active()) throw new DOMException("Account page changed", "AbortError");
-  return api("/auth/status");
+  return api("/auth/status", undefined, "GET", options);
 }
 async function admin() {
   stopPoll();
@@ -1521,24 +1539,38 @@ function shell() {
     { name: tr("店铺设置", "Shop settings"), keys: ["profiles", "commerce", "proxy", "security"] },
     { name: tr("平台管理", "Platform settings"), keys: ["shops", "mail"] },
   ].map((group) => ({ ...group, items: group.keys.map((key) => items.find(([value]) => value === key)).filter(Boolean) })).filter((group) => group.items.length);
-  app.innerHTML = `<div class="management-shell"><div class="admin-top"><div><h1>${role === "staff" ? tr("商品管理", "Product management") : tr("商家后台", "Merchant dashboard")}</h1><p id="management-identity" class="muted">${esc(managementIdentity())}</p></div><button id="logout" class="secondary">${tr("退出登录", "Sign out")}</button></div><div class="management-layout"><nav class="management-navigation" aria-label="${tr("管理导航", "Management navigation")}"><div class="management-mobile-navigation"><label for="management-section">${tr("当前工作区", "Workspace")}</label><select id="management-section">${groups.map((group) => `<optgroup label="${esc(group.name)}">${group.items.map(([value, label]) => `<option value="${value}" ${tab === value ? "selected" : ""}>${esc(label)}</option>`).join("")}</optgroup>`).join("")}</select></div><div class="management-desktop-navigation">${groups.map((group) => `<section class="management-navigation-group"><h2>${esc(group.name)}</h2>${group.items.map(([value, label]) => `<button type="button" data-tab="${value}" ${tab === value ? 'class="active" aria-current="page"' : ""}>${esc(label)}</button>`).join("")}</section>`).join("")}</div></nav><div id="workspace" class="management-workspace"></div></div></div>`;
+  app.innerHTML = `<div class="management-shell"><div class="admin-top"><div><h1>${role === "staff" ? tr("商品管理", "Product management") : tr("商家后台", "Merchant dashboard")}</h1><p id="management-identity" class="muted">${esc(managementIdentity())}</p></div><button id="logout" class="secondary">${tr("退出登录", "Sign out")}</button></div><div class="management-layout"><nav class="management-navigation" aria-label="${tr("管理导航", "Management navigation")}"><div class="management-mobile-navigation"><div><label for="management-section">${tr("当前工作区", "Workspace")}</label><select id="management-section">${groups.map((group) => `<optgroup label="${esc(group.name)}">${group.items.map(([value, label]) => `<option value="${value}" ${tab === value ? "selected" : ""}>${esc(label)}</option>`).join("")}</optgroup>`).join("")}</select></div><button id="management-menu-toggle" class="secondary" type="button" aria-expanded="false" aria-controls="management-navigation-items">${tr("设置目录", "All pages")}</button></div><div id="management-navigation-items" class="management-desktop-navigation">${groups.map((group) => `<section class="management-navigation-group"><h2>${esc(group.name)}</h2>${group.items.map(([value, label]) => `<button type="button" data-tab="${value}" ${tab === value ? 'class="active" aria-current="page"' : ""}>${esc(label)}</button>`).join("")}</section>`).join("")}</div></nav><div id="workspace" class="management-workspace"></div></div></div>`;
   on("#logout", async () => {
     progressBoardController?.dispose(); progressBoardController = null;
     await api("/auth/logout", {});
     navigate("/admin");
   });
   const choose = (value, mobile = false) => {
-    if (!items.some(([key]) => key === value) || tab === value) return;
+    if (!items.some(([key]) => key === value)) return;
+    if (tab === value) {
+      if (mobile) { closeMenu(); $("#management-section").focus(); }
+      return;
+    }
     tab = value;
     shell();
     const target = mobile ? $("#management-section") : $(`[data-tab="${value}"]`);
     target?.focus?.();
     perform(renderTab);
   };
+  const menu = $("#management-menu-toggle"), navigation = $("#management-navigation-items");
+  const closeMenu = () => { menu.setAttribute("aria-expanded", "false"); navigation.removeAttribute("data-open"); };
+  on("#management-menu-toggle", () => {
+    const open = menu.getAttribute("aria-expanded") !== "true";
+    menu.setAttribute("aria-expanded", String(open));
+    navigation.toggleAttribute("data-open", open);
+  });
+  navigation.addEventListener("keydown", (event) => {
+    if (event.key === "Escape") { closeMenu(); menu.focus(); }
+  });
   on("#management-section", () => choose($("#management-section").value, true), "change");
   document.querySelectorAll("[data-tab]").forEach((b) =>
     b.addEventListener("click", () => {
-      choose(b.dataset.tab);
+      choose(b.dataset.tab, menu.getAttribute("aria-expanded") === "true");
     }),
   );
 }

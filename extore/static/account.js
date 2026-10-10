@@ -89,7 +89,7 @@
         clearTotpSetup();
         throw new Error("当前登录账户或店铺已改变，请重新打开后台后再操作");
       }
-      if (allowFreshSession) { auth = current; onAuth(current); }
+      if (allowFreshSession || verified) { auth = current; onAuth(current); }
       return true;
     }
     function showTotpSetup(result) {
@@ -181,12 +181,18 @@
       on("#account-fresh-passkey", "click", async () => {
         if (!current()) return;
         if (typeof passkey !== "function") throw new Error("Passkey 模块未加载，请刷新页面");
-        const verified = await passkey(false, null, { signal: controller.signal, isCurrent: current });
-        if (!current() || !await checkScope(true, verified) || !current()) return;
+        const verified = await passkey(false, null, {
+          signal: controller.signal, isCurrent: current, reauthenticate: true,
+          expectedScope: auth.shop_id || (rootScope(auth) ? "platform" : undefined),
+          expectedSessionId: auth.session_id,
+        });
+        if (!current() || !await checkScope(false, verified) || !current()) return;
         target.innerHTML = "";
         await handler();
       });
       on("#account-fresh-cancel", "click", () => { if (!current()) return; options.onCancel?.(); target.innerHTML = ""; });
+      target.scrollIntoView?.({ block: "nearest" });
+      $(shopScope(auth) ? "#fresh-password" : "#account-fresh-passkey")?.focus();
     }
     const completed = (message) => { page(tr("操作已完成", "Done"), `<section class="panel"><p>${esc(message)}</p><a href="/account/login">${tr("返回登录", "Return to sign in")}</a></section>`); };
 
