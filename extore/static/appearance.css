@@ -1,0 +1,50 @@
+/* Accent choices are independent of the light/dark surface colors. */
+:root[data-accent="blue"] { --green: #2457bd; --button-hover: #1b4393; --status-bg: #e5edfc; --selection: #cbddff; }
+:root[data-accent="violet"] { --green: #7041b1; --button-hover: #57308e; --status-bg: #eee6f8; --selection: #e1cef8; }
+:root[data-accent="rose"] { --green: #a53560; --button-hover: #81284a; --status-bg: #f9e5ed; --selection: #f2cddd; }
+:root[data-accent="amber"] { --green: #865006; --button-hover: #653b04; --status-bg: #f8edcf; --selection: #f3dca6; }
+:root[data-accent="graphite"] { --green: #46505e; --button-hover: #303945; --status-bg: #e8ebef; --selection: #d3dbe5; }
+:root[data-theme="dark"][data-accent="blue"] { --green: #a6c5ff; --button-hover: #c3d8ff; --status-bg: #253650; --selection: #a6c5ff; }
+:root[data-theme="dark"][data-accent="violet"] { --green: #d0b1fa; --button-hover: #e0cafa; --status-bg: #3d2e51; --selection: #d0b1fa; }
+:root[data-theme="dark"][data-accent="rose"] { --green: #f5aec9; --button-hover: #fac9db; --status-bg: #4d2d3b; --selection: #f5aec9; }
+:root[data-theme="dark"][data-accent="amber"] { --green: #f0ca84; --button-hover: #f8dfae; --status-bg: #493b23; --selection: #f0ca84; }
+:root[data-theme="dark"][data-accent="graphite"] { --green: #c4cedc; --button-hover: #e1e6ed; --status-bg: #343b46; --selection: #c4cedc; }
+.appearance-control { position: relative; }
+.appearance-control > summary { display: flex; align-items: center; gap: 8px; min-height: 44px; padding: 8px 10px; cursor: pointer; list-style: none; color: var(--ink); border-radius: 10px; white-space: nowrap; }
+.appearance-control > summary::-webkit-details-marker { display: none; }
+.appearance-control > summary:hover, .appearance-control[open] > summary { background: var(--warm); }
+.appearance-icon { width: 17px; height: 17px; border: 2px solid var(--green); border-radius: 50%; background: linear-gradient(90deg, var(--green) 50%, transparent 50%); }
+.appearance-panel { position: absolute; z-index: 30; inset-inline-end: 0; top: calc(100% + 10px); width: 260px; max-width: calc(100vw - 40px); padding: 22px; border-radius: 18px; background: var(--white); box-shadow: 0 12px 45px rgb(0 0 0 / 16%); }
+.appearance-panel .field { margin: 0 0 16px; gap: 6px; }
+.header-right .appearance-panel select { width: 100%; min-height: 44px; padding: 9px 12px; background: var(--paper); border: 1px solid var(--line); font-size: 16px; }
+.appearance-panel .caption { font-size: 12px; }
+header .source-link { background: transparent; border: 0; }
+body:has(.management-shell, .account-page.narrow) :is(header, footer) { background-image: none; }
+/* The dashboard is a workspace, not a stack of torn paper cards. */
+.management-shell .panel, .account-page.narrow .panel { border-radius: 18px; filter: none; padding: clamp(20px, 3vw, 32px); }
+.management-shell .panel::after, .account-page.narrow .panel::after { content: none; }
+.management-shell .panel > :first-child { margin-top: 0; }
+.account-page .panel > .field + button { margin-top: 16px; }
+.management-shell :is(.product-list, .product-row, .form-divider, .empty) { border-style: none; }
+.management-shell .product-row { padding-block: 24px; gap: 18px; }
+.management-shell .product-row + .product-row { border-top: 1px solid var(--line); }
+.management-shell .form-divider { padding-top: 28px; margin-top: 28px; }
+.management-shell .empty { padding-block: 48px; }
+.management-shell .account-stepup { background: var(--status-bg); margin-top: 24px; }
+@media (max-width: 760px) {
+  header { gap: 8px; padding-block: 16px; }
+  .header-right { width: auto; flex: 1 1 auto; justify-content: flex-end; gap: 4px; }
+  .header-right .source-label, .header-right #source-label, .header-right .source-stars { display: none; }
+  header .source-link { padding: 10px; gap: 0; }
+  .header-home { border: 0; font-size: 12px; }
+  .appearance-panel { position: fixed; inset-inline: 20px; top: 76px; width: auto; max-width: 360px; margin-inline-start: auto; max-height: calc(100dvh - 96px); overflow: auto; }
+  .management-shell .product-row { gap: 16px; flex-direction: column; align-items: stretch; }
+  .management-shell .product-row .actions { justify-content: flex-start; width: auto; }
+  .management-shell .product-row .actions button { flex: 0 1 auto; }
+  .management-shell .account-page form > button[type="submit"] { margin-top: 16px; }
+}
+@media (max-width: 380px) {
+  .header-right { gap: 0; }
+  header .source-link { padding-inline: 6px; }
+  .appearance-control > summary { padding-inline: 8px; }
+}

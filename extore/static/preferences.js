@@ -3,6 +3,7 @@
   "use strict";
 
   const themes = new Set(["auto", "light", "dark"]);
+  const accents = new Set(["green", "blue", "violet", "rose", "amber", "graphite"]);
   const languages = new Set(["auto", "zh-CN", "en"]);
   const listeners = new Set();
   let storage = null;
@@ -33,10 +34,12 @@
     }
   }
   const themeValue = (value) => (themes.has(value) ? value : "auto");
+  const accentValue = (value) => (accents.has(value) ? value : "green");
   const languageValue = (value) =>
     languages.has(value) ? value : "auto";
   let settings = {
     theme: themeValue(read("extore_theme")),
+    accent: accentValue(read("extore_accent")),
     language: languageValue(read("extore_language")),
   };
 
@@ -70,6 +73,7 @@
   let resolved = resolve();
   let previous = {
     theme: settings.theme,
+    accent: settings.accent,
     language: settings.language,
     resolvedTheme: resolved.theme,
     resolvedLanguage: resolved.language,
@@ -79,6 +83,7 @@
     const element = root.document?.documentElement;
     if (!element) return;
     element.dataset.theme = resolved.theme;
+    element.dataset.accent = settings.accent;
     element.lang = resolved.language;
   }
   function snapshot() {
@@ -89,12 +94,14 @@
     apply();
     const next = {
       theme: settings.theme,
+      accent: settings.accent,
       language: settings.language,
       resolvedTheme: resolved.theme,
       resolvedLanguage: resolved.language,
     };
     if (
       previous.theme === next.theme &&
+      previous.accent === next.accent &&
       previous.language === next.language &&
       previous.resolvedTheme === next.resolvedTheme &&
       previous.resolvedLanguage === next.resolvedLanguage
@@ -115,11 +122,14 @@
     if (event.storageArea && event.storageArea !== storage) return;
     if (event.key === "extore_theme")
       settings.theme = themeValue(event.newValue);
+    else if (event.key === "extore_accent")
+      settings.accent = accentValue(event.newValue);
     else if (event.key === "extore_language")
       settings.language = languageValue(event.newValue);
     else if (event.key === null)
       settings = {
         theme: themeValue(read("extore_theme")),
+        accent: accentValue(read("extore_accent")),
         language: languageValue(read("extore_language")),
       };
     else return;
@@ -142,6 +152,12 @@
       if (!themes.has(value)) throw new TypeError("Invalid theme preference");
       settings.theme = value;
       write("extore_theme", value);
+      refresh();
+    },
+    setAccent(value) {
+      if (!accents.has(value)) throw new TypeError("Invalid accent preference");
+      settings.accent = value;
+      write("extore_accent", value);
       refresh();
     },
     setLanguage(value) {

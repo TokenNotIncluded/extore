@@ -321,8 +321,8 @@ test("existing same-key CLI device can be restored with zero remaining bindings"
   assert.equal(p.instance.state, "approved");
 });
 
-test("real Account Passkey confirmation preserves updated session and authorization lifecycle", async () => {
-  const fresh = { ...shopAuth, session_id: "fresh-real-account-session" };
+test("real Account Passkey confirmation preserves the current session and authorization lifecycle", async () => {
+  const fresh = { ...shopAuth };
   const p = fixture({ auth: shopAuth, realAccount: true, passkey: async () => fresh }), value = await review(p);
   await approvePrelude(p, value);
   assert.equal(p.instance.state, "confirm");
@@ -330,9 +330,9 @@ test("real Account Passkey confirmation preserves updated session and authorizat
   const pending = p.node("#account-fresh-passkey").emit("click"); await flush();
   assert.equal(p.requests[6].url, "/auth/status");
   assert.equal(p.requests[6].extra.expectedSessionId, fresh.session_id);
-  const sessionBoundReview = { ...value, review_digest: "e".repeat(64) };
+  const sessionBoundReview = { ...value };
   await resolve(p, 6, fresh); await resolve(p, 7, sessionBoundReview);
-  assert.equal(p.requests[8].body.review_digest, "e".repeat(64));
+  assert.equal(p.requests[8].body.review_digest, value.review_digest);
   await resolve(p, 8, { ok: true, status: "approved" }); await pending;
   assert.equal(p.instance.state, "approved");
   assert.equal(p.accounts[0].disposed, true);
@@ -366,8 +366,8 @@ test("real Account cancellation aborts in-flight Passkey without a later approva
   assert.match(p.node("#device-error").textContent, /已取消/);
 });
 
-test("real Passkey session rotation still stops changed device or permission metadata", async () => {
-  const fresh = { ...shopAuth, session_id: "fresh-changed-session" };
+test("real Passkey confirmation still stops changed device or permission metadata", async () => {
+  const fresh = { ...shopAuth };
   const p = fixture({ auth: shopAuth, realAccount: true, passkey: async () => fresh }), value = await review(p);
   await approvePrelude(p, value);
   const pending = p.node("#account-fresh-passkey").emit("click"); await flush();
@@ -457,16 +457,16 @@ test("active shop request freezes current products and allows explicit smaller s
 });
 
 test("active scope approval requires owner confirmation and only enters awaiting-claim state", async () => {
-  const fresh = { ...shopAuth, session_id: "active-fresh-session" };
+  const fresh = { ...shopAuth };
   const p = fixture({ auth: shopAuth, realAccount: true, passkey: async () => fresh });
   const value = await activeReview(p, activeOptions());
   await approvePrelude(p, value);
   assert.equal(p.instance.state, "confirm");
   const pending = p.node("#account-fresh-passkey").emit("click"); await flush();
-  const latest = { ...value, review_digest: "c".repeat(64) };
+  const latest = { ...value };
   await resolve(p, 6, fresh); await resolve(p, 7, latest);
   assert.equal(p.requests[8].url, "/manage/device/approve");
-  assert.deepEqual(JSON.parse(JSON.stringify(p.requests[8].body)), { user_code: code, product_ids: value.selected.product_ids, permissions: value.selected.permissions, expires: value.selected.expires, review_digest: "c".repeat(64) });
+  assert.deepEqual(JSON.parse(JSON.stringify(p.requests[8].body)), { user_code: code, product_ids: value.selected.product_ids, permissions: value.selected.permissions, expires: value.selected.expires, review_digest: value.review_digest });
   await resolve(p, 8, { ok: true, status: "approved" }); await pending;
   assert.equal(p.instance.state, "approved");
   assert.match(p.root.innerHTML, /已批准，等待 CLI 领取/);
@@ -586,7 +586,7 @@ test("scope review changes to current revision, future products, permissions or 
 });
 
 test("fresh reauthentication cannot silently apply changed scope authorization", async () => {
-  const fresh = { ...shopAuth, session_id: "scope-new-session" };
+  const fresh = { ...shopAuth };
   const p = fixture({ auth: shopAuth, realAccount: true, passkey: async () => fresh }), value = await activeReview(p, activeOptions());
   await approvePrelude(p, value);
   const pending = p.node("#account-fresh-passkey").emit("click"); await flush();
@@ -648,9 +648,9 @@ test("scope accepts the backend limit of 500 frozen current products and rejects
   }
 });
 
-test("fresh session rotation cannot hide a changed server snapshot in either approval flow", async () => {
+test("fresh confirmation cannot hide a changed server snapshot in either approval flow", async () => {
   for (const scoped of [false, true]) {
-    const fresh = { ...shopAuth, session_id: "snapshot-fresh-session" };
+    const fresh = { ...shopAuth };
     const p = fixture({ auth: shopAuth, realAccount: true, passkey: async () => fresh });
     const value = scoped ? await activeReview(p, activeOptions()) : await review(p);
     await approvePrelude(p, value);

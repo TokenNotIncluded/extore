@@ -143,9 +143,9 @@ function page(options = {}) {
   function find(selector, root = null) {
     return findAll(selector, root)[0] || null;
   }
-  for (const id of ["app", "brand", "theme", "language", "header-context", "toast", "workspace"])
+  for (const id of ["app", "brand", "theme", "language", "accent", "appearance", "appearance-label", "appearance-note", "theme-label", "language-label", "accent-label", "header-context", "toast", "workspace"])
     nodes.set(id, element(id));
-  for (const [id, values] of [["theme", ["auto", "light", "dark"]], ["language", ["auto"]]]) {
+  for (const [id, values] of [["theme", ["auto", "light", "dark"]], ["language", ["auto"]], ["accent", ["green", "blue", "violet", "rose", "amber", "graphite"]]]) {
     for (const value of values) {
       const option = element(`${id}-${value}`, nodes.get(id));
       option.attributes.value = value;
@@ -154,7 +154,7 @@ function page(options = {}) {
   }
   const originalFind = find;
   const query = (selector) => {
-    const option = selector.match(/^#(theme|language) option\[value=(\w+)\]$/);
+    const option = selector.match(/^#(theme|language|accent) option\[value=(\w+)\]$/);
     return option ? nodes.get(`${option[1]}-${option[2]}`) : originalFind(selector);
   };
   const location = {

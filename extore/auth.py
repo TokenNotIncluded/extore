@@ -1,3 +1,4 @@
+import base64
 import json
 import time
 
@@ -22,7 +23,15 @@ from webauthn.helpers.structs import (
 from .config import COOKIE_SECURE, DATA, ORIGIN, RP_ID
 from .db import audit, db, set_setting, setting
 from .link_access import revoke_session
-from .security import create_session, digest, fail, rate_limit, session, token
+from .security import (
+    authorize_management,
+    create_session,
+    digest,
+    fail,
+    rate_limit,
+    session,
+    token,
+)
 
 router = APIRouter(prefix="/api/auth")
 ph = PasswordHasher()
@@ -148,17 +157,23 @@ def logout(request: Request, response: Response):
 
 def challenge(c, request, response, kind, s=None):
     key = token()
+    descriptors = None
     if s:
+        rows = c.execute(
+            "SELECT id FROM credentials WHERE shop_id IS ?", (s.get("shop_id"),)
+        ).fetchall()
+        descriptors = [
+            PublicKeyCredentialDescriptor(
+                id=base64.urlsafe_b64decode(r["id"] + "=" * (-len(r["id"]) % 4))
+            )
+            for r in rows
+        ]
+    if s and kind == "register":
         if (
             s["channel"] == "browser"
             and time.time() - (s.get("auth_at") or s["created"]) > 600
         ):
             fail("添加 Passkey 前请重新登录", 401)
-        rows = c.execute(
-            "SELECT id FROM credentials WHERE shop_id IS ?", (s.get("shop_id"),)
-        ).fetchall()
-        import base64
-
         shop_id = s.get("shop_id")
         if shop_id:
             from .shops import shop_row
@@ -175,20 +190,19 @@ def challenge(c, request, response, kind, s=None):
             rp_name="Extore · 兑所",
             user_id=user_id,
             user_name=user_name,
-            exclude_credentials=[
-                PublicKeyCredentialDescriptor(
-                    id=base64.urlsafe_b64decode(r["id"] + "=" * (-len(r["id"]) % 4))
-                )
-                for r in rows
-            ],
+            exclude_credentials=descriptors,
             authenticator_selection=AuthenticatorSelectionCriteria(
                 resident_key=ResidentKeyRequirement.REQUIRED,
                 user_verification=UserVerificationRequirement.REQUIRED,
             ),
         )
     else:
+        if s and not descriptors:
+            fail("当前账号没有 Passkey，请使用其他验证方式", 409)
         opts = generate_authentication_options(
-            rp_id=RP_ID, user_verification=UserVerificationRequirement.REQUIRED
+            rp_id=RP_ID,
+            allow_credentials=descriptors,
+            user_verification=UserVerificationRequirement.REQUIRED,
         )
     c.execute("DELETE FROM challenges WHERE expires<?", (time.time(),))
     c.execute(
@@ -344,6 +358,79 @@ def login_verify(body: CredentialInput, request: Request, response: Response):
         "shop_id": row["shop_id"],
         "superadmin": row["shop_id"] is None,
     }
+
+
+@router.post("/reauth/passkey/options")
+def reauth_options(request: Request, response: Response):
+    s = session(request)
+    if s["channel"] != "browser":
+        fail("请在当前浏览器中确认身份", 403)
+    rate_limit(request, "passkey-reauth", 20, 60)
+    with db() as c:
+        authorize_management(c, s)
+        return challenge(c, request, response, "reauth", s)
+
+
+@router.post("/reauth/passkey/verify")
+def reauth_verify(body: CredentialInput, request: Request, response: Response):
+    s = session(request)
+    if s["channel"] != "browser":
+        fail("请在当前浏览器中确认身份", 403)
+    rate_limit(request, "passkey-reauth-verify", 20, 60)
+    # Commit consumption before validation: a failed assertion is single-use too.
+    with db() as c:
+        authorize_management(c, s)
+        ch = consume_challenge(c, request, "reauth", s)
+    with db() as c:
+        authorize_management(c, s)
+        row = c.execute(
+            "SELECT * FROM credentials WHERE id=? AND shop_id IS ?",
+            (body.credential.get("id", ""), s.get("shop_id")),
+        ).fetchone()
+        if not row:
+            fail("所选 Passkey 不属于当前账号，请重新选择", 401)
+        try:
+            handle = body.credential.get("response", {}).get("userHandle")
+            if handle is not None:
+                expected = (
+                    ("extore-shop:" + s["shop_id"]).encode()
+                    if s.get("shop_id")
+                    else b"extore-owner"
+                )
+                if (
+                    base64.b64decode(
+                        handle + "=" * (-len(handle) % 4), altchars=b"-_", validate=True
+                    )
+                    != expected
+                ):
+                    raise ValueError("Passkey user handle does not match the session")
+            verified = verify_authentication_response(
+                credential=body.credential,
+                expected_challenge=ch,
+                expected_rp_id=RP_ID,
+                expected_origin=ORIGIN,
+                credential_public_key=row["public_key"],
+                credential_current_sign_count=row["sign_count"],
+                require_user_verification=True,
+            )
+        except Exception:
+            fail("Passkey 校验失败，请使用当前账号的 Passkey", 401)
+        c.execute(
+            "UPDATE credentials SET sign_count=? WHERE id=?",
+            (verified.new_sign_count, row["id"]),
+        )
+        c.execute(
+            "UPDATE sessions SET auth_at=?,auth_method='passkey' WHERE digest=?",
+            (time.time(), s["digest"]),
+        )
+        audit(
+            c,
+            f"shop:{s['shop_id']}" if s.get("shop_id") else "owner",
+            "account.reauthenticate",
+            s["id"],
+        )
+    response.delete_cookie("extore_challenge", path="/api/auth")
+    return {"ok": True}
 
 
 @router.get("/passkeys")
