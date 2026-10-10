@@ -129,6 +129,7 @@ def review(browser, origin, output, width, theme, language="zh-CN"):
     page.on("pageerror", lambda error: errors.append(str(error)))
 
     def snap(name):
+        page.evaluate("window.scrollTo(0, 0)")
         page.wait_for_timeout(80)
         assert not page.evaluate("document.documentElement.scrollWidth > innerWidth"), (
             f"Horizontal overflow: {name}/{width}"

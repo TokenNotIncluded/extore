@@ -28,6 +28,7 @@ jobs:
       - run: node --test tests/*.test.cjs
       - run: uv run pytest -q tests/test_passkeys.py tests/test_passkey_reauth.py tests/test_shop_account_auth.py tests/test_browser_shop_scope.py
       - run: uv run --with playwright==1.57.0 playwright install --with-deps chromium
+      - run: sudo apt-get install -y --no-install-recommends fonts-noto-cjk
       - run: uv run --with playwright==1.57.0 python scripts/check_management_ui.py
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
         if: always()

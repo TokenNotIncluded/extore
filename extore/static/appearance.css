@@ -19,11 +19,12 @@
 .header-right .appearance-panel select { width: 100%; min-height: 44px; padding: 9px 12px; background: var(--paper); border: 1px solid var(--line); font-size: 16px; }
 .appearance-panel .caption { font-size: 12px; }
 header .source-link { background: transparent; border: 0; }
-body:has(.management-shell) :is(header, footer) { background-image: none; }
+body:has(.management-shell, .account-page.narrow) :is(header, footer) { background-image: none; }
 /* The dashboard is a workspace, not a stack of torn paper cards. */
 .management-shell .panel, .account-page.narrow .panel { border-radius: 18px; filter: none; padding: clamp(20px, 3vw, 32px); }
 .management-shell .panel::after, .account-page.narrow .panel::after { content: none; }
 .management-shell .panel > :first-child { margin-top: 0; }
+.account-page .panel > .field + button { margin-top: 16px; }
 .management-shell :is(.product-list, .product-row, .form-divider, .empty) { border-style: none; }
 .management-shell .product-row { padding-block: 24px; gap: 18px; }
 .management-shell .product-row + .product-row { border-top: 1px solid var(--line); }
