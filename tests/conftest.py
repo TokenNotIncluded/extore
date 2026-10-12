@@ -19,6 +19,7 @@ def clean():
     init()
     with db() as c:
         for table in (
+            "commerce_bindings",
             "commerce_issuances",
             "commerce_tokens",
             "commerce_grants",

@@ -79,6 +79,9 @@ def init_schema(c):
     )
     for statement in statements:
         c.execute(statement)
+    from .commerce_binding import init_schema as init_bindings
+
+    init_bindings(c)
 
 
 def cleanup(c, now=None):
@@ -233,13 +236,13 @@ def issue_tokens(c, grant):
     }
 
 
-def request_context(c, row):
+def request_context(c, row, shop_id=None):
     """Bind consent to a current client and immutable selection of visible data."""
     from .commerce_listing import commerce_listing
     from .product_lifecycle import matches
 
     client = client_row(c, row["client_id"])
-    shop = shop_row(c, client["shop_id"])
+    shop = shop_row(c, shop_id or client["shop_id"])
     requested = json.loads(row["product_ids"])
     products = []
     revisions = {}
@@ -307,6 +310,7 @@ def metadata():
             "products_endpoint": ORIGIN + "/api/integrations/commerce/products",
             "cards_endpoint": ORIGIN + "/api/integrations/commerce/cards",
             "listing_schema": "extore.product-listing.v1",
+            "marketplace_client_id": "lmm-best-store",
             "maximum_products": 100,
             "maximum_cards_per_request": 100,
             "issuance_recovery_seconds": RECOVERY_TTL,

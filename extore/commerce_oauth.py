@@ -73,6 +73,7 @@ RESOURCE_PREFIX = "/api/integrations/commerce/products"
 def machine_path(path):
     return (
         path in MACHINE_PATHS
+        or path == "/api/integrations/commerce/binding/products"
         or path == RESOURCE_PREFIX
         or path.startswith(RESOURCE_PREFIX + "/")
     )
@@ -145,6 +146,9 @@ def _pending(c, request_id):
 
 def _approval_context(c, actor, request_id, shop_id):
     row = _pending(c, request_id)
+    if row["client_id"] == "lmm-best-store":
+        own = _scope(c, actor, shop_id)
+        return row, request_context(c, row, own)
     _owned_client(c, actor, row["client_id"], shop_id)
     return row, request_context(c, row)
 
@@ -260,6 +264,22 @@ def authorize(request: Request):
     if len(product_ids) > MAX_PRODUCTS:
         fail("invalid_request", "单次授权最多 100 件商品")
     with db() as c:
+        if params.get("client_id") == "lmm-best-store":
+            from .shops import default_shop
+
+            registered = ClientRegistration(
+                client_name="api.lmm.best",
+                redirect_uris=["https://api.lmm.best/store/manage"],
+            )
+            c.execute(
+                "INSERT OR IGNORE INTO commerce_clients(id,shop_id,metadata,created) VALUES (?,?,?,?)",
+                (
+                    "lmm-best-store",
+                    default_shop(c),
+                    canonical(registered.model_dump()),
+                    time.time(),
+                ),
+            )
         client = client_row(c, params.get("client_id", ""))
         if (
             params.get("redirect_uri")
@@ -419,7 +439,11 @@ def remove_grant(grant_id: str, request: Request, shop_id: str = ""):
     actor = _management(request, fresh=True)
     with db() as c:
         row = grant_row(c, grant_id, active=False)
-        _owned_client(c, actor, row["client_id"], shop_id, active=False)
+        if row["client_id"] == "lmm-best-store":
+            if _scope(c, actor, shop_id or row["shop_id"]) != row["shop_id"]:
+                fail("access_denied", "没有此店铺授权的管理权限", 403)
+        else:
+            _owned_client(c, actor, row["client_id"], shop_id, active=False)
         revoke_grant(c, row["id"], actor_id(actor))
     return {"ok": True}
 
@@ -604,6 +628,35 @@ def _product(c, grant, pid):
     return product(c, pid)
 
 
+def _marketplace_listing(c, pid):
+    from .card_tracking import _summary
+    from .commerce_listing import commerce_listing
+    from .marketplace_product import MarketplaceProduct, MarketplaceVariant
+    from .service import product
+
+    source = product(c, pid)
+    listing = commerce_listing(c, pid)
+    listing["product"]["marketplace"] = MarketplaceProduct.model_validate(
+        source.get("marketplace") or {}
+    ).model_dump()
+    variants = {item["id"]: item for item in source["variants"]}
+    for variant in listing["variants"]:
+        variant["marketplace"] = MarketplaceVariant.model_validate(
+            variants[variant["id"]].get("marketplace") or {}
+        ).model_dump()
+        variant["card_summary"] = _summary(
+            c, pid, time.time(), variant_id=variant["id"]
+        )
+    listing["card_summary"] = _summary(c, pid, time.time())
+    # Include sales settings in the version used for idempotent synchronisation.
+    listing["sync_revision"] = digest(
+        canonical(
+            {k: v for k, v in listing.items() if k not in ("revision", "card_summary")}
+        )
+    )
+    return listing
+
+
 @router.get("/api/integrations/commerce/products")
 def catalog(request: Request):
     from .commerce_listing import commerce_listing
@@ -619,7 +672,11 @@ def catalog(request: Request):
             if lifecycle(c, pid):
                 continue
             _product(c, grant, pid)
-            values.append(commerce_listing(c, pid))
+            values.append(
+                _marketplace_listing(c, pid)
+                if "marketplace.sync" in json.loads(grant["scopes"])
+                else commerce_listing(c, pid)
+            )
         return {
             "schema": "extore.commerce-catalog.v1",
             "issuer": ORIGIN,
@@ -637,7 +694,11 @@ def catalog_product(product_id: str, request: Request):
     with db() as c:
         grant = _access(c, request, "products.read")
         _product(c, grant, product_id)
-        return commerce_listing(c, product_id)
+        return (
+            _marketplace_listing(c, product_id)
+            if "marketplace.sync" in json.loads(grant["scopes"])
+            else commerce_listing(c, product_id)
+        )
 
 
 @router.post("/api/integrations/commerce/cards")

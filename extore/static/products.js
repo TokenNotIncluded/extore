@@ -492,7 +492,7 @@
     const owner = ctx.role === "admin";
     const disabled = ctx.canConfigure ? "" : "disabled";
     let profiles = [], profileBinding = null, bindingLoad = 0, profilesRequested = false;
-    ctx.workspace.innerHTML = `<div class="section-head"><h2>${product.id ? "配置商品" : "新建商品"}</h2><div class="product-actions">${product.id ? `<button type="button" id="export-saved-product" class="secondary">${ctx.lang === "en" ? "Copy saved product info" : "复制已保存商品资料"}</button>` : ""}<button id="cancel" class="secondary">返回商品</button></div></div><div id="product-export-panel"></div><form id="product-form">
+    ctx.workspace.innerHTML = `<div class="section-head"><h2>${product.id ? "配置商品" : "新建商品"}</h2><div class="product-actions">${product.id ? `<button type="button" id="export-saved-product" class="secondary">${ctx.lang === "en" ? "Copy saved product info" : "复制已保存商品资料"}</button>` : ""}<button id="cancel" class="secondary">返回商品</button></div></div><div id="product-export-panel"></div><form id="product-form">${window.ExtoreMarketplaceSettings?.product(product) || ""}
       <div class="grid">${field("p-name", "商品名称", product.name)}${select(
         "p-mode",
         "处理方式",
@@ -663,6 +663,7 @@
         }
         return {
           ...variant,
+          marketplace: window.ExtoreMarketplaceSettings?.captureVariant(ctx.workspace, index, variant.marketplace || {}) || variant.marketplace || {},
           id: variant.id,
           name: $("#v-name-" + index).value,
           description: $("#v-description-" + index).value,
@@ -675,7 +676,7 @@
     };
     const drawVariants = () => {
       $("#product-variants").innerHTML = variants.map((variant, index) =>
-        `<section class="variant-editor"><div class="section-head"><h4>规格 ${index + 1}</h4>${variant.id === "default" || variants.length === 1 ? "" : `<button type="button" class="danger" data-remove-variant="${index}">删除规格</button>`}</div><div class="variant-fields">${field("v-name-" + index, "规格名称", variant.name, "text", 'maxlength="120"')}${field("v-id-" + index, "固定规格标识", variant.id, "text", "readonly")}${field("v-price-" + index, "参考价（可留空）", variant.price ?? "", "text", 'inputmode="decimal" placeholder="例如 19.90"')}${field("v-currency-" + index, "币种", variant.currency || "CNY", "text", 'maxlength="5" autocapitalize="characters"')}</div>${textarea("v-description-" + index, "规格说明", variant.description || "")}${textarea("v-attributes-" + index, "规格属性（JSON）", JSON.stringify(variant.attributes || {}, null, 2))}<p class="caption">例如：{"duration_months": 1, "tier": "basic"}，处理任务时会带上这些属性。</p><label class="variant-enabled"><input id="v-enabled-${index}" type="checkbox" ${variant.enabled !== false ? "checked" : ""}>启用此规格</label></section>`,
+        `<section class="variant-editor"><div class="section-head"><h4>规格 ${index + 1}</h4>${variant.id === "default" || variants.length === 1 ? "" : `<button type="button" class="danger" data-remove-variant="${index}">删除规格</button>`}</div><div class="variant-fields">${field("v-name-" + index, "规格名称", variant.name, "text", 'maxlength="120"')}${field("v-id-" + index, "固定规格标识", variant.id, "text", "readonly")}${field("v-price-" + index, "参考价（可留空）", variant.price ?? "", "text", 'inputmode="decimal" placeholder="例如 19.90"')}${field("v-currency-" + index, "币种", variant.currency || "CNY", "text", 'maxlength="5" autocapitalize="characters"')}</div>${textarea("v-description-" + index, "规格说明", variant.description || "")}${textarea("v-attributes-" + index, "规格属性（JSON）", JSON.stringify(variant.attributes || {}, null, 2))}<p class="caption">例如：{"duration_months": 1, "tier": "basic"}，处理任务时会带上这些属性。</p>${window.ExtoreMarketplaceSettings?.variant(variant, index) || ""}<label class="variant-enabled"><input id="v-enabled-${index}" type="checkbox" ${variant.enabled !== false ? "checked" : ""}>启用此规格</label></section>`,
       ).join("");
       all("[data-remove-variant]").forEach((node) =>
         node.addEventListener("click", () => perform(() => {
@@ -1019,6 +1020,7 @@
       drawConfiguration();
       syncMode();
     });
+    window.ExtoreMarketplaceSettings?.bind(ctx.workspace);
     on("#product-form", "submit", async () => {
       const button = $("#save-product");
       if (button.disabled) return;
@@ -1056,6 +1058,7 @@
           progress_steps: mode === "stock" ? [] : progressSteps,
           task_flow: mode === "stock" ? null : taskFlowEditor ? taskFlowEditor.getValue() : product.task_flow || null,
           support_email: $("#p-support-email").value.trim(),
+          marketplace: window.ExtoreMarketplaceSettings?.captureProduct(ctx.workspace, product.marketplace || {}) || product.marketplace || {},
           revision_policy: captureRevisionPolicy(),
         };
         // Configuration is not part of generic product editing. The existing
