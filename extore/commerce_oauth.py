@@ -338,7 +338,7 @@ def approve(request_id: str, body: Approval, request: Request):
             <= body.grant_expires
             <= context["request"]["max_grant_expires"]
         ):
-            fail("invalid_request", "授权有效期须在一分钟至九十天内")
+            fail("invalid_request", "授权有效期须在一分钟至三年（1095 天）内")
         if (
             c.execute(
                 "SELECT COUNT(*) FROM commerce_grants WHERE shop_id=? AND revoked=0 AND expires>?",

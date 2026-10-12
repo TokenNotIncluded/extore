@@ -10,7 +10,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 SCOPES = ("products.read", "cards.issue")
 MAX_PRODUCTS = 100
 MAX_LIMITS = 500
-MAX_GRANT_DAYS = 90
+MAX_GRANT_DAYS = 3 * 365
 MAX_ISSUE_COUNT = 100
 
 

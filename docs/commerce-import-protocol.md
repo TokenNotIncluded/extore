@@ -99,7 +99,7 @@ GET /oauth/authorize?response_type=code&client_id=CLIENT_ID&redirect_uri=REGISTE
 
 `code_verifier` 使用至少 32 随机字节，43–128 个 unreserved 字符。不要放到授权 URL、浏览器 localStorage、常规日志或商品资料中。每个事务独立保存；绑定当前商城账户、商家连接 ID 和预期 Extore issuer。拒绝来自其他商城账户、过期事务或重复消费的回调。
 
-Extore 在验证注册信息后转到自己的批准页。商家可以缩小申请范围；只能批准当前明确选中的商品，之后新增商品不会自动获得授权。授权最长 90 天；界面默认 30 天。`cards.issue` 必须至少明确一个 `(product_id, variant_id, max_count)`，每规格累计额度为 1–10000；一次批准最多 500 个规格额度。没有批准的规格不能补货。
+Extore 在验证注册信息后转到自己的批准页。商家可以缩小申请范围；只能批准当前明确选中的商品，之后新增商品不会自动获得授权。授权最长 3 年（1095 天）；界面默认 30 天。`cards.issue` 必须至少明确一个 `(product_id, variant_id, max_count)`，每规格累计额度为 1–10000；一次批准最多 500 个规格额度。没有批准的规格不能补货。
 
 待批准申请有效 600 秒，批准后的授权码有效 120 秒且只可消费一次。浏览器批准后应立即完成回调交换；不要提前批准后让代码挂着等待很久。
 

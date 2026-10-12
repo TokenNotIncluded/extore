@@ -504,6 +504,37 @@ def test_bearer_scheme_is_case_insensitive_but_token_case_is_not(
     )
 
 
+@pytest.mark.parametrize("extra_seconds", [0, 1])
+def test_shop_owner_grant_three_year_boundary(
+    owner, machine, setup_product, extra_seconds
+):
+    pid, _ = setup_product()
+    with db() as c:
+        sid = c.execute("SELECT shop_id FROM products WHERE id=?", (pid,)).fetchone()[0]
+        cookie = create_session(c, Response(), "admin", shop_id=sid)
+    with TestClient(app, base_url=ORIGIN, headers={"Origin": ORIGIN}) as shop_owner:
+        shop_owner.cookies.set("extore_session", cookie)
+        _, _, rid, context, body, _ = application(shop_owner, machine, pid)
+        with db() as c:
+            created = c.execute(
+                "SELECT created FROM commerce_requests WHERE id=?", (rid,)
+            ).fetchone()[0]
+        maximum = created + 3 * 365 * 86400
+        assert context["request"]["max_grant_expires"] == maximum
+        body["grant_expires"] = maximum + extra_seconds
+        response = shop_owner.post(ADMIN + "/requests/" + rid + "/approve", json=body)
+        assert response.status_code == (200 if extra_seconds == 0 else 400), (
+            response.text
+        )
+        with db() as c:
+            rows = c.execute("SELECT expires FROM commerce_grants").fetchall()
+        if extra_seconds:
+            assert rows == []
+            assert "三年" in response.json()["error_description"]
+        else:
+            assert [row["expires"] for row in rows] == [maximum]
+
+
 def test_staff_and_other_shop_cannot_approve(owner, machine, setup_product):
     pid, _ = setup_product()
     _, _, rid, _, body, _ = application(owner, machine, pid)
