@@ -2311,6 +2311,24 @@ test("product editors can change variants without fulfillment permission and can
   assert.equal(mutations(h).length, 1);
 });
 
+test("native SKU metadata edits preserve private marketplace data and never return it", async (t) => {
+  const marketplace = {template: "fixed-content", fixed_content: "PRIVATE-MARKETPLACE-BODY", price_quota: 500000};
+  const h = await harness(t, {
+    context: {page: "admin", role: "admin", tab: "products"},
+    products: [product({variants: [productVariant("monthly", {marketplace})]})],
+  });
+  const result = await h.call("product_update", {
+    product_id: "p1", changes: {variants: [productVariant("monthly", {name: "renamed"})]}, confirm: true,
+  });
+  assert.equal(result.ok, true);
+  assert.deepEqual(mutations(h)[0].body.variants[0].marketplace, marketplace);
+  assert.equal(JSON.stringify(result).includes(marketplace.fixed_content), false);
+  rejected(await h.call("product_update", {
+    product_id: "p1", changes: {variants: [productVariant("another")]}, confirm: true,
+  }), "forbidden");
+  assert.equal(mutations(h).length, 1);
+});
+
 test("SKU metadata changes do not churn native receipt or queue registrations", async (t) => {
   const variants = [productVariant("monthly")];
   const p = product({ variants });

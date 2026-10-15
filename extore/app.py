@@ -1518,7 +1518,15 @@ def managed_product(request: Request, product_id: str = ""):
 
 def managed_product_view(p, s):
     if "fulfillment.configure" not in s["permissions"]:
-        return {**p, "webhook_secret": "", "processor_config": {}}
+        return {
+            **p,
+            "webhook_secret": "",
+            "processor_config": {},
+            "variants": [
+                {key: value for key, value in variant.items() if key != "marketplace"}
+                for variant in p["variants"]
+            ],
+        }
     return p
 
 
@@ -1541,6 +1549,28 @@ def edit_managed_product(
         if not values["webhook_secret"]:
             values["webhook_secret"] = old["webhook_secret"]
         if "fulfillment.configure" not in s["permissions"]:
+            from .marketplace_product import MarketplaceVariant
+
+            old_variants = {variant["id"]: variant for variant in old["variants"]}
+            retained_ids = {variant["id"] for variant in values["variants"]}
+            if any(
+                variant_id not in retained_ids
+                and variant.get("marketplace")
+                and variant["marketplace"] != MarketplaceVariant().model_dump()
+                for variant_id, variant in old_variants.items()
+            ):
+                fail("删除含商城交付配置的规格需要配置发货权限", 403)
+            for submitted, variant in zip(body.variants, values["variants"]):
+                previous = old_variants.get(variant["id"], {}).get(
+                    "marketplace", MarketplaceVariant().model_dump()
+                )
+                if (
+                    "marketplace" in submitted.model_fields_set
+                    and submitted.marketplace.model_dump() != previous
+                ):
+                    fail("修改商城交付配置需要配置发货权限", 403)
+                # Redacted reads must round-trip without erasing private content.
+                variant["marketplace"] = previous
             if not values["processor_config"]:
                 values["processor_config"] = old["processor_config"]
             for field in (

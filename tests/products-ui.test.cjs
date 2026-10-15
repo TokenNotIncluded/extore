@@ -144,6 +144,7 @@ function page(options = {}) {
     window: browser,
     document: { querySelector: find, querySelectorAll: findAll },
     structuredClone,
+    TextEncoder,
     JSON,
     console,
     URL,
@@ -154,6 +155,7 @@ function page(options = {}) {
     marked: { parse: (value) => value },
     navigator: options.navigator || {},
   });
+  vm.runInContext(fs.readFileSync(path.join(__dirname, "../extore/static/marketplace-settings.js"), "utf8"), context);
   const source = fs.readFileSync(path.join(__dirname, "../extore/static/products.js"), "utf8");
   vm.runInContext(fs.readFileSync(path.join(__dirname, "../extore/static/product-export.js"), "utf8"), context);
   browser.ExtoreClipboard = options.clipboard || { async writeText() { return false; } };
@@ -1026,6 +1028,50 @@ test("a description editor has no fulfillment controls or editable output defini
   assert.equal(processorPage.node("#pc-value-0"), null);
   assert.doesNotMatch(processorPage.workspace.innerHTML, /hidden secret/);
   assert.match(processorPage.node("#processor-configuration").innerHTML, /配置已隐藏/);
+});
+
+test("marketplace templates preserve private per-SKU configuration without price conversion", async () => {
+  const p = page();
+  await editProduct(p);
+  assert.equal(p.node("#mp-template-0").value, "card-key");
+  assert.equal(p.node("#mp-price-0").value, "");
+  p.node("#mp-template-0").value = "fixed-content";
+  p.node("#mp-price-0").value = "9007199254740991";
+  p.node("#mp-content-0").value = "<private>&delivery";
+  await p.node("#add-variant").emit("click");
+  assert.equal(p.node("#mp-content-0").value, "<private>&delivery");
+  p.node("#product-form").emit("submit");
+  assert.deepEqual(JSON.parse(JSON.stringify(p.requests[1].body.variants[0].marketplace)), {
+    template: "fixed-content", price_quota: 9007199254740991, fixed_content: "<private>&delivery",
+  });
+});
+
+test("invalid marketplace prices, empty fixed bodies and stale content block writes", async () => {
+  for (const [template, price, content] of [
+    ["text", "1e6", ""], ["text", "499999", ""], ["text", "9007199254740992", ""],
+    ["fixed-content", "", "  "], ["fixed-content", "", "字".repeat(5334)],
+    ["text", "", "do-not-silently-discard"],
+  ]) {
+    const p = page();
+    await editProduct(p);
+    p.node("#mp-template-0").value = template;
+    p.node("#mp-price-0").value = price;
+    p.node("#mp-content-0").value = content;
+    await p.node("#product-form").emit("submit");
+    await flush();
+    assert.equal(p.requests.length, 1);
+    assert.equal(p.node("#mp-content-0").value, content);
+    assert.equal(p.node("#save-product").disabled, false);
+    assert.ok(p.node("#error").textContent);
+  }
+});
+
+test("description-only editors never render or submit private marketplace controls", async () => {
+  const p = page({role: "staff", canConfigure: false});
+  await editProduct(p);
+  assert.equal(p.node("#mp-template-0"), null);
+  p.node("#product-form").emit("submit");
+  assert.equal(Object.hasOwn(p.requests[1].body.variants[0], "marketplace"), false);
 });
 
 test("legacy products keep a stable default specification and submit prices as exact text", async () => {

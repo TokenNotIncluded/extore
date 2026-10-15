@@ -1306,3 +1306,47 @@ def test_issued_manual_product_field_labels_and_tutorials_remain_editable(
         ).status_code
         == 200
     )
+
+
+def test_marketplace_config_requires_fulfillment_permission(owner, setup_product):
+    private = {
+        "template": "fixed-content",
+        "fixed_content": "private-delivery",
+        "price_quota": 500000,
+    }
+    pid, _ = setup_product(
+        variants=[
+            {
+                "id": "default",
+                "name": "SKU",
+                "marketplace": private,
+            }
+        ]
+    )
+    link = create_link(owner, pid, ["product.edit"])
+    login_link(owner, link)
+    config = owner.get("/api/manage/product").json()
+    assert "marketplace" not in config["variants"][0]
+    config["name"] = "title-only-edit"
+    response = owner.put("/api/manage/product", json=config)
+    assert response.status_code == 200, response.text
+    assert "private-delivery" not in response.text
+    with db() as c:
+        stored = json.loads(
+            c.execute("SELECT config FROM products WHERE id=?", (pid,)).fetchone()[0]
+        )
+    assert stored["variants"][0]["marketplace"] == private
+    config["variants"][0]["marketplace"] = {"template": "text"}
+    assert owner.put("/api/manage/product", json=config).status_code == 403
+    as_owner(owner)
+    permitted = create_link(owner, pid, ["product.edit", "fulfillment.configure"])
+    login_link(owner, permitted)
+    config = owner.get("/api/manage/product").json()
+    assert config["variants"][0]["marketplace"] == private
+    config["variants"][0]["marketplace"]["fixed_content"] = "updated-delivery"
+    response = owner.put("/api/manage/product", json=config)
+    assert response.status_code == 200, response.text
+    assert (
+        response.json()["variants"][0]["marketplace"]["fixed_content"]
+        == "updated-delivery"
+    )

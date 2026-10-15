@@ -11,6 +11,7 @@ from pydantic import (
     model_validator,
 )
 
+from .marketplace_product import MarketplaceVariant
 from .variants import default_variant, normalize_price, validate_attributes
 
 LINK_PERMISSIONS = (
@@ -209,6 +210,11 @@ class ProductVariant(BaseModel):
         description="Optional reference price for configuring an external store, as exact decimal text. Extore handles redemption and does not collect payments.",
     )
     currency: str = Field(default="CNY", pattern=r"^[A-Z]{3,5}$")
+    marketplace: MarketplaceVariant = Field(
+        default_factory=MarketplaceVariant,
+        # Preserve the existing SKU wire shape until sales settings are used.
+        exclude_if=lambda value: value == MarketplaceVariant(),
+    )
     attributes: dict[str, Any] = Field(default_factory=dict)
     enabled: bool = Field(default=True, strict=True)
 
