@@ -116,6 +116,7 @@ def commerce_schema():
                 },
             },
             "enabled": {"type": "boolean"},
+            "card_summary": _ref("CardSummary"),
         },
         ("price", "attributes"),
     )
@@ -208,6 +209,15 @@ def commerce_schema():
             ],
         },
         "Field": field_schema,
+        "CardSummary": _object(
+            {
+                "total": {"type": "integer", "minimum": 0},
+                "states": {
+                    "type": "object",
+                    "additionalProperties": {"type": "integer", "minimum": 0},
+                },
+            }
+        ),
         "Variant": variant,
         "Product": product,
         "Listing": _object(
@@ -216,6 +226,8 @@ def commerce_schema():
                 "id": identity,
                 "shop_id": identity,
                 "revision": _ref("Revision"),
+                # Marketplace sales settings only. Card tallies stay out of this digest.
+                "sync_revision": _ref("Revision"),
                 "redemption_url": {"type": "string", "format": "uri"},
                 "semantics": _object(
                     {
@@ -232,6 +244,7 @@ def commerce_schema():
                     "maxItems": 100,
                     "items": _ref("Variant"),
                 },
+                "card_summary": _ref("CardSummary"),
             },
             (
                 "schema",
