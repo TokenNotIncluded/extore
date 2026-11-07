@@ -646,6 +646,7 @@ def _public(value):
     if not isinstance(value, dict):
         return value
     hidden = {
+        "marketplace",
         "webhook_secret",
         "access_token",
         "private_key",

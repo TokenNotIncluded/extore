@@ -644,18 +644,19 @@ def _marketplace_listing(c, pid):
         variant["marketplace"] = MarketplaceVariant.model_validate(
             variants[variant["id"]].get("marketplace") or {}
         ).model_dump()
-        variant["card_summary"] = _summary(
-            c, pid, time.time(), variant_id=variant["id"]
-        )
-    listing["card_summary"] = _summary(c, pid, time.time())
-    # Include sales settings in the version used for idempotent synchronisation.
+    # Card counts are live observations, not product configuration. Hash before
+    # attaching them so restocking cannot force a sync_revision change.
     listing["sync_revision"] = digest(
         canonical(
             {k: v for k, v in listing.items() if k not in ("revision", "card_summary")}
         )
     )
+    for variant in listing["variants"]:
+        variant["card_summary"] = _summary(
+            c, pid, time.time(), variant_id=variant["id"]
+        )
+    listing["card_summary"] = _summary(c, pid, time.time())
     return listing
-
 
 @router.get("/api/integrations/commerce/products")
 def catalog(request: Request):

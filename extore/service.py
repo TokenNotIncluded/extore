@@ -65,6 +65,7 @@ def public_product(p):
             "configured_fields",
             "task_flow",
             "workshop_slogan",
+            "marketplace",
             "deleted",
             "deleted_at",
             "deleted_by",
@@ -73,6 +74,11 @@ def public_product(p):
             "purged_by",
         )
     }
+    if "variants" in result:
+        result["variants"] = [
+            {key: value for key, value in variant.items() if key != "marketplace"}
+            for variant in result["variants"]
+        ]
     if p.get("task_flow"):
         from .flow_adapter import preview
 
