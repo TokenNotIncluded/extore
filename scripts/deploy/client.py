@@ -16,6 +16,9 @@ import tempfile
 from pathlib import Path
 
 SHA_PATTERN = re.compile(r"[0-9a-f]{40}")
+HASH_PATTERN = re.compile(r"[0-9a-f]{64}")
+MAX_PACKAGE_BYTES = 128 * 1024 * 1024
+MAX_PROVENANCE_BYTES = 256 * 1024
 
 
 def require_sha(sha):
@@ -67,6 +70,56 @@ def rpc(config, operation, sha):
 def digest(path):
     with path.open("rb") as file:
         return hashlib.file_digest(file, "sha256").hexdigest()
+
+
+def stage_package(config, sha, package, source_sha256, provenance):
+    """Transfer a CI-attested package; only the server authorizes its provenance."""
+    require_sha(sha)
+    if not isinstance(source_sha256, str) or not HASH_PATTERN.fullmatch(source_sha256):
+        raise ValueError("Expected the exact source archive SHA-256")
+    package = Path(package)
+    provenance = Path(provenance)
+    size = package.stat().st_size
+    provenance_size = provenance.stat().st_size
+    if not package.is_file() or not 0 < size <= MAX_PACKAGE_BYTES:
+        raise ValueError("Native package exceeds the allowed size")
+    if not provenance.is_file() or not 0 < provenance_size <= MAX_PROVENANCE_BYTES:
+        raise ValueError("A bounded provenance bundle is required")
+    package_sha256 = digest(package)
+    header = {
+        "format": 1,
+        "sha": sha,
+        "source_sha256": source_sha256,
+        "package_sha256": package_sha256,
+        "size": size,
+        "provenance_size": provenance_size,
+    }
+    with tempfile.TemporaryFile() as stream:
+        stream.write(json.dumps(header, separators=(",", ":")).encode("ascii") + b"\n")
+        for path in (provenance, package):
+            with path.open("rb") as source:
+                shutil.copyfileobj(source, stream)
+        stream.seek(0)
+        response = remote(
+            config,
+            "stage_package",
+            sha,
+            stdin=stream,
+            stdout=subprocess.PIPE,
+            timeout=600,
+        )
+    result = json.loads(response.stdout)
+    expected = {
+        "status": "staged",
+        "sha": sha,
+        "package_sha256": package_sha256,
+        "source_sha256": source_sha256,
+        "size": size,
+    }
+    if any(result.get(key) != value for key, value in expected.items()):
+        raise RuntimeError("Server did not attest to the exact uploaded package")
+    emit(f"Verified CI package staged for {sha}")
+    return result
 
 
 def verify_backup(path, target):
@@ -274,9 +327,17 @@ def drain(config, directory, artifact_id):
     )
 
 
-def prepare(sha, config, directory):
+def prepare(
+    sha, config, directory, *, package=None, source_sha256=None, provenance=None
+):
     emit(f"Preparing main {require_sha(sha)}")
     try:
+        if any(value is not None for value in (package, source_sha256, provenance)):
+            if not all((package, source_sha256, provenance)):
+                raise ValueError(
+                    "Package, source checksum and provenance must be supplied together"
+                )
+            stage_package(config, sha, package, source_sha256, provenance)
         value = rpc(config, "prepare", sha)
         if value["status"] == "pending_backup":
             raise RuntimeError(
@@ -344,7 +405,7 @@ def activate(sha, config, directory, artifact_id):
     except Exception:
         if activated:
             emit(
-                "Deployment failed; restoring program files if the database schema is unchanged"
+                "Deployment failed; restoring program files only for a verified compatible schema"
             )
             try:
                 with archive.open("rb") as source:
@@ -409,7 +470,14 @@ def main():
     elif args.stage == "drain":
         drain(config, work / "recovery", os.environ.get("EXTORE_BACKUP_ARTIFACT_ID"))
     elif args.stage == "prepare":
-        prepare(args.sha, config, work / "deployment")
+        prepare(
+            args.sha,
+            config,
+            work / "deployment",
+            package=os.environ.get("EXTORE_DEPLOY_PACKAGE"),
+            source_sha256=os.environ.get("EXTORE_DEPLOY_SOURCE_SHA256"),
+            provenance=os.environ.get("EXTORE_DEPLOY_PROVENANCE"),
+        )
     else:
         status = activate(
             args.sha,
