@@ -298,11 +298,29 @@ def test_old_webhook_callback_continues_after_delete(owner, setup_product):
     )
 
 
-def test_additive_schema15_preserves_all_old54_tables(owner, setup_product):
+def test_additive_lifecycle_schema_preserves_existing_tables(owner, setup_product):
     setup_product()
     init()
     with db() as c:
+        expected_version = c.execute("PRAGMA user_version").fetchone()[0]
+        expected_tables = {
+            r["name"]
+            for r in c.execute(
+                "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'"
+            )
+        }
+        removed = {
+            "product_purges",
+            "commerce_bindings",
+            "commerce_issuances",
+            "commerce_tokens",
+            "commerce_grants",
+            "commerce_requests",
+            "commerce_clients",
+            "product_lifecycle",
+        }
         for table in (
+            "commerce_bindings",
             "commerce_issuances",
             "commerce_tokens",
             "commerce_grants",
@@ -322,31 +340,24 @@ def test_additive_schema15_preserves_all_old54_tables(owner, setup_product):
                 "SELECT name,sql FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'"
             )
         }
-        assert len(before) == 59
+        assert set(before) == expected_tables - removed
     init()
     init()
     with db() as c:
-        assert c.execute("PRAGMA user_version").fetchone()[0] == 22
+        assert c.execute("PRAGMA user_version").fetchone()[0] == expected_version
         after = {
             r["name"]: r["sql"]
             for r in c.execute(
                 "SELECT name,sql FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'"
             )
         }
-        assert set(after) - set(before) == {
-            "product_lifecycle",
-            "product_purges",
-            "commerce_issuances",
-            "commerce_tokens",
-            "commerce_grants",
-            "commerce_requests",
-            "commerce_clients",
-        }
+        assert set(after) - set(before) == removed
         for name, (ddl, rows) in before.items():
             assert after[name] == ddl
             assert [tuple(v) for v in c.execute('SELECT * FROM "' + name + '"')] == rows
         assert not c.execute("SELECT * FROM product_lifecycle").fetchall()
         for table in (
+            "commerce_bindings",
             "commerce_issuances",
             "commerce_tokens",
             "commerce_grants",

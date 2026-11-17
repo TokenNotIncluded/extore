@@ -42,7 +42,7 @@ fn field<'a>(p: &'a Value, key: &str, kind: &str) -> Result<&'a Value> {
     }]
     .as_array()
     .and_then(|a| a.iter().find(|f| text(f, "key") == key && is_attachment(f)))
-    .ok_or_else(|| ApiError::new(422, "此字段不是文件或图片字段"))
+    .ok_or_else(|| ApiError::new(400, "此字段不是文件或图片字段"))
 }
 pub fn attachment_ids(f: &Value, value: &Value) -> Result<Vec<String>> {
     if !is_attachment(f) {
@@ -128,7 +128,13 @@ fn validate_image(ctx: &Context, item: &Value, f: &Value) -> Result<()> {
             [text(item, "id")],
             |r| r.get::<_, Vec<u8>>(0),
         )?;
-        images::content_type(&bytes)?;
+        let content_type = images::content_type(&bytes)?;
+        if text(item, "content_type") != content_type {
+            ctx.conn.execute(
+                "UPDATE job_files SET content_type=? WHERE id=?",
+                params![content_type, text(item, "id")],
+            )?;
+        }
     }
     Ok(())
 }
@@ -184,7 +190,11 @@ pub fn validate_output_files(ctx: &Context, job: &Value, p: &Value, values: &Val
     Ok(())
 }
 fn selected(p: &Value, values: &Value, kind: &str) -> Result<BTreeSet<String>> {
-    let mut result = BTreeSet::new();
+    Ok(selected_ordered(p, values, kind)?.into_iter().collect())
+}
+fn selected_ordered(p: &Value, values: &Value, kind: &str) -> Result<Vec<String>> {
+    let mut result = Vec::new();
+    let mut seen = BTreeSet::new();
     for f in p[if kind == "input" {
         "parameters"
     } else {
@@ -193,10 +203,11 @@ fn selected(p: &Value, values: &Value, kind: &str) -> Result<BTreeSet<String>> {
     .as_array()
     .ok_or_else(|| ApiError::bad("商品字段无效"))?
     {
-        result.extend(attachment_ids(
-            f,
-            values.get(text(f, "key")).unwrap_or(&json!("")),
-        )?);
+        for file_id in attachment_ids(f, values.get(text(f, "key")).unwrap_or(&json!("")))? {
+            if seen.insert(file_id.clone()) {
+                result.push(file_id);
+            }
+        }
     }
     Ok(result)
 }
@@ -243,7 +254,7 @@ pub fn release_output_files(ctx: &Context, job: &Value, p: &Value) -> Result<Vec
     let values = json_field(job, "result_json", json!({}));
     validate_output_files(ctx, job, p, &values)?;
     let mut result = vec![];
-    for fid in selected(p, &values, "output")? {
+    for fid in selected_ordered(p, &values, "output")? {
         let f = meta(ctx, &fid)?;
         if !flag(&f, "bound") {
             return Err(ApiError::new(409, "交付文件尚未完成"));
@@ -601,7 +612,13 @@ pub fn handle(ctx: &mut Context) -> Result<Option<Reply>> {
             return Err(ApiError::new(410, "此卡密已撤销或拒绝"));
         }
         let p = catalog::product(ctx, text(&card, "product_id"))?;
-        auth::shop(ctx, text(&p, "shop_id"))?;
+        auth::shop(ctx, text(&p, "shop_id")).map_err(|error| {
+            if error.status == 401 {
+                ApiError::new(404, "商品不存在或店铺不可用")
+            } else {
+                error
+            }
+        })?;
         let flow = fulfillment::flow::input_file_scope(
             ctx,
             &card,

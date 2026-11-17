@@ -307,12 +307,29 @@ def test_old_permissions_do_not_gain_purge_and_purge_only_grant_is_sufficient(
     assert LINK_PERMISSIONS[8:10] == ("product.delete", "product.purge")
 
 
-def test_schema16_only_adds_empty_purge_table_and_preserves_old55(owner, setup_product):
+def test_purge_schema_only_adds_expected_empty_tables(owner, setup_product):
     pid, _ = setup_product()
     remove(owner, pid)
     init()
     with db() as c:
+        expected_version = c.execute("PRAGMA user_version").fetchone()[0]
+        expected_tables = {
+            r["name"]
+            for r in c.execute(
+                "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'"
+            )
+        }
+        removed = {
+            "product_purges",
+            "commerce_bindings",
+            "commerce_issuances",
+            "commerce_tokens",
+            "commerce_grants",
+            "commerce_requests",
+            "commerce_clients",
+        }
         for table in (
+            "commerce_bindings",
             "commerce_issuances",
             "commerce_tokens",
             "commerce_grants",
@@ -331,25 +348,18 @@ def test_schema16_only_adds_empty_purge_table_and_preserves_old55(owner, setup_p
                 "SELECT name,sql FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'"
             )
         }
-        assert len(before) == 60
+        assert set(before) == expected_tables - removed
     init()
     init()
     with db() as c:
-        assert c.execute("PRAGMA user_version").fetchone()[0] == 22
+        assert c.execute("PRAGMA user_version").fetchone()[0] == expected_version
         names = {
             r["name"]
             for r in c.execute(
                 "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'"
             )
         }
-        assert names - set(before) == {
-            "product_purges",
-            "commerce_issuances",
-            "commerce_tokens",
-            "commerce_grants",
-            "commerce_requests",
-            "commerce_clients",
-        }
+        assert names - set(before) == removed
         for name, (ddl, rows) in before.items():
             assert (
                 c.execute(
@@ -360,6 +370,7 @@ def test_schema16_only_adds_empty_purge_table_and_preserves_old55(owner, setup_p
             assert [tuple(v) for v in c.execute('SELECT * FROM "' + name + '"')] == rows
         assert not c.execute("SELECT * FROM product_purges").fetchall()
         for table in (
+            "commerce_bindings",
             "commerce_issuances",
             "commerce_tokens",
             "commerce_grants",
