@@ -662,19 +662,26 @@ def test_parallel_same_key_mints_once_and_parallel_quotas_cannot_overrun(
     assert count_cards() == before + 3
 
 
-def test_schema22_additive_migration_preserves_original_tables_and_rows(setup_product):
+def test_commerce_schema_migration_preserves_original_tables_and_rows(setup_product):
     from extore.db import init
 
     setup_product()
     with db() as c:
-        for name in (
+        current_tables = {
+            row["name"]
+            for row in c.execute(
+                "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'"
+            )
+        }
+        additions = (
             "commerce_bindings",
             "commerce_issuances",
             "commerce_tokens",
             "commerce_grants",
             "commerce_requests",
             "commerce_clients",
-        ):
+        )
+        for name in additions:
             c.execute("DROP TABLE " + name)
         c.execute("PRAGMA user_version=21")
         before = {
@@ -686,11 +693,19 @@ def test_schema22_additive_migration_preserves_original_tables_and_rows(setup_pr
                 "SELECT name,sql FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' ORDER BY name"
             )
         }
-        assert len(before) == 61
+        assert set(before) == current_tables - set(additions)
     init()
     init()
     with db() as c:
         assert c.execute("PRAGMA user_version").fetchone()[0] == 23
+        after_tables = {
+            row["name"]
+            for row in c.execute(
+                "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'"
+            )
+        }
+        assert after_tables == current_tables
+        assert after_tables - set(before) == set(additions)
         for name, (ddl, rows) in before.items():
             assert (
                 c.execute(
@@ -700,6 +715,7 @@ def test_schema22_additive_migration_preserves_original_tables_and_rows(setup_pr
             )
             assert [tuple(row) for row in c.execute("SELECT * FROM " + name)] == rows
         for name in (
+            "commerce_bindings",
             "commerce_clients",
             "commerce_requests",
             "commerce_grants",

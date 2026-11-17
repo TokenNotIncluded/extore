@@ -462,12 +462,19 @@ def test_approval_logout_before_claim_cancels_pending_device(owner, clients):
         )
 
 
-def test_schema13_additive_migration_preserves_old39_tables(owner):
+def test_scope_schema_migration_preserves_existing_tables(owner):
     pid = product(owner)
     init()
     with db() as c:
         # Remove later additions to reproduce an actual schema-11 database.
-        for table in (
+        current_tables = {
+            row["name"]
+            for row in c.execute(
+                "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'"
+            )
+        }
+        additions = (
+            "commerce_bindings",
             "commerce_issuances",
             "commerce_tokens",
             "commerce_grants",
@@ -495,13 +502,14 @@ def test_schema13_additive_migration_preserves_old39_tables(owner):
             "pipeline_bindings",
             "pipeline_authorizations",
             "cli_device_requests",
-        ):
+        )
+        for table in additions:
             c.execute("DROP TABLE " + table)
         c.execute("PRAGMA user_version=11")
         tables = c.execute(
             "SELECT name,sql FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' ORDER BY name"
         ).fetchall()
-        assert len(tables) == 39
+        assert {row["name"] for row in tables} == current_tables - set(additions)
         before = {
             r["name"]: (
                 r["sql"],
@@ -511,7 +519,15 @@ def test_schema13_additive_migration_preserves_old39_tables(owner):
         }
     init()
     with db() as c:
-        assert c.execute("PRAGMA user_version").fetchone()[0] == 22
+        assert c.execute("PRAGMA user_version").fetchone()[0] == 23
+        after_tables = {
+            row["name"]
+            for row in c.execute(
+                "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'"
+            )
+        }
+        assert after_tables == current_tables
+        assert after_tables - set(before) == set(additions)
         for name, (ddl, rows) in before.items():
             assert (
                 c.execute(
@@ -522,6 +538,7 @@ def test_schema13_additive_migration_preserves_old39_tables(owner):
             assert [tuple(x) for x in c.execute('SELECT * FROM "' + name + '"')] == rows
         assert c.execute("SELECT id FROM products WHERE id=?", (pid,)).fetchone()
         for table in (
+            "commerce_bindings",
             "commerce_issuances",
             "commerce_tokens",
             "commerce_grants",

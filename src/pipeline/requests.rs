@@ -272,9 +272,6 @@ fn create_request(ctx: &Context) -> Result<Reply> {
         .filter(|v| !v.is_null())
         .map(|v| v.as_i64().filter(|n| *n > 0).ok_or_else(invalid))
         .transpose()?;
-    if aid.is_some() != revision.is_some() {
-        return Err(ApiError::bad("追加授权版本无效"));
-    }
     let perms = permissions(&ctx.body["permissions"], kind)?;
     let mut unsigned = ctx.body.clone();
     unsigned.as_object_mut().unwrap().remove("signature");
@@ -298,6 +295,9 @@ fn create_request(ctx: &Context) -> Result<Reply> {
             ctx.app.origin
         ),
     )?;
+    if aid.is_some() != revision.is_some() {
+        return Err(ApiError::bad("追加授权版本无效"));
+    }
     let issued = u64::from_be_bytes(
         cli::decode(nonce, 32)?[..8]
             .try_into()

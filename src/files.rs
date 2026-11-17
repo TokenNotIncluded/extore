@@ -29,7 +29,7 @@ pub fn max_multipart_bytes() -> usize {
     max_file_bytes() + 64 * 1024
 }
 fn multipart_error() -> ApiError {
-    ApiError::bad("上传表单无效，请先提交领取凭据和字段，再上传一个文件")
+    ApiError::bad("上传表单无效，请在文件之前提交领取凭据和字段，并且只上传一个文件")
 }
 fn is_attachment(f: &Value) -> bool {
     matches!(text(f, "type"), "file" | "image" | "images")
