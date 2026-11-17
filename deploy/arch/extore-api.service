@@ -6,8 +6,10 @@ After=network.target
 User=extore
 Group=extore
 EnvironmentFile=/etc/extore/extore.env
+Environment=EXTORE_STATIC=/usr/lib/extore/extore/static
+Environment=EXTORE_LISTEN=127.0.0.1:8095
 WorkingDirectory=/var/lib/extore
-ExecStart=/usr/lib/extore/.venv/bin/python -m uvicorn extore.app:app --host 127.0.0.1 --port 8095 --forwarded-allow-ips=127.0.0.1
+ExecStart=/usr/lib/extore/bin/extore serve
 Restart=on-failure
 RestartSec=5
 StateDirectory=extore

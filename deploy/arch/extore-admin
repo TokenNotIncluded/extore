@@ -2,5 +2,7 @@
 set -eu
 set -a
 . /etc/extore/extore.env
+: "${EXTORE_STATIC:=/usr/lib/extore/extore/static}"
+: "${EXTORE_LISTEN:=127.0.0.1:8095}"
 set +a
-exec /usr/lib/extore/.venv/bin/python -m extore.cli "$@"
+exec /usr/lib/extore/bin/extore "$@"

@@ -1,12 +1,12 @@
 pkgname=extore
-pkgver=0.11.3
-pkgrel=4
-pkgdesc='Single-merchant redemption and fulfillment service'
+pkgver=1.0.0
+pkgrel=1
+pkgdesc='Native redemption, commerce and fulfillment service'
 arch=('x86_64')
 url='https://github.com/TokenNotIncluded/extore'
 license=('MIT')
-depends=('python' 'bubblewrap>=0.12' 'libseccomp')
-makedepends=('uv')
+depends=('python' 'bubblewrap>=0.12' 'libseccomp' 'openssl' 'gcc-libs')
+makedepends=('rust')
 options=('!strip' '!debug')
 backup=('etc/extore/extore.env')
 source=('extore-source.tar.gz')
@@ -14,16 +14,23 @@ sha256sums=('SKIP')
 
 build() {
   cd "$srcdir/extore-source"
-  uv sync --frozen --no-dev --no-editable --python /usr/bin/python --no-managed-python
+  cargo build --locked --release
 }
 
 package() {
   cd "$srcdir/extore-source"
-  install -d "$pkgdir/usr/lib/extore"
-  cp -a .venv "$pkgdir/usr/lib/extore/"
-  # Services and scripts launch via python -m; omit source-bound entrypoints.
-  find "$pkgdir/usr/lib/extore/.venv/bin" -type f -delete
-  rm -f "$pkgdir"/usr/lib/extore/.venv/lib/python*/site-packages/extore-*.dist-info/direct_url.json
+  install -Dm755 target/release/extore "$pkgdir/usr/lib/extore/bin/extore"
+  install -d "$pkgdir/usr/bin"
+  ln -s ../lib/extore/bin/extore "$pkgdir/usr/bin/extore"
+  # Python is retained only for the reviewed processor runner and its stdlib SDK.
+  for directory in extore/static extore/sdk processors/official/extore_processors; do
+    while IFS= read -r -d '' path; do
+      install -Dm644 "$path" "$pkgdir/usr/lib/extore/$path"
+    done < <(find "$directory" -type f ! -path '*/__pycache__/*' ! -name '*.py[co]' -print0)
+  done
+  for path in __init__.py processor_runner.py variants.py task_flow_definition.py task_flow_schema.py; do
+    install -Dm644 "extore/$path" "$pkgdir/usr/lib/extore/extore/$path"
+  done
   install -Dm644 deploy/arch/extore-api.service "$pkgdir/usr/lib/systemd/system/extore-api.service"
   install -Dm644 deploy/arch/extore-worker.service "$pkgdir/usr/lib/systemd/system/extore-worker.service"
   install -Dm644 deploy/arch/extore.sysusers "$pkgdir/usr/lib/sysusers.d/extore.conf"

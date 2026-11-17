@@ -7,8 +7,10 @@ Wants=network-online.target
 User=extore
 Group=extore
 EnvironmentFile=/etc/extore/extore.env
+Environment=EXTORE_STATIC=/usr/lib/extore/extore/static
+Environment=EXTORE_LISTEN=127.0.0.1:8095
 WorkingDirectory=/var/lib/extore
-ExecStart=/usr/lib/extore/.venv/bin/python -m extore.worker
+ExecStart=/usr/lib/extore/bin/extore worker
 Restart=on-failure
 RestartSec=5
 StateDirectory=extore

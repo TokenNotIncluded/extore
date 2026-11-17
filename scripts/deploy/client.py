@@ -118,8 +118,18 @@ def verify_backup(path, target):
         }
 
 
+def static_prefix(value):
+    runtime = value.get("runtime", "python")
+    if runtime == "rust":
+        return "usr/lib/extore/extore/static/"
+    if runtime == "python":
+        return "extore/static/"
+    raise RuntimeError("Unknown runtime in deployment metadata")
+
+
 def public_check(config, value):
     origin = config["origin"].rstrip("/")
+    prefix = static_prefix(value)
 
     def fetch(path):
         return subprocess.check_output(
@@ -137,18 +147,27 @@ def public_check(config, value):
             ]
         )
 
-    if json.loads(fetch("/health")) != {"status": "ok"}:
-        raise RuntimeError("Public health check failed")
-    if json.loads(fetch("/openapi.json"))["info"]["version"] != value["version"]:
-        raise RuntimeError("Public API version mismatch")
+    health = json.loads(fetch("/health"))
+    if value.get("runtime") == "rust":
+        if (
+            health.get("status") != "ok"
+            or health.get("runtime") != "rust"
+            or health.get("version") != value["version"]
+        ):
+            raise RuntimeError("Public native health/version check failed")
+    else:
+        if health != {"status": "ok"}:
+            raise RuntimeError("Public health check failed")
+        if json.loads(fetch("/openapi.json"))["info"]["version"] != value["version"]:
+            raise RuntimeError("Public API version mismatch")
 
     def check_asset(item):
         name, expected = item
-        if name.startswith("extore/static/"):
+        if name.startswith(prefix):
             path = (
                 "/AGENTS.md"
-                if name == "extore/static/AGENTS.md"
-                else "/static/" + name.removeprefix("extore/static/")
+                if name == prefix + "AGENTS.md"
+                else "/static/" + name.removeprefix(prefix)
             )
             actual = hashlib.sha256(
                 fetch(path + "?deploy=" + value["sha"][:12])
@@ -189,6 +208,8 @@ def make_backup(value, config, directory):
     if archive_hash != info["archive_sha256"]:
         raise RuntimeError("Runner and server backup checksums differ")
     value["old_database"] = info["database"]
+    if "old_runtime_paths" in info:
+        value["old_runtime_paths"] = info["old_runtime_paths"]
     artifact = directory / "artifact"
     artifact.mkdir(mode=0o700)
     encrypted = artifact / "recovery.tar.gz.age"
@@ -207,7 +228,13 @@ def make_backup(value, config, directory):
     (artifact / "SHA256SUMS").write_text(f"{digest(encrypted)}  recovery.tar.gz.age\n")
     (artifact / "manifest.json").write_text(
         json.dumps(
-            {"sha": sha, "version": value["version"], "archive_sha256": archive_hash},
+            {
+                "sha": sha,
+                "version": value["version"],
+                "runtime": value.get("runtime", "python"),
+                "archive_sha256": archive_hash,
+                "old_runtime_paths": value.get("old_runtime_paths"),
+            },
             sort_keys=True,
         )
         + "\n"
@@ -290,10 +317,11 @@ def activate(sha, config, directory, artifact_id):
             return "superseded"
         public_check(config, value)
         final = rpc(config, "confirm", sha)
-        count = sum(name.startswith("extore/static/") for name in value["files"])
+        count = sum(name.startswith(static_prefix(value)) for name in value["files"])
         report = {
             "sha": sha,
             "version": value["version"],
+            "runtime": value.get("runtime", "python"),
             "backup_artifact_id": artifact_id,
             "backup_sha256": state["archive_sha256"],
             "restored_database": state["restored_database"],
