@@ -43,7 +43,12 @@ fs2 = "0.4"
 
 libc = "0.2"
 
+unicode-general-category = "1.1"
+
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "webp"] }
+
 [dev-dependencies]
+p256 = { version = "0.13", features = ["ecdsa"] }
 tempfile = "3"
 tower = { version = "0.5", features = ["util"] }
 
