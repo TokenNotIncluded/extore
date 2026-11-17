@@ -143,7 +143,7 @@ function page(options = {}) {
   function find(selector, root = null) {
     return findAll(selector, root)[0] || null;
   }
-  for (const id of ["app", "brand", "theme", "language", "accent", "appearance", "appearance-label", "appearance-note", "theme-label", "language-label", "accent-label", "header-context", "toast", "workspace"])
+  for (const id of ["app", "brand", "theme", "language", "accent", "appearance", "appearance-label", "appearance-note", "theme-label", "language-label", "accent-label", "header-context", "header-workspace", "skip-link", "footer-note", "toast", "workspace"])
     nodes.set(id, element(id));
   for (const [id, values] of [["theme", ["auto", "light", "dark"]], ["language", ["auto"]], ["accent", ["green", "blue", "violet", "rose", "amber", "graphite"]]]) {
     for (const value of values) {

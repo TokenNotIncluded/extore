@@ -371,16 +371,30 @@ test("首页重绘清理旧纸卡事件，断开的纸卡与已销毁控制器�
   assert.equal(controller.disposed, true);
 });
 
-test("真实首页模板移除切换按钮，纸卡与纵向商品列表可键盘聚焦", async () => {
+test("真实首页模板保留兑换入口、可访问商品列表与键盘搜索", async () => {
   const homeSource = appSource.slice(appSource.indexOf("async function home() {"), appSource.indexOf("function receiptRequestContext("));
   const app = { innerHTML: "" };
   let list = [{ name: '<img src=x onerror="alert(1)">', logo: "", delivery: "content", mode: "manual" }];
-  let mounts = 0;
   let refreshes = 0;
+  let searchInput;
+  let detailClick;
+  let openedProduct;
   const controls = [];
+  const rows = [{ dataset: { catalogueItem: "0" }, hidden: false }];
+  const empty = { hidden: true };
   const code = { addEventListener: (event, handler) => {
     assert.equal(event, "input");
     assert.equal(typeof handler, "function");
+  } };
+  const search = { addEventListener: (event, handler) => {
+    assert.equal(event, "input");
+    assert.equal(typeof handler, "function");
+    searchInput = handler;
+  } };
+  const detail = { dataset: { product: "0" }, addEventListener: (event, handler) => {
+    assert.equal(event, "click");
+    assert.equal(typeof handler, "function");
+    detailClick = handler;
   } };
   const context = {
     clearDeliveryBlobs() {},
@@ -394,16 +408,29 @@ test("真实首页模板移除切换按钮，纸卡与纵向商品列表可键�
     icon: "<svg></svg>", form: (handler) => assert.equal(typeof handler, "function"),
     on: (selector, handler) => { controls.push(selector); assert.equal(typeof handler, "function"); },
     pasteCodes: async () => {}, updateCodeCount: () => {},
-    $: (selector) => { assert.equal(selector, "#code"); return code; },
-    window: { ExtoreMotion: { mountHome: (target) => { assert.equal(target, app); mounts++; } }, ExtoreWebMCP: { refresh: () => refreshes++ } },
-    document: { querySelectorAll: () => [] },
+    publicDetail: (product) => { openedProduct = product; },
+    $: (selector) => {
+      if (selector === "#code") return code;
+      if (selector === "#catalogue-search") return list.length ? search : null;
+      if (selector === "#catalogue-empty") return list.length ? empty : null;
+      assert.fail(`Unexpected selector: ${selector}`);
+    },
+    window: { ExtoreWebMCP: { refresh: () => refreshes++ } },
+    document: { querySelectorAll: (selector) => {
+      if (selector === "[data-catalogue-item]") return list.length ? rows : [];
+      if (selector === "[data-product]") return list.length ? [detail] : [];
+      assert.fail(`Unexpected selector: ${selector}`);
+    } },
   };
   const render = vm.runInNewContext(`${homeSource}\nhome`, context);
   await render();
   assert.doesNotMatch(app.innerHTML, /home-paper-tabs|home-show-products|home-show-redeem|<nav/);
-  assert.match(app.innerHTML, /data-home-paper="products" tabindex="0" aria-label="公开商品"/);
-  assert.match(app.innerHTML, /data-home-paper="redeem" tabindex="0" aria-label="卡密兑换"/);
-  assert.match(app.innerHTML, /class="home-product-list" tabindex="0" role="region" aria-label="公开商品列表，可上下滚动"/);
+  assert.match(app.innerHTML, /<section class="exchange" aria-labelledby="redeem-heading">/);
+  assert.match(app.innerHTML, /<section class="home-catalogue" aria-labelledby="catalogue-heading">/);
+  assert.match(app.innerHTML, /class="home-product-list" role="list"/);
+  assert.match(app.innerHTML, /class="product-row" role="listitem" data-catalogue-item="0"/);
+  assert.match(app.innerHTML, /<label class="catalogue-search"><span class="sr-only">搜索商品<\/span><input id="catalogue-search" type="search"/);
+  assert.match(app.innerHTML, /<button class="secondary" data-product="0">/);
   assert.match(app.innerHTML, /&lt;img src=x onerror=&quot;alert\(1\)&quot;&gt;/);
   assert.match(app.innerHTML, /<form id="form">/);
   assert.equal(context.currentToken, "");
@@ -412,10 +439,17 @@ test("真实首页模板移除切换按钮，纸卡与纵向商品列表可键�
   assert.equal(context.batchSelection, "");
   assert.equal(context.batchRetryOnly, false);
   assert.equal(controls[0], "#paste-code");
+  detailClick();
+  assert.equal(openedProduct, list[0]);
+  searchInput({ target: { value: "missing product" } });
+  assert.equal(rows[0].hidden, true);
+  assert.equal(empty.hidden, false);
+  searchInput({ target: { value: " IMG " } });
+  assert.equal(rows[0].hidden, false);
+  assert.equal(empty.hidden, true);
   list = [];
   await render();
-  assert.match(app.innerHTML, /<h1>暂无公开商品<\/h1>/);
+  assert.match(app.innerHTML, /<h3>商品即将上架<\/h3>/);
   assert.doesNotMatch(app.innerHTML, /class="home-product-list"/);
-  assert.equal(mounts, 2);
   assert.equal(refreshes, 2);
 });
