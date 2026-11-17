@@ -345,6 +345,16 @@ fn authority(
     require_input: bool,
 ) -> Result<()> {
     let ctx = Context::background(app)?;
+    authority_in(&ctx, job, processor_id, context, execution, require_input)
+}
+fn authority_in(
+    ctx: &Context,
+    job: &Value,
+    processor_id: &str,
+    context: &Value,
+    execution: Option<&Value>,
+    require_input: bool,
+) -> Result<()> {
     let j = required(
         &ctx.conn,
         "SELECT * FROM jobs WHERE id=?",
@@ -388,6 +398,69 @@ fn authority(
     }
     Ok(())
 }
+fn add_delivery_context(ctx: &Context, job: &Value, payload: &mut Value) -> Result<()> {
+    // Match the reviewed SDK contract without loading historical delivery bodies.
+    let context = fulfillment::entitlements::job_context(ctx, job, false)?;
+    for key in [
+        "card_attributes",
+        "entitlements",
+        "revision",
+        "deliveries",
+        "last_delivery",
+    ] {
+        if let Some(value) = context.get(key) {
+            payload[key] = value.clone();
+        }
+    }
+    Ok(())
+}
+fn bootstrap_progress(ctx: &Context, job: &Value, steps: &Value) -> Result<()> {
+    let steps = steps
+        .as_array()
+        .filter(|s| !s.is_empty() && s.len() <= 30)
+        .ok_or_else(|| ApiError::bad("处理步骤数量无效"))?;
+    let mut ids = std::collections::BTreeSet::new();
+    for step in steps {
+        let id = text(step, "id");
+        let labels = step["label"]
+            .as_object()
+            .filter(|labels| !labels.is_empty() && labels.len() <= 20)
+            .ok_or_else(|| ApiError::bad("处理步骤名称无效"))?;
+        if step.as_object().is_none_or(|s| s.len() != 2)
+            || id.is_empty()
+            || id.len() > 40
+            || !id.as_bytes()[0].is_ascii_lowercase() && !id.as_bytes()[0].is_ascii_digit()
+            || !id
+                .bytes()
+                .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || matches!(b, b'_' | b'-'))
+            || !ids.insert(id)
+            || labels.iter().any(|(key, value)| {
+                key.trim().is_empty()
+                    || key.chars().count() > 40
+                    || value
+                        .as_str()
+                        .is_none_or(|v| v.trim().is_empty() || v.chars().count() > 200)
+            })
+        {
+            return Err(ApiError::bad("处理步骤无效或重复"));
+        }
+    }
+    let (plan, completed) = fulfillment::progress(ctx, job)?;
+    if !matches!(text(job, "state"), "queued" | "processing")
+        || !plan.is_empty()
+        || !completed.is_empty()
+    {
+        return Err(ApiError::new(
+            409,
+            "只有尚未定义步骤的待处理任务可以设置处理步骤",
+        ));
+    }
+    ctx.conn.execute(
+        "UPDATE jobs SET progress_plan=?,completed_steps='[]',progress=0 WHERE id=?",
+        params![json!(steps).to_string(), text(job, "id")],
+    )?;
+    Ok(())
+}
 struct Process(Child);
 impl Drop for Process {
     fn drop(&mut self) {
@@ -406,6 +479,21 @@ pub fn execute_script(
     product: &Value,
     execution: Option<&Value>,
 ) -> Result<Value> {
+    let mut stage = "prepare";
+    let result = execute_script_inner(app, job, product, execution, &mut stage);
+    if let Err(error) = &result {
+        // Record only a fixed stage and status: processor stderr and task input may contain secrets.
+        eprintln!("processor_failure stage={stage} status={}", error.status);
+    }
+    result
+}
+fn execute_script_inner(
+    app: Arc<App>,
+    job: &Value,
+    product: &Value,
+    execution: Option<&Value>,
+    stage: &mut &'static str,
+) -> Result<Value> {
     let ctx = Context::background(app.clone())?;
     let processor_id = text(product, "processor_id");
     let current = required(
@@ -414,9 +502,12 @@ pub fn execute_script(
         [text(job, "id")],
         "任务不存在",
     )?;
+    *stage = "runtime_binding";
     let (configuration, shop_context, flow) =
         catalog::profiles::runtime_execution(&ctx, &current, processor_id)?;
+    *stage = "workflow";
     let workflow = workflow(&flow)?;
+    *stage = "input_authority";
     authority(
         app.clone(),
         job,
@@ -425,6 +516,7 @@ pub fn execute_script(
         execution,
         true,
     )?;
+    *stage = "payload";
     let parameters =
         execution
             .map(|v| v["params"].clone())
@@ -436,20 +528,17 @@ pub fn execute_script(
             .unwrap()
             .extend(workflow[k].as_object().unwrap().clone());
     }
-    let mut payload = json!({"job_id":job["id"],"product_id":job["product_id"],"attempt":job["attempt"],"params":parameters,"configuration":configuration,"variant":catalog::card_variant(&ctx,&current)?,"steps":json_field(&current,"progress_plan",json!([])),"completed_steps":json_field(&current,"completed_steps",json!([])),"shop_context":shop_context,"environment":environment});
-    if let Some(entitlements) = row(
-        &ctx.conn,
-        "SELECT attributes,policy FROM card_entitlements WHERE card_id=?",
-        [text(&current, "card_id")],
-    )? {
-        payload["card_attributes"] = json_field(&entitlements, "attributes", json!({}));
-    }
+    let (steps, completed_steps) = fulfillment::progress(&ctx, &current)?;
+    let mut payload = json!({"job_id":job["id"],"product_id":job["product_id"],"attempt":job["attempt"],"params":parameters,"configuration":configuration,"variant":catalog::card_variant(&ctx,&current)?,"steps":steps,"completed_steps":completed_steps,"shop_context":shop_context,"environment":environment});
+    add_delivery_context(&ctx, &current, &mut payload)?;
     payload["instructions"] = catalog::instructions(&ctx, text(&current, "product_id"))?;
     let encoded = serde_json::to_vec(&payload)?;
     if encoded.len() > 200000 {
         return Err(ApiError::bad("处理器任务输入超过限制"));
     }
+    *stage = "sandbox_setup";
     let (python, runner, args) = sandbox(&app, processor_id)?;
+    *stage = "launch_authority";
     authority(
         app.clone(),
         job,
@@ -479,6 +568,7 @@ pub fn execute_script(
     for (key, value) in environment.as_object().unwrap() {
         command.env(format!("EXTORE_WORKFLOW_{key}"), value.as_str().unwrap());
     }
+    *stage = "spawn";
     let mut process = Process(command.spawn()?);
     let mut stdin = process.0.stdin.take().ok_or_else(runtime_error)?;
     let stdout = process.0.stdout.take().ok_or_else(runtime_error)?;
@@ -510,6 +600,7 @@ pub fn execute_script(
             }
         }
     });
+    *stage = "protocol";
     let start = Instant::now();
     let timeout = Duration::from_secs(integer(&workflow["runtime"], "timeout_seconds", 120) as u64);
     let mut result = None;
@@ -551,10 +642,24 @@ pub fn execute_script(
                             return Err(ApiError::bad("处理器进度更新超过限制"));
                         }
                         value["state"] = json!("processing");
+                        *stage = "progress_update";
                         transaction(app.clone(), |ctx| {
+                            // Freeze the reviewed processor's initial plan and apply its
+                            // update under the same current-authority transaction.
+                            authority_in(ctx, job, processor_id, &shop_context, execution, false)?;
+                            if execution.is_none() {
+                                if let Some(steps) = value.get("progress_steps") {
+                                    let current = fulfillment::job(ctx, text(job, "id"))?;
+                                    bootstrap_progress(ctx, &current, steps)?;
+                                }
+                            } else {
+                                // Flow steps belong to the frozen flow, not an individual processor.
+                                value.as_object_mut().unwrap().remove("completed_steps");
+                            }
                             fulfillment::apply_update(ctx, text(job, "id"), &value)?;
                             Ok(())
                         })?;
+                        *stage = "protocol";
                     }
                     "result" if matches!(text(&value, "state"), "succeeded" | "failed") => {
                         result = Some(value)
@@ -582,7 +687,9 @@ pub fn execute_script(
         }
         std::thread::sleep(Duration::from_millis(25));
     }
+    *stage = "input_write";
     sender.join().map_err(|_| runtime_error())??;
+    *stage = "process_exit";
     while process.0.try_wait()?.is_none() {
         authority(
             app.clone(),
@@ -600,6 +707,11 @@ pub fn execute_script(
     if !process.0.wait()?.success() {
         return Err(runtime_error());
     }
+    *stage = "final_authority";
     authority(app, job, processor_id, &shop_context, execution, false)?;
+    *stage = "result";
     result.ok_or_else(runtime_error)
 }
+
+#[cfg(test)]
+mod tests;
