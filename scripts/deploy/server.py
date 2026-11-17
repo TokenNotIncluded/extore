@@ -543,10 +543,54 @@ def cleanup(sha):
     return {"status": "cleaned", "sha": sha}
 
 
+SCHEMA_23_ADDITIONS = {
+    "commerce_bindings": (
+        "table",
+        "CREATE TABLE commerce_bindings (id TEXT PRIMARY KEY,shop_id TEXT NOT NULL REFERENCES shops(id) ON DELETE CASCADE,key_digest TEXT UNIQUE NOT NULL,label TEXT NOT NULL,created REAL NOT NULL,expires REAL NOT NULL,revoked INTEGER NOT NULL DEFAULT 0 CHECK(revoked IN (0,1)))",
+    ),
+    "commerce_bindings_shop": (
+        "index",
+        "CREATE INDEX commerce_bindings_shop ON commerce_bindings(shop_id,revoked)",
+    ),
+}
+
+
+def rollback_schema_compatible(previous, current):
+    """Only the verified 22-to-23 catalogue-binding addition may differ."""
+    versions = (previous.get("user_version"), current.get("user_version"))
+    if current["schema_sha256"] == previous["schema_sha256"]:
+        return versions[0] == versions[1] or versions == (22, 23)
+    if versions != (22, 23):
+        return False
+    with sqlite3.connect(
+        f"file:{DATA / 'extore.sqlite3'}?mode=ro", uri=True
+    ) as connection:
+        schema = connection.execute(
+            "SELECT type,name,sql FROM sqlite_master WHERE sql IS NOT NULL ORDER BY type,name"
+        ).fetchall()
+    additions = {
+        name: (kind, sql) for kind, name, sql in schema if name in SCHEMA_23_ADDITIONS
+    }
+    if additions.keys() != SCHEMA_23_ADDITIONS.keys():
+        return False
+    for name, (expected_kind, expected_sql) in SCHEMA_23_ADDITIONS.items():
+        kind, sql = additions[name]
+        if (
+            kind != expected_kind
+            or "".join(sql.split()).lower() != "".join(expected_sql.split()).lower()
+        ):
+            return False
+    baseline = [row for row in schema if row[1] not in SCHEMA_23_ADDITIONS]
+    return (
+        hashlib.sha256(json.dumps(baseline).encode()).hexdigest()
+        == previous["schema_sha256"]
+    )
+
+
 def rollback(sha):
     value = prepared(sha)
     run("systemctl", "stop", *SERVICES, stdout=sys.stderr)
-    if database_summary()["schema_sha256"] != value["old_database"]["schema_sha256"]:
+    if not rollback_schema_compatible(value["old_database"], database_summary()):
         raise RuntimeError(
             "Schema changed; preserve data and recover manually from the encrypted artifact"
         )

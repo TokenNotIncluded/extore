@@ -6,6 +6,7 @@ import json
 import os
 import runpy
 import shutil
+import sqlite3
 import subprocess
 import tarfile
 from pathlib import Path
@@ -383,3 +384,98 @@ def test_rollback_restores_only_programs_and_keeps_new_business_data(
     old_program = root / next(iter(old_files))
     assert old_program.read_bytes() == b"old program"
     assert "var/lib/extore" not in next(args for args in calls if args[0] == "tar")
+
+
+def schema22_fixture(tmp_path):
+    database = tmp_path / "extore.sqlite3"
+    with sqlite3.connect(database) as connection:
+        connection.executescript(
+            "CREATE TABLE shops(id TEXT PRIMARY KEY);"
+            "CREATE TABLE cards(id TEXT PRIMARY KEY);"
+            "INSERT INTO shops VALUES ('retained-shop');"
+            "INSERT INTO cards VALUES ('old-card');"
+            "PRAGMA user_version=22;"
+        )
+    return database, SERVER["database_summary"](database)
+
+
+def add_schema23_bindings(database):
+    with sqlite3.connect(database) as connection:
+        for kind, sql in SERVER["SCHEMA_23_ADDITIONS"].values():
+            connection.execute(sql)
+        connection.execute("PRAGMA user_version=23")
+
+
+def test_rollback_accepts_only_verified_schema23_additions_without_reverting_new_rows(
+    tmp_path, monkeypatch
+):
+    database, previous = schema22_fixture(tmp_path)
+    add_schema23_bindings(database)
+    with sqlite3.connect(database) as connection:
+        connection.execute("INSERT INTO cards VALUES ('new-paid-card')")
+        connection.execute(
+            "INSERT INTO commerce_bindings VALUES ('binding','retained-shop','key-digest','retained binding',0,1,0)"
+        )
+    namespace = SERVER["rollback_schema_compatible"].__globals__
+    monkeypatch.setitem(namespace, "DATA", tmp_path)
+    assert SERVER["rollback_schema_compatible"](
+        previous, SERVER["database_summary"](database)
+    )
+    with sqlite3.connect(database) as connection:
+        assert connection.execute("PRAGMA user_version").fetchone()[0] == 23
+        assert connection.execute("SELECT id FROM cards ORDER BY id").fetchall() == [
+            ("new-paid-card",),
+            ("old-card",),
+        ]
+        assert connection.execute("SELECT id FROM commerce_bindings").fetchall() == [
+            ("binding",)
+        ]
+
+
+@pytest.mark.parametrize(
+    "change",
+    [
+        "ALTER TABLE cards ADD COLUMN unreviewed TEXT",
+        "CREATE TABLE unreviewed(id TEXT)",
+        "DROP TABLE cards",
+        "ALTER TABLE commerce_bindings ADD COLUMN unreviewed TEXT",
+        "DROP INDEX commerce_bindings_shop",
+        "DROP INDEX commerce_bindings_shop; CREATE INDEX commerce_bindings_shop ON commerce_bindings(label)",
+        "PRAGMA user_version=24",
+    ],
+)
+def test_rollback_still_rejects_every_unreviewed_schema_change(
+    tmp_path, monkeypatch, change
+):
+    database, previous = schema22_fixture(tmp_path)
+    add_schema23_bindings(database)
+    with sqlite3.connect(database) as connection:
+        connection.executescript(change)
+    namespace = SERVER["rollback_schema_compatible"].__globals__
+    monkeypatch.setitem(namespace, "DATA", tmp_path)
+    assert not SERVER["rollback_schema_compatible"](
+        previous, SERVER["database_summary"](database)
+    )
+
+
+def test_schema23_exception_cannot_be_used_for_other_previous_versions(
+    tmp_path, monkeypatch
+):
+    database, previous = schema22_fixture(tmp_path)
+    add_schema23_bindings(database)
+    namespace = SERVER["rollback_schema_compatible"].__globals__
+    monkeypatch.setitem(namespace, "DATA", tmp_path)
+    for version in [0, 21, 23, 24]:
+        assert not SERVER["rollback_schema_compatible"](
+            {**previous, "user_version": version}, SERVER["database_summary"](database)
+        )
+
+
+def test_unchanged_runtime_schema_remains_rollback_compatible(tmp_path):
+    database, previous = schema22_fixture(tmp_path)
+    assert SERVER["rollback_schema_compatible"](
+        previous, SERVER["database_summary"](database)
+    )
+    add_schema23_bindings(database)
+    current = SERVER["database_summary"](database)
+    assert SERVER["rollback_schema_compatible"](current, current)
