@@ -7,7 +7,7 @@ url='https://github.com/TokenNotIncluded/extore'
 license=('MIT')
 depends=('python' 'bubblewrap>=0.12' 'libseccomp' 'openssl' 'gcc-libs')
 makedepends=('rust')
-options=('!strip' '!debug')
+options=('!strip' '!debug' '!lto')
 backup=('etc/extore/extore.env')
 source=('extore-source.tar.gz')
 sha256sums=('SKIP')
