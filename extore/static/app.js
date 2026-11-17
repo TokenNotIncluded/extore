@@ -573,7 +573,7 @@ $("#brand").addEventListener("click", () => {
 });
 function syncPreferenceControls() {
   $("#theme").value = preferences.settings.theme;
-  $("#accent").value = preferences.settings.accent || "green";
+  $("#accent").value = preferences.settings.accent || "blue";
   $("#appearance-label").textContent = tr("外观", "Appearance");
   $("#theme-label").textContent = tr("颜色主题", "Color theme");
   $("#accent-label").textContent = tr("强调色", "Accent color");
@@ -593,6 +593,9 @@ function syncPreferenceControls() {
     "Language: Auto",
   );
   $("#header-context").textContent = tr("兑换与领取", "Redeem & collect");
+  $("#header-workspace").textContent = tr("商家工作台", "Workspace");
+  $("#skip-link").textContent = tr("跳至内容", "Skip to content");
+  $("#footer-note").textContent = tr("兑换、处理、交付。", "Redeem. Process. Deliver.");
 }
 syncPreferenceControls();
 preferences.subscribe(({ resolved }) => {
@@ -643,7 +646,10 @@ async function home() {
   currentEntitlements = null;
   const list = await api("/products");
   if (generation !== queueLoadId || location.pathname !== pathname || location.hash !== hash) return;
-  app.innerHTML = `<section class="intro home-paper-stack"><section class="intro-copy public-card" data-home-paper="products" tabindex="0" aria-label="${tr("公开商品", "Public products")}"><h1>${list.length ? tr("公开商品", "Public products") : tr("暂无公开商品", "No public products")}</h1><div class="paper-divider" aria-hidden="true"></div>${list.length ? `<p class="caption">${tr("选择商品了解详情，兑换需有效卡密。", "Browse the details. A valid code is required to redeem.")}</p><div class="home-product-list" tabindex="0" role="region" aria-label="${tr("公开商品列表，可上下滚动", "Public product list, scroll vertically")}">${list.map((p, i) => `<article class="product-row">${p.logo ? `<img src="${esc(p.logo)}" alt="">` : `<div class="product-icon">${icon}</div>`}<div class="product-info"><h3>${esc(p.name)}</h3><p>${tr(p.delivery === "service" ? "服务兑换" : "商品领取", p.delivery === "service" ? "Service" : "Digital delivery")} · ${tr(p.mode === "manual" ? "队列处理" : "自动处理", p.mode === "manual" ? "Queue processing" : "Automatic")}</p></div><button class="secondary" data-product="${i}">${tr("查看详情", "Details")}</button></article>`).join("")}</div>` : ""}</section><section class="exchange" data-home-paper="redeem" tabindex="0" aria-label="${tr("卡密兑换", "Redeem a code")}"><h2>${tr("开始兑换", "Redeem your code")}</h2><p>${tr("请使用购买商品时获得的卡密。", "Use the code you received with your purchase.")}</p><form id="form"><div class="field"><label for="code">${tr("兑换卡密", "Redemption code")}</label><div class="code-entry"><textarea class="code" id="code" rows="2" placeholder="XXXXXXXX-XXXXXXXX-XXXXXXXX-XXXXXXXX" required autocomplete="off" spellcheck="false" maxlength="8000"></textarea><button id="paste-code" class="secondary paste-code" type="button">${tr("粘贴", "Paste")}</button></div><p id="code-count" class="caption"></p><p class="caption">${tr("多张卡密请换行，或用空格、逗号分开。验证后仍得到一个领取链接。", "Separate extra codes with new lines, spaces, or commas. You still get one receipt link.")}</p></div><button type="submit" class="full">${tr("验证并继续", "Verify and continue")} →</button><div id="error" class="error" role="alert"></div></form><div class="footnote">${tr("已有领取链接？直接打开即可查看处理进度。", "Already have a receipt link? Open it to check progress.")}</div></section></section>`;
+  app.innerHTML = `<section class="home-intro"><p class="native-eyebrow">EXTORE · ${tr("数字交付", "DIGITAL DELIVERY")}</p><h1>${tr("兑换与领取", "Your delivery starts here.")}</h1><p>${tr("输入卡密，查看进度，领取你的交付。", "Enter your code, follow its progress, and collect your delivery.")}</p></section>
+  <div class="home-workspace"><section class="exchange" aria-labelledby="redeem-heading"><h2 id="redeem-heading">${tr("开始兑换", "Redeem a code")}</h2><p>${tr("使用购买商品时获得的卡密。", "Use the code you received with your purchase.")}</p><form id="form"><div class="field"><label for="code">${tr("兑换卡密", "Redemption code")}</label><div class="code-entry"><textarea class="code" id="code" rows="3" placeholder="${tr("在此粘贴卡密", "Paste your code here")}" required autocomplete="off" spellcheck="false" maxlength="8000" aria-describedby="code-help code-count"></textarea><button id="paste-code" class="secondary paste-code" type="button">${tr("粘贴", "Paste")}</button></div><p id="code-count" class="caption" aria-live="polite"></p><p id="code-help" class="caption">${tr("支持批量兑换，每行一张卡密，最多 30 张。", "Redeem up to 30 codes at once, one per line.")}</p></div><button type="submit" class="full"><span>${tr("验证并继续", "Verify and continue")}</span><span aria-hidden="true">→</span></button><div id="error" class="error" role="alert"></div></form><div class="footnote">${tr("已有领取链接？直接打开，随时查看处理进度。", "Already have a receipt link? Open it to check your progress at any time.")}</div></section>
+  <section class="home-catalogue" aria-labelledby="catalogue-heading"><div class="section-head"><h2 id="catalogue-heading">${tr("公开商品", "Explore products")}</h2><span class="native-count" aria-label="${tr("商品数量", "Product count")}">${list.length}</span></div>${list.length ? `<label class="catalogue-search"><span class="sr-only">${tr("搜索商品", "Search products")}</span><input id="catalogue-search" type="search" placeholder="${tr("搜索商品…", "Search products…")}" autocomplete="off"></label><div class="home-product-list" role="list">${list.map((p, i) => `<article class="product-row" role="listitem" data-catalogue-item="${i}">${p.logo ? `<img src="${esc(p.logo)}" alt="" loading="lazy">` : `<div class="product-icon">${icon}</div>`}<div class="product-info"><h3>${esc(p.name)}</h3><p>${tr(p.delivery === "service" ? "服务兑换" : "数字商品", p.delivery === "service" ? "Service" : "Digital product")} · ${tr(p.mode === "manual" ? "队列处理" : "自动交付", p.mode === "manual" ? "Queue processing" : "Automatic delivery")}</p></div><button class="secondary" data-product="${i}">${tr("查看详情", "Details")} <span aria-hidden="true">↗</span></button></article>`).join("")}</div><p id="catalogue-empty" class="empty" hidden>${tr("没有匹配的商品，试试其他关键词。", "No matching products. Try another search.")}</p>` : `<div class="native-empty">${icon}<h3>${tr("商品即将上架", "Nothing on display yet")}</h3><p>${tr("已有卡密仍可兑换，非公开商品不在这里展示。", "You can still redeem an existing code. Private products are not listed here.")}</p></div>`}</section></div>
+  <div class="home-guidance"><span><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true"><path d="m12 3 8 4v5c0 5-8 9-8 9s-8-4-8-9V7z"/><path d="m8 12 3 3 5-6"/></svg>${tr("凭卡密验证", "Verified by your code")}</span><span><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></svg>${tr("随时查看进度", "Track delivery progress")}</span><span><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true"><path d="M4 7h16v13H4zM8 7V4h8v3M8 12h8M8 16h5"/></svg>${tr("保存领取链接", "Keep your receipt link")}</span></div>`;
   form(() => {
     const codes = splitCodes($("#code").value);
     if (!codes.length) throw new Error(tr("请输入卡密", "Enter a redemption code"));
@@ -652,7 +658,16 @@ async function home() {
   });
   on("#paste-code", pasteCodes);
   $("#code")?.addEventListener("input", updateCodeCount);
-  window.ExtoreMotion?.mountHome(app);
+  $("#catalogue-search")?.addEventListener("input", (event) => {
+    const query = event.target.value.trim().toLocaleLowerCase();
+    let visible = 0;
+    for (const row of document.querySelectorAll("[data-catalogue-item]")) {
+      const product = list[Number(row.dataset.catalogueItem)];
+      row.hidden = !String(product.name || "").toLocaleLowerCase().includes(query);
+      if (!row.hidden) visible++;
+    }
+    $("#catalogue-empty").hidden = visible > 0;
+  });
   window.ExtoreWebMCP?.refresh();
   document
     .querySelectorAll("[data-product]")
@@ -1462,14 +1477,42 @@ async function admin() {
     return;
   }
   if (role !== "admin") {
-    navigate("/account/login");
+    const product = new URLSearchParams(location.search).get("product");
+    navigate("/account/login" + (product ? "?return_to=" + encodeURIComponent("/admin?product=" + encodeURIComponent(product)) : ""));
     return;
   }
   const available = await api("/admin/products");
   if (!active()) return;
   products = available;
+  const requestedProduct = new URLSearchParams(location.search).get("product");
+  if (requestedProduct) tab = "products";
   shell();
-  await renderTab();
+  if (requestedProduct) {
+    const product = available.find((item) => item.id === requestedProduct);
+    if (product && permitted("product.edit")) await editProduct(product);
+    else {
+      await renderTab();
+      toast(tr("商品不存在或你没有访问权限。", "This product is unavailable or outside your access."));
+    }
+  } else await renderTab();
+}
+const managementIcons = {
+  "products": "<path d=\"m4 7 8-4 8 4v10l-8 4-8-4zM4 7l8 4 8-4M12 11v10\"/>",
+  "jobs": "<path d=\"M8 6h12M8 12h12M8 18h12M3 6h.01M3 12h.01M3 18h.01\"/>",
+  "board": "<path d=\"M4 20V10M10 20V4M16 20v-7M22 20H2\"/>",
+  "cards": "<rect x=\"3\" y=\"5\" width=\"18\" height=\"14\" rx=\"2\"/><path d=\"M3 10h18M7 15h4\"/>",
+  "staff": "<path d=\"m10 13 4-4M8 16l-2 2a4 4 0 0 1-6-6l4-4a4 4 0 0 1 6 0M14 8l2-2a4 4 0 0 1 6 6l-4 4a4 4 0 0 1-6 0\" transform=\"translate(1 -1)\"/>",
+  "events": "<path d=\"M8 3h8l4 4v14H4V3zM14 3v5h6M8 12h8M8 16h6\"/>",
+  "sessions": "<rect x=\"3\" y=\"4\" width=\"18\" height=\"13\" rx=\"2\"/><path d=\"M8 21h8M12 17v4\"/>",
+  "security": "<path d=\"m12 3 8 4v5c0 5-8 9-8 9s-8-4-8-9V7z\"/><path d=\"m8 12 3 3 5-6\"/>",
+  "profiles": "<path d=\"M4 7h16M4 17h16M8 4v6M16 14v6\"/>",
+  "proxy": "<path d=\"M4 6h8a5 5 0 0 1 5 5v7M13 14l4 4 4-4M4 18h4M4 12h4\"/>",
+  "commerce": "<path d=\"M3 4h2l3 11h10l3-8H6\"/><circle cx=\"10\" cy=\"20\" r=\"1\"/><circle cx=\"18\" cy=\"20\" r=\"1\"/>",
+  "shops": "<path d=\"m3 9 2-6h14l2 6M4 9v12h16V9M9 21v-7h6v7M3 9c0 4 6 4 6 0 0 4 6 4 6 0 0 4 6 4 6 0\"/>",
+  "mail": "<rect x=\"3\" y=\"5\" width=\"18\" height=\"14\" rx=\"2\"/><path d=\"m3 6 9 7 9-7\"/>"
+};
+function managementIcon(key) {
+  return `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${managementIcons[key] || managementIcons.products}</svg>`;
 }
 const permissionLabels = {
   "queue.view": "查看商品队列",
@@ -1539,7 +1582,7 @@ function shell() {
     { name: tr("店铺设置", "Shop settings"), keys: ["profiles", "commerce", "proxy", "security"] },
     { name: tr("平台管理", "Platform settings"), keys: ["shops", "mail"] },
   ].map((group) => ({ ...group, items: group.keys.map((key) => items.find(([value]) => value === key)).filter(Boolean) })).filter((group) => group.items.length);
-  app.innerHTML = `<div class="management-shell"><div class="admin-top"><div><h1>${role === "staff" ? tr("商品管理", "Product management") : tr("商家后台", "Merchant dashboard")}</h1><p id="management-identity" class="muted">${esc(managementIdentity())}</p></div><button id="logout" class="secondary">${tr("退出登录", "Sign out")}</button></div><div class="management-layout"><nav class="management-navigation" aria-label="${tr("管理导航", "Management navigation")}"><div class="management-mobile-navigation"><div><label for="management-section">${tr("当前工作区", "Workspace")}</label><select id="management-section">${groups.map((group) => `<optgroup label="${esc(group.name)}">${group.items.map(([value, label]) => `<option value="${value}" ${tab === value ? "selected" : ""}>${esc(label)}</option>`).join("")}</optgroup>`).join("")}</select></div><button id="management-menu-toggle" class="secondary" type="button" aria-expanded="false" aria-controls="management-navigation-items">${tr("设置目录", "All pages")}</button></div><div id="management-navigation-items" class="management-desktop-navigation">${groups.map((group) => `<section class="management-navigation-group"><h2>${esc(group.name)}</h2>${group.items.map(([value, label]) => `<button type="button" data-tab="${value}" ${tab === value ? 'class="active" aria-current="page"' : ""}>${esc(label)}</button>`).join("")}</section>`).join("")}</div></nav><div id="workspace" class="management-workspace"></div></div></div>`;
+  app.innerHTML = `<div class="management-shell"><div class="admin-top"><div><h1>${role === "staff" ? tr("商品管理", "Product management") : tr("商家工作台", "Merchant workspace")}</h1><p id="management-identity" class="muted">${esc(managementIdentity())}</p></div><button id="logout" class="secondary">${tr("退出登录", "Sign out")}</button></div><div class="management-layout"><nav class="management-navigation" aria-label="${tr("管理导航", "Management navigation")}"><div class="management-mobile-navigation"><div><label for="management-section">${tr("当前工作区", "Workspace")}</label><select id="management-section">${groups.map((group) => `<optgroup label="${esc(group.name)}">${group.items.map(([value, label]) => `<option value="${value}" ${tab === value ? "selected" : ""}>${esc(label)}</option>`).join("")}</optgroup>`).join("")}</select></div><button id="management-menu-toggle" class="secondary" type="button" aria-expanded="false" aria-controls="management-navigation-items">${tr("设置目录", "All pages")}</button></div><div id="management-navigation-items" class="management-desktop-navigation">${groups.map((group) => `<section class="management-navigation-group"><h2>${esc(group.name)}</h2>${group.items.map(([value, label]) => `<button type="button" data-tab="${value}" ${tab === value ? 'class="active" aria-current="page"' : ""}>${managementIcon(value)}<span>${esc(label)}</span></button>`).join("")}</section>`).join("")}</div></nav><div id="workspace" class="management-workspace"></div></div></div>`;
   on("#logout", async () => {
     progressBoardController?.dispose(); progressBoardController = null;
     await api("/auth/logout", {});
@@ -2463,7 +2506,14 @@ async function start() {
       accountView = window.ExtoreAccount.mount({ root: app, api, auth, ...accountRoute,
         language: () => lang, navigate: (url) => {
           const destination = new URLSearchParams(location.search).get("return_to") || "";
-          return navigate(accountRoute.mode === "login" && url === "/admin" && /^\/connect\/authorize#[A-Za-z0-9_-]{43}$/.test(destination) ? destination : url);
+          if (accountRoute.mode === "login" && url === "/admin") {
+            if (/^\/connect\/authorize#[A-Za-z0-9_-]{43}$/.test(destination)) return navigate(destination);
+            if (destination.startsWith("/admin?")) {
+              const product = new URLSearchParams(destination.slice(7)).get("product");
+              if (product) return navigate("/admin?product=" + encodeURIComponent(product));
+            }
+          }
+          return navigate(url);
         }, passkey, onAuth: acceptAuth, isCurrent: active });
     } else if (location.pathname === "/admin") await admin();
     else if (location.pathname === "/staff") await staff();

@@ -7,7 +7,7 @@
     <title>Extore · 兑所</title>
     <link rel="icon" href="/static/logo.svg" type="image/svg+xml" />
     <script src="/static/proxy-routing.js?v=20261008-main-history"></script>
-    <script src="/static/preferences.js?v=20261010-appearance"></script>
+    <script src="/static/preferences.js?v=20261117-native"></script>
     <link rel="stylesheet" href="/static/style.css?v=20261008-workflow-standard" />
     <link rel="stylesheet" href="/static/management-shell.css?v=20261010-mobile-directory" />
     <link rel="stylesheet" href="/static/appearance.css?v=20261010-appearance" />
@@ -47,9 +47,11 @@
     <link rel="stylesheet" href="/static/queue.css?v=20261007-queue-design" />
     <link rel="stylesheet" href="/static/progress-board.css?v=20261007-factory-slogans" />
     <script defer src="/static/progress-board.js?v=20261007-factory-slogans"></script>
-    <script defer src="/static/app.js?v=20261010-bound-confirmation"></script>
+    <link rel="stylesheet" href="/static/native-theme.css?v=20261117-native" />
+    <script defer src="/static/app.js?v=20261117-native"></script>
   </head>
   <body>
+    <a id="skip-link" class="skip-link" href="#app">跳至内容</a>
     <header>
       <button
         id="brand"
@@ -87,13 +89,14 @@
             <p id="appearance-note" class="caption">自动保存到此浏览器。</p>
           </div>
         </details>
+        <a id="header-workspace" class="header-workspace" href="/admin">商家工作台</a>
         <a id="header-context" class="header-home" href="/" aria-label="返回首页">兑换与领取</a>
       </div>
     </header>
-    <main id="app" aria-live="polite"></main>
+    <main id="app" aria-live="polite" tabindex="-1"></main>
     <div id="toast" role="status" hidden></div>
     <footer>
-      <span>Extore · 兑所</span><span>每一次兑换，都有着落。</span>
+      <span>Extore · 兑所</span><span id="footer-note">兑换、处理、交付。</span>
     </footer>
   </body>
 </html>

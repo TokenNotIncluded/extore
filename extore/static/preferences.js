@@ -34,7 +34,7 @@
     }
   }
   const themeValue = (value) => (themes.has(value) ? value : "auto");
-  const accentValue = (value) => (accents.has(value) ? value : "green");
+  const accentValue = (value) => (accents.has(value) ? value : "blue");
   const languageValue = (value) =>
     languages.has(value) ? value : "auto";
   let settings = {
