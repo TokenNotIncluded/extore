@@ -123,6 +123,23 @@ def test_exact_upload_is_private_atomic_and_has_no_installation(endpoint, monkey
     unchanged(endpoint)
 
 
+def test_upload_uses_a_bundle_extension_accepted_by_github_cli(endpoint, monkeypatch):
+    verifier = endpoint.ns["require_provenance"]
+
+    def verify_package(package, bundle, sha):
+        # gh attestation verify rejects other suffixes before parsing the bundle.
+        assert bundle.suffix in {".json", ".jsonl"}, (
+            "Unsupported GitHub CLI bundle extension"
+        )
+        return verifier(package, bundle, sha)
+
+    monkeypatch.setitem(endpoint.ns, "require_provenance", verify_package)
+    result = upload(endpoint, monkeypatch, frame())
+    assert result["status"] == "staged"
+    assert endpoint.calls == [(SHA, b"package", BUNDLE)]
+    unchanged(endpoint)
+
+
 @pytest.mark.parametrize(
     "update",
     [

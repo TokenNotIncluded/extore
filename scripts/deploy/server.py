@@ -273,7 +273,7 @@ def stage_package(sha):
     ) as temporary:
         temporary = Path(temporary)
         package = temporary / "package.partial"
-        bundle = temporary / "provenance.partial"
+        bundle = temporary / "provenance.partial.jsonl"
         provenance_hash = receive_exact(stream, bundle, header["provenance_size"])
         package_hash = receive_exact(stream, package, header["size"])
         if stream.read(1):
