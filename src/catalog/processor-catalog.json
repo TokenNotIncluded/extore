@@ -1,0 +1,1127 @@
+[
+  {
+    "id": "resource_link",
+    "schema_version": 1,
+    "name": {
+      "zh-CN": "资源链接",
+      "en": "Resource link"
+    },
+    "description": {
+      "zh-CN": "顾客无需填写额外信息，兑换后领取商家配置的资源链接与使用说明。",
+      "en": "Deliver a configured resource URL and optional instructions without asking the customer for extra information."
+    },
+    "delivery": "content",
+    "parameters": [],
+    "outputs": [
+      {
+        "key": "resource_url",
+        "label": {
+          "zh-CN": "资源链接",
+          "en": "Resource URL"
+        },
+        "description": {
+          "zh-CN": "填写你要交付的 HTTPS 资源地址。处理器只返回链接，不访问这个地址。",
+          "en": "Enter the HTTPS resource URL to deliver. The processor returns it without making a network request."
+        },
+        "collapsed": true,
+        "required": true,
+        "type": "url"
+      },
+      {
+        "key": "message",
+        "label": {
+          "zh-CN": "领取说明",
+          "en": "Instructions"
+        },
+        "description": {
+          "zh-CN": "可选。补充资源的使用方法；支持普通多行文本。",
+          "en": "Optional. Add instructions for using the resource as plain text."
+        },
+        "collapsed": true,
+        "required": false,
+        "type": "textarea"
+      }
+    ],
+    "configuration": [
+      {
+        "key": "resource_url",
+        "label": {
+          "zh-CN": "资源链接",
+          "en": "Resource URL"
+        },
+        "description": {
+          "zh-CN": "填写你要交付的 HTTPS 资源地址。处理器只返回链接，不访问这个地址。",
+          "en": "Enter the HTTPS resource URL to deliver. The processor returns it without making a network request."
+        },
+        "collapsed": true,
+        "required": true,
+        "type": "url",
+        "secret": true,
+        "max_length": 2000
+      },
+      {
+        "key": "message",
+        "label": {
+          "zh-CN": "领取说明",
+          "en": "Instructions"
+        },
+        "description": {
+          "zh-CN": "可选。补充资源的使用方法；支持普通多行文本。",
+          "en": "Optional. Add instructions for using the resource as plain text."
+        },
+        "collapsed": true,
+        "required": false,
+        "type": "textarea",
+        "secret": false,
+        "max_length": 10000,
+        "default": ""
+      }
+    ],
+    "shop_configuration": [
+      {
+        "key": "resource_url",
+        "label": {
+          "zh-CN": "资源链接",
+          "en": "Resource URL"
+        },
+        "description": {
+          "zh-CN": "填写你要交付的 HTTPS 资源地址。处理器只返回链接，不访问这个地址。",
+          "en": "Enter the HTTPS resource URL to deliver. The processor returns it without making a network request."
+        },
+        "collapsed": true,
+        "required": true,
+        "type": "url",
+        "secret": true,
+        "max_length": 2000
+      },
+      {
+        "key": "message",
+        "label": {
+          "zh-CN": "领取说明",
+          "en": "Instructions"
+        },
+        "description": {
+          "zh-CN": "可选。补充资源的使用方法；支持普通多行文本。",
+          "en": "Optional. Add instructions for using the resource as plain text."
+        },
+        "collapsed": true,
+        "required": false,
+        "type": "textarea",
+        "secret": false,
+        "max_length": 10000,
+        "default": ""
+      }
+    ],
+    "progress_steps": [
+      {
+        "id": "validate_input",
+        "label": {
+          "zh-CN": "核对信息",
+          "en": "Validate inputs"
+        }
+      },
+      {
+        "id": "prepare_delivery",
+        "label": {
+          "zh-CN": "生成交付",
+          "en": "Prepare delivery"
+        }
+      }
+    ]
+  },
+  {
+    "id": "personalized_text",
+    "schema_version": 1,
+    "name": {
+      "zh-CN": "个性化文本",
+      "en": "Personalized text"
+    },
+    "description": {
+      "zh-CN": "顾客填写称呼，处理器按商家设定的纯文本模板生成交付内容。",
+      "en": "Ask for a customer name and generate delivery text from the configured plain text template."
+    },
+    "delivery": "content",
+    "parameters": [
+      {
+        "key": "name",
+        "label": {
+          "zh-CN": "称呼",
+          "en": "Name"
+        },
+        "description": {
+          "zh-CN": "填写你希望使用的称呼，最多 200 个字符。它只用于生成这次领取的文本。",
+          "en": "Enter the name to use in your delivery text, up to 200 characters."
+        },
+        "collapsed": true,
+        "required": true,
+        "type": "text"
+      }
+    ],
+    "outputs": [
+      {
+        "key": "content",
+        "label": {
+          "zh-CN": "交付内容",
+          "en": "Delivery content"
+        },
+        "description": {
+          "zh-CN": "",
+          "en": ""
+        },
+        "collapsed": true,
+        "required": true,
+        "type": "textarea"
+      }
+    ],
+    "configuration": [
+      {
+        "key": "template",
+        "label": {
+          "zh-CN": "交付文本模板",
+          "en": "Delivery text template"
+        },
+        "description": {
+          "zh-CN": "用 `$name` 或 `${name}` 插入顾客的称呼，用 `$$` 表示一个美元符号。\n\n例如：`你好，$name！你的商品已准备好。`\n\n这是纯文本替换，不执行 Python、HTML 或其他代码。",
+          "en": "Use `$name` or `${name}` for the customer name, and `$$` for a literal dollar sign.\n\nExample: `Hello, $name! Your item is ready.`\n\nThis is plain text substitution. It does not execute Python, HTML, or other code."
+        },
+        "collapsed": true,
+        "required": true,
+        "type": "textarea",
+        "secret": false,
+        "max_length": 10000,
+        "default": "你好，$name！\n你的商品已准备好。"
+      }
+    ],
+    "shop_configuration": [
+      {
+        "key": "template",
+        "label": {
+          "zh-CN": "交付文本模板",
+          "en": "Delivery text template"
+        },
+        "description": {
+          "zh-CN": "用 `$name` 或 `${name}` 插入顾客的称呼，用 `$$` 表示一个美元符号。\n\n例如：`你好，$name！你的商品已准备好。`\n\n这是纯文本替换，不执行 Python、HTML 或其他代码。",
+          "en": "Use `$name` or `${name}` for the customer name, and `$$` for a literal dollar sign.\n\nExample: `Hello, $name! Your item is ready.`\n\nThis is plain text substitution. It does not execute Python, HTML, or other code."
+        },
+        "collapsed": true,
+        "required": true,
+        "type": "textarea",
+        "secret": false,
+        "max_length": 10000,
+        "default": "你好，$name！\n你的商品已准备好。"
+      }
+    ],
+    "progress_steps": [
+      {
+        "id": "validate_input",
+        "label": {
+          "zh-CN": "核对信息",
+          "en": "Validate inputs"
+        }
+      },
+      {
+        "id": "prepare_delivery",
+        "label": {
+          "zh-CN": "生成交付",
+          "en": "Prepare delivery"
+        }
+      }
+    ]
+  },
+  {
+    "id": "csv_summary",
+    "schema_version": 1,
+    "name": {
+      "zh-CN": "CSV 数据统计",
+      "en": "CSV data summary"
+    },
+    "description": {
+      "zh-CN": "粘贴实验或业务 CSV，统计一个数值列，并可按另一列分组。仅计算提供的数据，不检索、不执行公式、不推断因果或编造结论。",
+      "en": "Summarize a numeric column in pasted experiment or business CSV, optionally by group. Uses only supplied data; no browsing, formula execution, causal inference or invented conclusions."
+    },
+    "delivery": "content",
+    "parameters": [
+      {
+        "key": "csv_text",
+        "label": {
+          "zh-CN": "CSV 数据",
+          "en": "CSV data"
+        },
+        "description": {
+          "zh-CN": "首行为表头，以英文逗号分隔，含逗号或换行的字段须用双引号包围。最多 10000 字符、500 数据行、30 列；空白记录忽略，列数必须一致。不要粘贴密码、密钥或无需统计的隐私数据。仅处理文本，不执行单元格中的公式。",
+          "en": "Use a header row and comma-separated fields; quote fields containing commas or line breaks. Limits: 10000 characters, 500 data rows and 30 columns. Blank records are ignored; column counts must match. Do not paste credentials or unnecessary personal data. Cells are text; formulas are never executed."
+        },
+        "collapsed": true,
+        "required": true,
+        "type": "textarea"
+      },
+      {
+        "key": "value_column",
+        "label": {
+          "zh-CN": "数值列表头",
+          "en": "Numeric column header"
+        },
+        "description": {
+          "zh-CN": "填写完整表头，大小写需一致。数值支持 ASCII 十进制与科学计数法，最多 30 位有效数字，非零绝对值须在 1e-30 到 1e12 之间，指数绝对值不超过 30。空值不参与统计；货币符号、千位逗号、NaN、Infinity 和公式不是有效数值。",
+          "en": "Enter the complete, case-sensitive header. ASCII decimal and scientific notation are accepted, with at most 30 significant digits, nonzero magnitude from 1e-30 to 1e12 and exponent magnitude at most 30. Empty cells are excluded; currency signs, thousands separators, NaN, Infinity and formulas are invalid numbers."
+        },
+        "collapsed": true,
+        "required": true,
+        "type": "text"
+      },
+      {
+        "key": "group_column",
+        "label": {
+          "zh-CN": "分组列表头（可选）",
+          "en": "Group column header (optional)"
+        },
+        "description": {
+          "zh-CN": "留空统计全部数据；填写完整表头后另附各组统计。最多 50 组，每个分组值最多 200 字符；空字符串也是独立分组。",
+          "en": "Leave blank for an overall summary, or enter an exact header to add group statistics. Up to 50 groups and 200 characters per group value; an empty string is a separate group."
+        },
+        "collapsed": true,
+        "required": false,
+        "type": "text"
+      }
+    ],
+    "outputs": [
+      {
+        "key": "report",
+        "label": {
+          "zh-CN": "统计报告",
+          "en": "Statistical report"
+        },
+        "description": {
+          "zh-CN": "列出真实有效样本数、空值数、无效值数、均值、最小/最大值，以及总体和样本标准差。统计值显示最多 12 位有效数字，不提供因果或显著性判断。",
+          "en": "Reports valid, missing and invalid counts, mean, minimum, maximum, and population and sample standard deviations. Calculated statistics display up to 12 significant digits; no causal or significance claims."
+        },
+        "collapsed": true,
+        "required": true,
+        "type": "textarea"
+      },
+      {
+        "key": "summary",
+        "label": {
+          "zh-CN": "机器可读统计 JSON",
+          "en": "Machine-readable summary JSON"
+        },
+        "description": {
+          "zh-CN": "JSON 文本；十进制统计值以字符串保存，缺少足够样本时为 null。不会回显跳过的无效单元格。",
+          "en": "JSON text with decimal values represented as strings and null when there are insufficient samples. Skipped invalid cells are not echoed."
+        },
+        "collapsed": true,
+        "required": false,
+        "type": "textarea"
+      }
+    ],
+    "configuration": [
+      {
+        "key": "invalid_policy",
+        "label": {
+          "zh-CN": "无效数值处理",
+          "en": "Invalid numeric value policy"
+        },
+        "description": {
+          "zh-CN": "默认拒绝无效数值。跳过时报告会明确排除数量；空值始终排除并单独计数。CSV 结构错误、超限和全部无有效数值始终拒绝。",
+          "en": "Invalid numbers are rejected by default. Skip mode reports how many were excluded; missing values are always excluded and counted separately. Structural errors, exceeded limits and no valid numeric values always fail."
+        },
+        "collapsed": true,
+        "required": false,
+        "type": "select",
+        "options": [
+          {
+            "value": "reject",
+            "label": {
+              "zh-CN": "拒绝处理并提示修正",
+              "en": "Reject and request correction"
+            }
+          },
+          {
+            "value": "skip",
+            "label": {
+              "zh-CN": "跳过并计数",
+              "en": "Skip and count"
+            }
+          }
+        ],
+        "secret": false,
+        "max_length": 6,
+        "default": "reject"
+      }
+    ],
+    "shop_configuration": [
+      {
+        "key": "invalid_policy",
+        "label": {
+          "zh-CN": "无效数值处理",
+          "en": "Invalid numeric value policy"
+        },
+        "description": {
+          "zh-CN": "默认拒绝无效数值。跳过时报告会明确排除数量；空值始终排除并单独计数。CSV 结构错误、超限和全部无有效数值始终拒绝。",
+          "en": "Invalid numbers are rejected by default. Skip mode reports how many were excluded; missing values are always excluded and counted separately. Structural errors, exceeded limits and no valid numeric values always fail."
+        },
+        "collapsed": true,
+        "required": false,
+        "type": "select",
+        "options": [
+          {
+            "value": "reject",
+            "label": {
+              "zh-CN": "拒绝处理并提示修正",
+              "en": "Reject and request correction"
+            }
+          },
+          {
+            "value": "skip",
+            "label": {
+              "zh-CN": "跳过并计数",
+              "en": "Skip and count"
+            }
+          }
+        ],
+        "secret": false,
+        "max_length": 6,
+        "default": "reject"
+      }
+    ],
+    "progress_steps": [
+      {
+        "id": "validate_input",
+        "label": {
+          "zh-CN": "核对信息",
+          "en": "Validate inputs"
+        }
+      },
+      {
+        "id": "prepare_delivery",
+        "label": {
+          "zh-CN": "生成交付",
+          "en": "Prepare delivery"
+        }
+      }
+    ]
+  },
+  {
+    "id": "json_formatter",
+    "schema_version": 1,
+    "name": {
+      "zh-CN": "JSON 校验与格式化",
+      "en": "JSON validation and formatting"
+    },
+    "description": {
+      "zh-CN": "粘贴 API 配置或 JSON 数据，严格校验后得到可复制的格式化 JSON 与结构统计。支持对象、数组、字符串、数字、布尔值和 null；不执行代码、不联网。数字保留原文精度和指数写法，字符串内容保持不变。",
+      "en": "Validate pasted API configuration or JSON data and return formatted JSON with structural counts. Objects, arrays, strings, numbers, booleans and null are supported. Runs offline without executing code. Number tokens retain their precision and exponent notation; string content is preserved."
+    },
+    "delivery": "content",
+    "parameters": [
+      {
+        "key": "json_text",
+        "label": {
+          "zh-CN": "JSON 内容",
+          "en": "JSON content"
+        },
+        "description": {
+          "zh-CN": "粘贴一份完整 JSON，最多 10000 个字符。拒绝重复键、NaN、Infinity、孤立 Unicode 代理项、注释和尾逗号。最多 32 层容器、10000 个值、每个容器 2000 项；数字最多 256 字符、128 位有效数字、指数绝对值 1000。不要填写不希望出现在交付内容里的密码或密钥。",
+          "en": "Paste one complete JSON value, up to 10000 characters. Duplicate keys, NaN, Infinity, lone Unicode surrogates, comments and trailing commas are rejected. Limits: 32 container levels, 10000 values, 2000 entries per container, 256 characters and 128 significant digits per number, and an absolute exponent of 1000. Do not include credentials you do not want in the delivered content."
+        },
+        "collapsed": true,
+        "required": true,
+        "type": "textarea"
+      }
+    ],
+    "outputs": [
+      {
+        "key": "formatted_json",
+        "label": {
+          "zh-CN": "格式化 JSON",
+          "en": "Formatted JSON"
+        },
+        "description": {
+          "zh-CN": "可以复制给下一个程序或处理者；只调整空白和配置要求的对象键顺序。",
+          "en": "Copy to the next program or worker. Only whitespace and the configured object key order change."
+        },
+        "collapsed": true,
+        "required": true,
+        "type": "textarea"
+      },
+      {
+        "key": "report",
+        "label": {
+          "zh-CN": "校验与结构统计",
+          "en": "Validation and structure report"
+        },
+        "description": {
+          "zh-CN": "显示顶层类型、值数量、对象键和数组项总数、容器深度及 UTF-8 大小，不摘录内容。",
+          "en": "Shows the root type, value count, total object keys and array items, container depth and UTF-8 sizes without excerpts."
+        },
+        "collapsed": true,
+        "required": true,
+        "type": "textarea"
+      }
+    ],
+    "configuration": [
+      {
+        "key": "indent",
+        "label": {
+          "zh-CN": "缩进",
+          "en": "Indentation"
+        },
+        "description": {
+          "zh-CN": "格式化结果和统计合计最多 100000 UTF-8 字节；缩进过大的结果会被拒绝。",
+          "en": "Formatted JSON and its report together are limited to 100000 UTF-8 bytes. Oversized indented results are rejected."
+        },
+        "collapsed": true,
+        "required": true,
+        "type": "select",
+        "options": [
+          {
+            "value": "2",
+            "label": {
+              "zh-CN": "2 个空格",
+              "en": "2 spaces"
+            }
+          },
+          {
+            "value": "4",
+            "label": {
+              "zh-CN": "4 个空格",
+              "en": "4 spaces"
+            }
+          },
+          {
+            "value": "compact",
+            "label": {
+              "zh-CN": "紧凑格式",
+              "en": "Compact"
+            }
+          }
+        ],
+        "secret": false,
+        "max_length": 10000,
+        "default": "2"
+      },
+      {
+        "key": "sort_keys",
+        "label": {
+          "zh-CN": "对象键排序",
+          "en": "Sort object keys"
+        },
+        "description": {
+          "zh-CN": "只调整对象键的展示顺序，不改变数组顺序或任何值。",
+          "en": "Changes object key presentation order only; arrays and all values retain their contents."
+        },
+        "collapsed": true,
+        "required": true,
+        "type": "select",
+        "options": [
+          {
+            "value": "no",
+            "label": {
+              "zh-CN": "保留输入顺序",
+              "en": "Preserve input order"
+            }
+          },
+          {
+            "value": "yes",
+            "label": {
+              "zh-CN": "按 Unicode 顺序排序",
+              "en": "Sort by Unicode order"
+            }
+          }
+        ],
+        "secret": false,
+        "max_length": 10000,
+        "default": "no"
+      }
+    ],
+    "shop_configuration": [
+      {
+        "key": "indent",
+        "label": {
+          "zh-CN": "缩进",
+          "en": "Indentation"
+        },
+        "description": {
+          "zh-CN": "格式化结果和统计合计最多 100000 UTF-8 字节；缩进过大的结果会被拒绝。",
+          "en": "Formatted JSON and its report together are limited to 100000 UTF-8 bytes. Oversized indented results are rejected."
+        },
+        "collapsed": true,
+        "required": true,
+        "type": "select",
+        "options": [
+          {
+            "value": "2",
+            "label": {
+              "zh-CN": "2 个空格",
+              "en": "2 spaces"
+            }
+          },
+          {
+            "value": "4",
+            "label": {
+              "zh-CN": "4 个空格",
+              "en": "4 spaces"
+            }
+          },
+          {
+            "value": "compact",
+            "label": {
+              "zh-CN": "紧凑格式",
+              "en": "Compact"
+            }
+          }
+        ],
+        "secret": false,
+        "max_length": 10000,
+        "default": "2"
+      },
+      {
+        "key": "sort_keys",
+        "label": {
+          "zh-CN": "对象键排序",
+          "en": "Sort object keys"
+        },
+        "description": {
+          "zh-CN": "只调整对象键的展示顺序，不改变数组顺序或任何值。",
+          "en": "Changes object key presentation order only; arrays and all values retain their contents."
+        },
+        "collapsed": true,
+        "required": true,
+        "type": "select",
+        "options": [
+          {
+            "value": "no",
+            "label": {
+              "zh-CN": "保留输入顺序",
+              "en": "Preserve input order"
+            }
+          },
+          {
+            "value": "yes",
+            "label": {
+              "zh-CN": "按 Unicode 顺序排序",
+              "en": "Sort by Unicode order"
+            }
+          }
+        ],
+        "secret": false,
+        "max_length": 10000,
+        "default": "no"
+      }
+    ],
+    "progress_steps": [
+      {
+        "id": "validate_input",
+        "label": {
+          "zh-CN": "核对信息",
+          "en": "Validate inputs"
+        }
+      },
+      {
+        "id": "prepare_delivery",
+        "label": {
+          "zh-CN": "生成交付",
+          "en": "Prepare delivery"
+        }
+      }
+    ]
+  },
+  {
+    "id": "text_cleanup",
+    "schema_version": 1,
+    "name": {
+      "zh-CN": "文本与名单清理",
+      "en": "Text and list cleanup"
+    },
+    "description": {
+      "zh-CN": "按行清理名单、资料条目或字幕片段：可去除首尾空白、空行和重复项，保留首次出现的顺序与原文。只处理文本，不排序、不补造内容。",
+      "en": "Clean lists, source entries or subtitle excerpts line by line. Optionally trim whitespace, remove blank lines and deduplicate while keeping the first occurrence in its original order. Text only; no sorting or invented content."
+    },
+    "delivery": "content",
+    "parameters": [
+      {
+        "key": "text",
+        "label": {
+          "zh-CN": "待清理文本",
+          "en": "Text to clean"
+        },
+        "description": {
+          "zh-CN": "每行一条，最多 10,000 个字符、10,000 行。可留空或仅填空白：按店铺清理设置返回空文本和实际统计。CRLF 和 CR 换行转为 LF；不改写文字，不进行 Unicode 规范化。末尾换行只表示该行结束，不额外计一行。",
+          "en": "One entry per line, up to 10,000 characters and 10,000 lines. Empty or whitespace-only input is allowed and yields empty text and actual counts under the shop's cleanup settings. CRLF and CR become LF. Wording and Unicode forms are preserved. A final newline ends the last line without adding another line."
+        },
+        "collapsed": true,
+        "required": false,
+        "type": "textarea"
+      }
+    ],
+    "outputs": [
+      {
+        "key": "cleaned_text",
+        "label": {
+          "zh-CN": "清理后的文本",
+          "en": "Cleaned text"
+        },
+        "description": {
+          "zh-CN": "按原顺序保留的条目。忽略大小写去重只影响比较，保留首次出现的文字。全部被去除时为空。",
+          "en": "Retained entries in their original order. Case-insensitive comparison keeps the text of the first occurrence. Empty when every line is removed."
+        },
+        "collapsed": true,
+        "required": false,
+        "type": "textarea"
+      },
+      {
+        "key": "report",
+        "label": {
+          "zh-CN": "清理统计",
+          "en": "Cleanup report"
+        },
+        "description": {
+          "zh-CN": "显示原始行数、保留行数、删除的空行与重复行数量；这些数值来自本次实际处理。",
+          "en": "Actual counts of input lines, retained lines, removed blank lines and removed duplicate lines."
+        },
+        "collapsed": true,
+        "required": true,
+        "type": "textarea"
+      }
+    ],
+    "configuration": [
+      {
+        "key": "trim_lines",
+        "label": {
+          "zh-CN": "去除每行首尾空白",
+          "en": "Trim each line"
+        },
+        "description": {
+          "zh-CN": "只去除行首和行尾的空白；保留行内空格与文字。",
+          "en": "Remove only leading and trailing whitespace; keep whitespace within entries."
+        },
+        "collapsed": true,
+        "required": true,
+        "type": "select",
+        "options": [
+          {
+            "value": "yes",
+            "label": {
+              "zh-CN": "是",
+              "en": "Yes"
+            }
+          },
+          {
+            "value": "no",
+            "label": {
+              "zh-CN": "否",
+              "en": "No"
+            }
+          }
+        ],
+        "secret": false,
+        "max_length": 3,
+        "default": "yes"
+      },
+      {
+        "key": "remove_blank_lines",
+        "label": {
+          "zh-CN": "删除空行",
+          "en": "Remove blank lines"
+        },
+        "description": {
+          "zh-CN": "空行包含只由空白组成的行。空行删除先于去重；未删除的空行也参与去重。",
+          "en": "Blank includes whitespace-only lines. Blank removal happens before deduplication; retained blank lines also participate in deduplication."
+        },
+        "collapsed": true,
+        "required": true,
+        "type": "select",
+        "options": [
+          {
+            "value": "yes",
+            "label": {
+              "zh-CN": "是",
+              "en": "Yes"
+            }
+          },
+          {
+            "value": "no",
+            "label": {
+              "zh-CN": "否",
+              "en": "No"
+            }
+          }
+        ],
+        "secret": false,
+        "max_length": 3,
+        "default": "yes"
+      },
+      {
+        "key": "deduplicate",
+        "label": {
+          "zh-CN": "去重方式",
+          "en": "Deduplication"
+        },
+        "description": {
+          "zh-CN": "按清理首尾空白后的行比较。忽略大小写使用 Unicode casefold，只用于比较，保留第一次的原文，不排序或规范化 Unicode。",
+          "en": "Compare lines after optional trimming. Case-insensitive mode uses Unicode casefold only for comparison, retains the first original entry, and never sorts or normalizes Unicode."
+        },
+        "collapsed": true,
+        "required": true,
+        "type": "select",
+        "options": [
+          {
+            "value": "exact",
+            "label": {
+              "zh-CN": "完全相同",
+              "en": "Exact match"
+            }
+          },
+          {
+            "value": "casefold",
+            "label": {
+              "zh-CN": "忽略大小写",
+              "en": "Case-insensitive"
+            }
+          },
+          {
+            "value": "none",
+            "label": {
+              "zh-CN": "不去重",
+              "en": "Keep duplicates"
+            }
+          }
+        ],
+        "secret": false,
+        "max_length": 8,
+        "default": "exact"
+      }
+    ],
+    "shop_configuration": [
+      {
+        "key": "trim_lines",
+        "label": {
+          "zh-CN": "去除每行首尾空白",
+          "en": "Trim each line"
+        },
+        "description": {
+          "zh-CN": "只去除行首和行尾的空白；保留行内空格与文字。",
+          "en": "Remove only leading and trailing whitespace; keep whitespace within entries."
+        },
+        "collapsed": true,
+        "required": true,
+        "type": "select",
+        "options": [
+          {
+            "value": "yes",
+            "label": {
+              "zh-CN": "是",
+              "en": "Yes"
+            }
+          },
+          {
+            "value": "no",
+            "label": {
+              "zh-CN": "否",
+              "en": "No"
+            }
+          }
+        ],
+        "secret": false,
+        "max_length": 3,
+        "default": "yes"
+      },
+      {
+        "key": "remove_blank_lines",
+        "label": {
+          "zh-CN": "删除空行",
+          "en": "Remove blank lines"
+        },
+        "description": {
+          "zh-CN": "空行包含只由空白组成的行。空行删除先于去重；未删除的空行也参与去重。",
+          "en": "Blank includes whitespace-only lines. Blank removal happens before deduplication; retained blank lines also participate in deduplication."
+        },
+        "collapsed": true,
+        "required": true,
+        "type": "select",
+        "options": [
+          {
+            "value": "yes",
+            "label": {
+              "zh-CN": "是",
+              "en": "Yes"
+            }
+          },
+          {
+            "value": "no",
+            "label": {
+              "zh-CN": "否",
+              "en": "No"
+            }
+          }
+        ],
+        "secret": false,
+        "max_length": 3,
+        "default": "yes"
+      },
+      {
+        "key": "deduplicate",
+        "label": {
+          "zh-CN": "去重方式",
+          "en": "Deduplication"
+        },
+        "description": {
+          "zh-CN": "按清理首尾空白后的行比较。忽略大小写使用 Unicode casefold，只用于比较，保留第一次的原文，不排序或规范化 Unicode。",
+          "en": "Compare lines after optional trimming. Case-insensitive mode uses Unicode casefold only for comparison, retains the first original entry, and never sorts or normalizes Unicode."
+        },
+        "collapsed": true,
+        "required": true,
+        "type": "select",
+        "options": [
+          {
+            "value": "exact",
+            "label": {
+              "zh-CN": "完全相同",
+              "en": "Exact match"
+            }
+          },
+          {
+            "value": "casefold",
+            "label": {
+              "zh-CN": "忽略大小写",
+              "en": "Case-insensitive"
+            }
+          },
+          {
+            "value": "none",
+            "label": {
+              "zh-CN": "不去重",
+              "en": "Keep duplicates"
+            }
+          }
+        ],
+        "secret": false,
+        "max_length": 8,
+        "default": "exact"
+      }
+    ],
+    "progress_steps": [
+      {
+        "id": "validate_input",
+        "label": {
+          "zh-CN": "核对信息",
+          "en": "Validate inputs"
+        }
+      },
+      {
+        "id": "prepare_delivery",
+        "label": {
+          "zh-CN": "生成交付",
+          "en": "Prepare delivery"
+        }
+      }
+    ]
+  },
+  {
+    "id": "document_template",
+    "schema_version": 1,
+    "name": {
+      "zh-CN": "文档文本模板",
+      "en": "Document text template"
+    },
+    "description": {
+      "zh-CN": "把顾客提供的标题、称呼和正文填入本店文本模板，制作项目说明、交付说明、受理单或证书文本草稿。只交付纯文本或 Markdown，不生成 DOCX/PPTX 文件，不提供真实证书签名。无需联网或 AI。",
+      "en": "Fill a shop-owned text template with a customer's title, name and body for project briefs, delivery notes, intake records or certificate text drafts. Delivers plain text or Markdown, not DOCX/PPTX files or signed certificates. No network connection or AI is required."
+    },
+    "delivery": "content",
+    "parameters": [
+      {
+        "key": "title",
+        "label": {
+          "zh-CN": "标题",
+          "en": "Title"
+        },
+        "description": {
+          "zh-CN": "最多 200 个字符。Markdown 格式会将标题作为单行文字并转义标点。",
+          "en": "Up to 200 characters. Markdown output treats the title as a single line of escaped text."
+        },
+        "collapsed": true,
+        "required": true,
+        "type": "text"
+      },
+      {
+        "key": "name",
+        "label": {
+          "zh-CN": "称呼（可选）",
+          "en": "Name (optional)"
+        },
+        "description": {
+          "zh-CN": "最多 200 个字符；留空即可。Markdown 格式会作为单行文字处理。",
+          "en": "Up to 200 characters; may be left empty. Markdown output treats the name as a single line of escaped text."
+        },
+        "collapsed": true,
+        "required": false,
+        "type": "text"
+      },
+      {
+        "key": "body",
+        "label": {
+          "zh-CN": "正文内容",
+          "en": "Body"
+        },
+        "description": {
+          "zh-CN": "最多 10000 个字符。正文按原文填入；Markdown 格式保留正文的 Markdown 内容。本处理器不会执行内容、访问其中的网址或渲染 HTML。",
+          "en": "Up to 10000 characters. The body is inserted as written, including Markdown when that format is selected. The processor does not execute content, visit its URLs or render HTML."
+        },
+        "collapsed": true,
+        "required": true,
+        "type": "textarea"
+      }
+    ],
+    "outputs": [
+      {
+        "key": "content",
+        "label": {
+          "zh-CN": "生成的文档文本",
+          "en": "Generated document text"
+        },
+        "description": {
+          "zh-CN": "根据本店模板生成的纯文本或 Markdown，最多 100000 UTF-8 字节。可复制保存；不是 Word 或 PowerPoint 文件。",
+          "en": "Plain text or Markdown generated from the shop template, limited to 100000 UTF-8 bytes. Copy it to save; it is not a Word or PowerPoint file."
+        },
+        "collapsed": true,
+        "required": true,
+        "type": "textarea"
+      },
+      {
+        "key": "format",
+        "label": {
+          "zh-CN": "文本格式",
+          "en": "Text format"
+        },
+        "description": {
+          "zh-CN": "plain 表示纯文本；markdown 表示 Markdown 文本。",
+          "en": "plain means plain text; markdown means Markdown text."
+        },
+        "collapsed": true,
+        "required": true,
+        "type": "text"
+      }
+    ],
+    "configuration": [
+      {
+        "key": "template",
+        "label": {
+          "zh-CN": "文档文本模板",
+          "en": "Document text template"
+        },
+        "description": {
+          "zh-CN": "可随时查看和编辑。最多 10000 个字符。仅支持 $title、$name、$body （也可写成 ${title} 等）与 $$ 字面美元符号；只替换一次。不支持代码、环境变量、密钥、模板表达式或 HTML 渲染。",
+          "en": "Readable and editable. Up to 10000 characters. Supports only $title, $name, $body (also ${title}, etc.) and $$ for a literal dollar sign. Substitutes once, without code, environment variables, secrets, template expressions or HTML rendering."
+        },
+        "collapsed": true,
+        "required": true,
+        "type": "textarea",
+        "secret": false,
+        "max_length": 10000,
+        "default": "# $title\n\n$name\n\n$body"
+      },
+      {
+        "key": "output_format",
+        "label": {
+          "zh-CN": "交付文本格式",
+          "en": "Delivery text format"
+        },
+        "description": {
+          "zh-CN": "纯文本保留字段文字；Markdown 转义标题与称呼，保留正文的 Markdown 内容。格式不会将文本转换成文件或渲染 HTML。",
+          "en": "Plain text preserves field text. Markdown escapes the title and name while preserving body Markdown. Neither format creates a document file or renders HTML."
+        },
+        "collapsed": true,
+        "required": true,
+        "type": "select",
+        "options": [
+          {
+            "value": "plain",
+            "label": {
+              "zh-CN": "纯文本",
+              "en": "Plain text"
+            }
+          },
+          {
+            "value": "markdown",
+            "label": {
+              "zh-CN": "Markdown",
+              "en": "Markdown"
+            }
+          }
+        ],
+        "secret": false,
+        "max_length": 10,
+        "default": "markdown"
+      }
+    ],
+    "shop_configuration": [
+      {
+        "key": "template",
+        "label": {
+          "zh-CN": "文档文本模板",
+          "en": "Document text template"
+        },
+        "description": {
+          "zh-CN": "可随时查看和编辑。最多 10000 个字符。仅支持 $title、$name、$body （也可写成 ${title} 等）与 $$ 字面美元符号；只替换一次。不支持代码、环境变量、密钥、模板表达式或 HTML 渲染。",
+          "en": "Readable and editable. Up to 10000 characters. Supports only $title, $name, $body (also ${title}, etc.) and $$ for a literal dollar sign. Substitutes once, without code, environment variables, secrets, template expressions or HTML rendering."
+        },
+        "collapsed": true,
+        "required": true,
+        "type": "textarea",
+        "secret": false,
+        "max_length": 10000,
+        "default": "# $title\n\n$name\n\n$body"
+      },
+      {
+        "key": "output_format",
+        "label": {
+          "zh-CN": "交付文本格式",
+          "en": "Delivery text format"
+        },
+        "description": {
+          "zh-CN": "纯文本保留字段文字；Markdown 转义标题与称呼，保留正文的 Markdown 内容。格式不会将文本转换成文件或渲染 HTML。",
+          "en": "Plain text preserves field text. Markdown escapes the title and name while preserving body Markdown. Neither format creates a document file or renders HTML."
+        },
+        "collapsed": true,
+        "required": true,
+        "type": "select",
+        "options": [
+          {
+            "value": "plain",
+            "label": {
+              "zh-CN": "纯文本",
+              "en": "Plain text"
+            }
+          },
+          {
+            "value": "markdown",
+            "label": {
+              "zh-CN": "Markdown",
+              "en": "Markdown"
+            }
+          }
+        ],
+        "secret": false,
+        "max_length": 10,
+        "default": "markdown"
+      }
+    ],
+    "progress_steps": [
+      {
+        "id": "validate_input",
+        "label": {
+          "zh-CN": "核对信息",
+          "en": "Validate inputs"
+        }
+      },
+      {
+        "id": "prepare_delivery",
+        "label": {
+          "zh-CN": "生成交付",
+          "en": "Prepare delivery"
+        }
+      }
+    ]
+  }
+]
