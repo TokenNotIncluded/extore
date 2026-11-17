@@ -658,6 +658,7 @@ def _marketplace_listing(c, pid):
     listing["card_summary"] = _summary(c, pid, time.time())
     return listing
 
+
 @router.get("/api/integrations/commerce/products")
 def catalog(request: Request):
     from .commerce_listing import commerce_listing
