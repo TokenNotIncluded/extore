@@ -59,9 +59,9 @@ Actions 成功结果以实际上线检查为准，运行摘要记录提交、原
 日常源码验证在本机完成，`CI` 只在手动运行或正式 `v*` 标签发布时执行。本机验证部署实现：
 
 ```sh
-uv run ruff check scripts/deploy tests/test_deployment.py tests/test_prebuilt_deployment.py tests/test_prebuilt_deploy_client.py
-uv run ruff format --check scripts/deploy tests/test_deployment.py tests/test_prebuilt_deployment.py tests/test_prebuilt_deploy_client.py
-uv run pytest tests/test_deployment.py tests/test_prebuilt_deployment.py tests/test_prebuilt_deploy_client.py -q
+uv run ruff check scripts/deploy tests/test_deployment.py tests/test_native_deployment.py tests/test_prebuilt_deployment.py tests/test_prebuilt_deploy_client.py
+uv run ruff format --check scripts/deploy tests/test_deployment.py tests/test_native_deployment.py tests/test_prebuilt_deployment.py tests/test_prebuilt_deploy_client.py
+uv run pytest tests/test_deployment.py tests/test_native_deployment.py tests/test_prebuilt_deployment.py tests/test_prebuilt_deploy_client.py -q
 ```
 
 GitHub 官方文档：[产物证明动作](https://github.com/actions/attest)、[证明验证参数](https://cli.github.com/manual/gh_attestation_verify)、[托管执行器](https://docs.github.com/en/actions/reference/runners/github-hosted-runners)、[工作流使用 Secrets](https://docs.github.com/en/actions/how-tos/write-workflows/choose-what-workflows-do/use-secrets)、[上传和保留 artifact](https://github.com/actions/upload-artifact)。
