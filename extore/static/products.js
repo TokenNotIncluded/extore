@@ -492,7 +492,7 @@
     const owner = ctx.role === "admin";
     const disabled = ctx.canConfigure ? "" : "disabled";
     let profiles = [], profileBinding = null, bindingLoad = 0, profilesRequested = false;
-    ctx.workspace.innerHTML = `<div class="section-head"><h2>${product.id ? "配置商品" : "新建商品"}</h2><div class="product-actions">${product.id ? `<button type="button" id="export-saved-product" class="secondary">${ctx.lang === "en" ? "Copy saved product info" : "复制已保存商品资料"}</button>` : ""}<button id="cancel" class="secondary">返回商品</button></div></div><div id="product-export-panel"></div><form id="product-form">
+    ctx.workspace.innerHTML = `<div class="section-head"><h2>${product.id ? "配置商品" : "新建商品"}</h2><div class="product-actions">${product.id ? `<button type="button" id="export-saved-product" class="secondary">${ctx.lang === "en" ? "Copy saved product info" : "复制已保存商品资料"}</button>` : ""}<button id="cancel" class="secondary">返回商品</button></div></div><div id="product-export-panel"></div><form id="product-form">${window.ExtoreMarketplaceSettings?.product(product) || ""}
       <div class="grid">${field("p-name", "商品名称", product.name)}${select(
         "p-mode",
         "处理方式",
@@ -1020,6 +1020,7 @@
       drawConfiguration();
       syncMode();
     });
+    window.ExtoreMarketplaceSettings?.bind(ctx.workspace);
     on("#product-form", "submit", async () => {
       const button = $("#save-product");
       if (button.disabled) return;
@@ -1057,6 +1058,7 @@
           progress_steps: mode === "stock" ? [] : progressSteps,
           task_flow: mode === "stock" ? null : taskFlowEditor ? taskFlowEditor.getValue() : product.task_flow || null,
           support_email: $("#p-support-email").value.trim(),
+          marketplace: window.ExtoreMarketplaceSettings?.captureProduct(ctx.workspace, product.marketplace || {}) || product.marketplace || {},
           revision_policy: captureRevisionPolicy(),
         };
         // Configuration is not part of generic product editing. The existing

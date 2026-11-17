@@ -11,7 +11,7 @@ from pydantic import (
     model_validator,
 )
 
-from .marketplace_product import MarketplaceVariant
+from .marketplace_product import MarketplaceProduct, MarketplaceVariant
 from .variants import default_variant, normalize_price, validate_attributes
 
 LINK_PERMISSIONS = (
@@ -257,6 +257,7 @@ class RevisionPolicy(BaseModel):
 
 
 class Product(BaseModel):
+    marketplace: MarketplaceProduct = Field(default_factory=MarketplaceProduct)
     name: str = Field(min_length=1, max_length=120)
     description: str = Field(default="", max_length=20000)
     workshop_slogan: str = Field(default="", max_length=4000, strict=True)

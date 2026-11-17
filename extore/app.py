@@ -19,6 +19,7 @@ from .automation import router as automation_router
 from .batch_redemption import router as batch_redemption_router
 from .card_tracking import router as card_tracking_router
 from .cli_auth import router as cli_auth_router
+from .commerce_binding import router as commerce_binding_router
 from .commerce_oauth import error_response as commerce_error_response
 from .commerce_oauth import router as commerce_router
 from .commerce_store import CommerceError
@@ -132,6 +133,7 @@ app.include_router(text_cards_router)
 app.include_router(work_instructions_router)
 app.include_router(workflow_validation_router)
 app.include_router(commerce_router)
+app.include_router(commerce_binding_router)
 app.add_exception_handler(CommerceError, commerce_error_response)
 
 

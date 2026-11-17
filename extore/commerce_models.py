@@ -7,7 +7,7 @@ from urllib.parse import parse_qsl, urlsplit
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
-SCOPES = ("products.read", "cards.issue")
+SCOPES = ("products.read", "cards.issue", "marketplace.sync")
 MAX_PRODUCTS = 100
 MAX_LIMITS = 500
 MAX_GRANT_DAYS = 3 * 365
@@ -127,7 +127,7 @@ class Consent(Input):
 
 
 class Approval(Consent):
-    scopes: list[Literal["products.read", "cards.issue"]] = Field(
+    scopes: list[Literal["products.read", "cards.issue", "marketplace.sync"]] = Field(
         min_length=1, max_length=2
     )
     product_ids: list[str] = Field(min_length=1, max_length=MAX_PRODUCTS)

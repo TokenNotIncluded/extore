@@ -668,6 +668,7 @@ def test_schema22_additive_migration_preserves_original_tables_and_rows(setup_pr
     setup_product()
     with db() as c:
         for name in (
+            "commerce_bindings",
             "commerce_issuances",
             "commerce_tokens",
             "commerce_grants",
@@ -689,7 +690,7 @@ def test_schema22_additive_migration_preserves_original_tables_and_rows(setup_pr
     init()
     init()
     with db() as c:
-        assert c.execute("PRAGMA user_version").fetchone()[0] == 22
+        assert c.execute("PRAGMA user_version").fetchone()[0] == 23
         for name, (ddl, rows) in before.items():
             assert (
                 c.execute(

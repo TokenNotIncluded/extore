@@ -157,6 +157,22 @@
         }
       }
     },
+    "CardSummary": {
+      "type": "object",
+      "properties": {
+        "total": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "states": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "integer",
+            "minimum": 0
+          }
+        }
+      }
+    },
     "Variant": {
       "type": "object",
       "properties": {
@@ -216,6 +232,9 @@
         },
         "enabled": {
           "type": "boolean"
+        },
+        "card_summary": {
+          "$ref": "#/$defs/CardSummary"
         }
       },
       "required": [
@@ -415,6 +434,9 @@
         "revision": {
           "$ref": "#/$defs/Revision"
         },
+        "sync_revision": {
+          "$ref": "#/$defs/Revision"
+        },
         "redemption_url": {
           "type": "string",
           "format": "uri"
@@ -451,6 +473,9 @@
           "items": {
             "$ref": "#/$defs/Variant"
           }
+        },
+        "card_summary": {
+          "$ref": "#/$defs/CardSummary"
         }
       },
       "required": [
@@ -750,7 +775,8 @@
           "items": {
             "enum": [
               "products.read",
-              "cards.issue"
+              "cards.issue",
+              "marketplace.sync"
             ]
           }
         },
