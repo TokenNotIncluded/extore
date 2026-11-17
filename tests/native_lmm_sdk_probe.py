@@ -8,11 +8,11 @@ Usage:
 The Go overlay leaves the frozen source untouched. Only the test owner session is
 seeded directly; product, consent, token, stock and synchronization use real APIs.
 """
+
 import argparse
 import hashlib
 import json
 import os
-from pathlib import Path
 import secrets
 import socket
 import sqlite3
@@ -21,6 +21,7 @@ import tempfile
 import time
 import urllib.request
 import uuid
+from pathlib import Path
 
 
 def main():
@@ -43,7 +44,8 @@ def main():
     ).strip()
     sources = {}
     for relative in (
-        "services/extensions/go.mod", "services/extensions/go.sum",
+        "services/extensions/go.mod",
+        "services/extensions/go.sum",
         "services/extensions/internal/extore/client.go",
         "services/extensions/internal/extore/connection.go",
         "services/extensions/internal/modules/store/extore_sync.go",
@@ -58,9 +60,13 @@ def main():
         sources[relative] = hashlib.sha256(frozen).hexdigest()
 
     report = {
-        "status": "failed", "lmm_commit": reference, "source_sha256": sources,
+        "status": "failed",
+        "lmm_commit": reference,
+        "source_sha256": sources,
         "rust_binary_sha256": hashlib.sha256(binary.read_bytes()).hexdigest(),
-        "test_source_sha256": hashlib.sha256(Path(__file__).with_suffix(".go").read_bytes()).hexdigest(),
+        "test_source_sha256": hashlib.sha256(
+            Path(__file__).with_suffix(".go").read_bytes()
+        ).hexdigest(),
     }
     with tempfile.TemporaryDirectory(prefix="extore-lmm-native-") as temporary:
         temp = Path(temporary)
@@ -69,9 +75,13 @@ def main():
         with socket.socket() as sock:
             sock.bind(("127.0.0.1", 0))
             port = sock.getsockname()[1]
-        env = dict(os.environ, EXTORE_DATA=str(data), EXTORE_ORIGIN=origin,
-                   EXTORE_STATIC=str(root / "extore/static"),
-                   EXTORE_LISTEN=f"127.0.0.1:{port}")
+        env = dict(
+            os.environ,
+            EXTORE_DATA=str(data),
+            EXTORE_ORIGIN=origin,
+            EXTORE_STATIC=str(root / "extore/static"),
+            EXTORE_LISTEN=f"127.0.0.1:{port}",
+        )
         subprocess.run([str(binary), "init"], env=env, capture_output=True, check=True)
         owner = secrets.token_urlsafe(32)
         now = time.time()
@@ -79,40 +89,82 @@ def main():
             db.execute(
                 "INSERT INTO sessions(digest,role,staff_id,expires,created,id,last_seen,ip,ua,revoked,shop_id,auth_at,auth_method) "
                 "VALUES (?,'admin',NULL,?,?,?,?,?,?,0,NULL,?,'legacy')",
-                (hashlib.sha256(owner.encode()).hexdigest(), now + 600, now,
-                 str(uuid.uuid4()), now, "127.0.0.1", "native-sdk-fixture", now),
+                (
+                    hashlib.sha256(owner.encode()).hexdigest(),
+                    now + 600,
+                    now,
+                    str(uuid.uuid4()),
+                    now,
+                    "127.0.0.1",
+                    "native-sdk-fixture",
+                    now,
+                ),
             )
         config = temp / "config.json"
-        config.write_text(json.dumps({
-            "origin": origin, "native_url": f"http://127.0.0.1:{port}",
-            "owner_cookie": owner, "report_path": str(temp / "facts.json"),
-        }))
+        config.write_text(
+            json.dumps(
+                {
+                    "origin": origin,
+                    "native_url": f"http://127.0.0.1:{port}",
+                    "owner_cookie": owner,
+                    "report_path": str(temp / "facts.json"),
+                }
+            )
+        )
         config.chmod(0o600)
         overlay = temp / "overlay.json"
-        overlay.write_text(json.dumps({"Replace": {
-            str(module / "internal/modules/store/native_extore_bridge_test.go"):
-                str(Path(__file__).with_suffix(".go"))
-        }}))
+        overlay.write_text(
+            json.dumps(
+                {
+                    "Replace": {
+                        str(
+                            module
+                            / "internal/modules/store/native_extore_bridge_test.go"
+                        ): str(Path(__file__).with_suffix(".go"))
+                    }
+                }
+            )
+        )
         with (temp / "server.log").open("wb") as log:
-            process = subprocess.Popen([str(binary), "serve"], env=env, stdout=log, stderr=subprocess.STDOUT)
+            process = subprocess.Popen(
+                [str(binary), "serve"], env=env, stdout=log, stderr=subprocess.STDOUT
+            )
             try:
                 for _ in range(100):
                     if process.poll() is not None:
-                        raise RuntimeError("Native fixture server exited before readiness")
+                        raise RuntimeError(
+                            "Native fixture server exited before readiness"
+                        )
                     try:
-                        with urllib.request.urlopen(f"http://127.0.0.1:{port}/health", timeout=.3) as response:
+                        with urllib.request.urlopen(
+                            f"http://127.0.0.1:{port}/health", timeout=0.3
+                        ) as response:
                             if json.load(response).get("runtime") == "rust":
                                 break
                     except OSError:
                         pass
-                    time.sleep(.05)
+                    time.sleep(0.05)
                 else:
                     raise RuntimeError("Native fixture readiness timed out")
                 result = subprocess.run(
-                    ["go", "test", "-mod=readonly", "-overlay=" + str(overlay),
-                     "./internal/modules/store", "-run", "^TestNativeRustExtoreConnection$", "-count=1", "-v"],
-                    cwd=module, env=dict(os.environ, EXTORE_NATIVE_PROBE_CONFIG=str(config), GOWORK="off"),
-                    capture_output=True, text=True, timeout=240,
+                    [
+                        "go",
+                        "test",
+                        "-mod=readonly",
+                        "-overlay=" + str(overlay),
+                        "./internal/modules/store",
+                        "-run",
+                        "^TestNativeRustExtoreConnection$",
+                        "-count=1",
+                        "-v",
+                    ],
+                    cwd=module,
+                    env=dict(
+                        os.environ, EXTORE_NATIVE_PROBE_CONFIG=str(config), GOWORK="off"
+                    ),
+                    capture_output=True,
+                    text=True,
+                    timeout=240,
                 )
                 print(result.stdout, end="")
                 print(result.stderr, end="")
@@ -120,7 +172,9 @@ def main():
                 report["go_test_output"] = result.stdout + result.stderr
                 if result.returncode == 0:
                     report.update(json.loads((temp / "facts.json").read_text()))
-                report_path.write_text(json.dumps(report, ensure_ascii=False, indent=2) + "\n")
+                report_path.write_text(
+                    json.dumps(report, ensure_ascii=False, indent=2) + "\n"
+                )
                 if result.returncode:
                     raise SystemExit(result.returncode)
             finally:

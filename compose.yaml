@@ -1,23 +1,40 @@
 services:
-  api:
+  # First use: create ./data owned by UID/GID 10001 before starting Compose.
+  # Init validates an existing store and performs only supported migrations.
+  init:
     build: .
-    restart: unless-stopped
-    ports:
-      - "127.0.0.1:8000:8000"
+    image: extore:local
+    command: ["init"]
+    restart: "no"
     environment: &env
       EXTORE_ORIGIN: ${EXTORE_ORIGIN:-http://localhost:8000}
       EXTORE_DATA: /data
-      EXTORE_SCRIPTS: /app/scripts
+      EXTORE_STATIC: /app/extore/static
+      EXTORE_LISTEN: 0.0.0.0:8000
     volumes: &volumes
       - ./data:/data
-      - ./scripts:/app/scripts:ro
+  api:
+    build: .
+    image: extore:local
+    restart: unless-stopped
+    command: ["serve"]
+    depends_on:
+      init:
+        condition: service_completed_successfully
+    ports:
+      - "127.0.0.1:8000:8000"
+    environment: *env
+    volumes: *volumes
     healthcheck:
       test:
         [
           "CMD",
-          "python",
+          "python3",
+          "-I",
+          "-S",
+          "-B",
           "-c",
-          "import urllib.request; urllib.request.urlopen('http://localhost:8000/health', timeout=5)",
+          "import json, urllib.request; assert json.load(urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=5))['runtime'] == 'rust'",
         ]
       interval: 30s
       timeout: 5s
@@ -25,8 +42,12 @@ services:
     stop_grace_period: 30s
   worker:
     build: .
+    image: extore:local
     restart: unless-stopped
-    command: ["python", "-m", "extore.worker"]
+    command: ["worker"]
+    depends_on:
+      init:
+        condition: service_completed_successfully
     environment: *env
     volumes: *volumes
     stop_grace_period: 150s
