@@ -611,3 +611,148 @@ fn rejected_exchange_attempts_count_outside_business_transaction() {
     f.ctx.peer = "127.0.0.9".into();
     admit(&f.ctx).unwrap();
 }
+
+#[test]
+fn typed_fields_preserve_decimal_and_file_reference_contracts() {
+    let fields = json!([
+        {"key":"photos","type":"images","label":{"en":"Photos"},"required":true,"max_items":2},
+        {"key":"approved","type":"boolean","label":{"en":"Approved"},"required":true},
+        {"key":"amount","type":"number","label":{"en":"Amount"},"required":true}
+    ]);
+    assert!(
+        validate_values(
+            &fields,
+            &json!({"photos":"[]","approved":"true","amount":"1"}),
+            false,
+            false
+        )
+        .is_err()
+    );
+    let accepted = validate_values(
+        &fields,
+        &json!({"photos":"[\"upload-A\", \"upload-B\"]","approved":"TRUE","amount":"1e10000"}),
+        false,
+        false,
+    )
+    .unwrap();
+    assert_eq!(accepted["photos"], "[\"upload-A\",\"upload-B\"]");
+    assert_eq!(accepted["approved"], "true");
+    assert_eq!(accepted["amount"], "1e10000");
+    assert!(
+        validate_values(
+            &fields,
+            &json!({"photos":"[\"upload-A\"]","approved":"true","amount":"NaN"}),
+            false,
+            false
+        )
+        .is_err()
+    );
+    assert!(
+        validate_values(
+            &fields,
+            &json!({"photos":"[\"upload-A\", \"upload-A\"]","approved":"true","amount":"1"}),
+            false,
+            false
+        )
+        .is_err()
+    );
+}
+#[test]
+fn task_flow_receipts_match_legacy_python_hkdf_hmac_vector() {
+    let f = Fixture::new();
+    let digest = flow::fingerprint(
+        &f.ctx,
+        &json!({"unicode":"中文","count":1,"nested":{"z":false,"a":"value"}}),
+        "shop-a",
+        "card:fixture",
+    )
+    .unwrap();
+    assert_eq!(
+        digest,
+        "64a24286afc533bc8807dc215d8d53f0256fa40a61b4bdbcb7b1200158c684c7"
+    );
+}
+
+#[test]
+fn partial_exchange_decoding_only_marks_invalid_code_unicode() {
+    let parsed = parse_exchange_body(br#"{"code":"invalid-\ud800\nVALID"}"#).unwrap();
+    assert_eq!(text(&parsed, "code"), "invalid-\u{fffd}\nVALID");
+    assert_eq!(
+        text(
+            &parse_exchange_body(br#"{"code":"\udc00"}"#).unwrap(),
+            "code"
+        ),
+        "\u{fffd}"
+    );
+    assert_eq!(
+        text(
+            &parse_exchange_body(br#"{"code":"\uD83D\uDE00"}"#).unwrap(),
+            "code"
+        ),
+        "😀"
+    );
+    assert_eq!(
+        text(
+            &parse_exchange_body(br#"{"code":"literal-\\ud800"}"#).unwrap(),
+            "code"
+        ),
+        r"literal-\ud800"
+    );
+    for raw in [
+        br#"{"token":"\ud800"}"#.as_slice(),
+        br#"{"code":"x","nested":{"code":"\ud800"}}"#,
+        br#"{"code":"\ud800","other":"\udc00"}"#,
+        br#"{"code":"\ud800",}"#,
+    ] {
+        assert!(parse_exchange_body(raw).is_err());
+    }
+}
+
+#[test]
+fn revision_quota_transfers_current_delivery_without_losing_bytes() {
+    let mut f = Fixture::new();
+    f.product("quota",json!({"revision_policy":{"attribute_key":"revisions","label":{"en":"Revisions"}},"variants":[{"id":"default","name":"Standard","attributes":{"revisions":2},"enabled":true}]}));
+    let (code, c) = f.issue("quota", json!({}));
+    let token = f.token(&code);
+    let first = f
+        .call(
+            "/api/redeem",
+            json!({"token":token,"params":{"email":"buyer@example.com"}}),
+        )
+        .unwrap();
+    f.queue("quota", &first, "claim", json!({})).unwrap();
+    f.queue(
+        "quota",
+        &first,
+        "succeed",
+        json!({"output":{"content":"First"}}),
+    )
+    .unwrap();
+    let revised=f.call("/api/receipt/revisions",json!({"token":token,"request_id":id(),"expected_revision":0,"message":"Please revise"})).unwrap();
+    f.queue("quota", &revised, "claim", json!({})).unwrap();
+    f.queue(
+        "quota",
+        &revised,
+        "succeed",
+        json!({"output":{"content":"Second"}}),
+    )
+    .unwrap();
+    let before = entitlements::allocated_bytes(&f.ctx, text(&c, "id")).unwrap();
+    assert_eq!(
+        before,
+        ("First".len()
+            + json!({"content":"First"}).to_string().len()
+            + "Please revise".len()
+            + "Second".len()
+            + json!({"content":"Second"}).to_string().len()) as i64
+    );
+    f.call(
+        "/api/receipt/revisions",
+        json!({"token":token,"request_id":id(),"expected_revision":1,"message":"Again"}),
+    )
+    .unwrap();
+    assert_eq!(
+        entitlements::allocated_bytes(&f.ctx, text(&c, "id")).unwrap(),
+        before + "Again".len() as i64
+    );
+}

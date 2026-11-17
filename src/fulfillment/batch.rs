@@ -144,6 +144,10 @@ pub fn handle(ctx: &mut Context) -> Result<Option<Reply>> {
         let mut accepted = Vec::new();
         for (index, code) in codes.iter().enumerate() {
             let shown = suffix(code);
+            if code.contains('\u{fffd}') {
+                items.push(rejected(None, index, &shown, ApiError::bad("卡密格式无效")));
+                continue;
+            }
             let key = match catalog::unwrap_code(ctx, code) {
                 Ok(code) => catalog::card_digest(&code),
                 Err(_) => {
@@ -271,4 +275,103 @@ pub fn handle(ctx: &mut Context) -> Result<Option<Reply>> {
         }
     };
     Ok(Some(Reply::json(result)))
+}
+
+/// The partial exchange contract must isolate a malformed pasted code. Only
+/// lone surrogate escapes within the top-level code string are marked invalid;
+/// other fields and all other syntax retain serde_json's strict decoding.
+pub fn parse_exchange_body(raw: &[u8]) -> Result<Value> {
+    if let Ok(value) = serde_json::from_slice(raw) {
+        return Ok(value);
+    }
+    let bad = || ApiError::bad("请求 JSON 无效");
+    if raw.iter().copied().find(|b| !b.is_ascii_whitespace()) != Some(b'{') {
+        return Err(bad());
+    }
+    let mut normalized = raw.to_vec();
+    let mut depth = 0usize;
+    let mut cursor = 0;
+    while cursor < raw.len() {
+        match raw[cursor] {
+            b'{' | b'[' => depth += 1,
+            b'}' | b']' => depth = depth.saturating_sub(1),
+            b'"' => {
+                let end = json_string_end(raw, cursor).ok_or_else(bad)?;
+                if depth == 1
+                    && serde_json::from_slice::<String>(&raw[cursor..=end])
+                        .ok()
+                        .as_deref()
+                        == Some("code")
+                {
+                    let mut value_start = end + 1;
+                    while raw.get(value_start).is_some_and(u8::is_ascii_whitespace) {
+                        value_start += 1;
+                    }
+                    if raw.get(value_start) == Some(&b':') {
+                        value_start += 1;
+                        while raw.get(value_start).is_some_and(u8::is_ascii_whitespace) {
+                            value_start += 1;
+                        }
+                        if raw.get(value_start) == Some(&b'"') {
+                            let value_end = json_string_end(raw, value_start).ok_or_else(bad)?;
+                            mark_lone_surrogates(&mut normalized, value_start + 1, value_end);
+                        }
+                    }
+                }
+                cursor = end;
+            }
+            _ => {}
+        }
+        cursor += 1;
+    }
+    serde_json::from_slice(&normalized).map_err(|_| bad())
+}
+fn json_string_end(raw: &[u8], start: usize) -> Option<usize> {
+    let mut cursor = start + 1;
+    while cursor < raw.len() {
+        match raw[cursor] {
+            b'\\' => cursor += 2,
+            b'"' => return Some(cursor),
+            _ => cursor += 1,
+        }
+    }
+    None
+}
+fn unicode_escape(raw: &[u8], start: usize, end: usize) -> Option<u16> {
+    if start + 6 > end || raw.get(start..start + 2) != Some(b"\\u") {
+        return None;
+    }
+    let mut value = 0u16;
+    for b in &raw[start + 2..start + 6] {
+        let digit = match b {
+            b'0'..=b'9' => b - b'0',
+            b'a'..=b'f' => b - b'a' + 10,
+            b'A'..=b'F' => b - b'A' + 10,
+            _ => return None,
+        };
+        value = (value << 4) | digit as u16;
+    }
+    Some(value)
+}
+fn mark_lone_surrogates(raw: &mut [u8], start: usize, end: usize) {
+    let mut cursor = start;
+    while cursor < end {
+        if raw[cursor] != b'\\' {
+            cursor += 1;
+            continue;
+        }
+        match unicode_escape(raw, cursor, end) {
+            Some(0xd800..=0xdbff)
+                if unicode_escape(raw, cursor + 6, end)
+                    .is_some_and(|value| (0xdc00..=0xdfff).contains(&value)) =>
+            {
+                cursor += 12;
+            }
+            Some(0xd800..=0xdfff) => {
+                raw[cursor..cursor + 6].copy_from_slice(b"\\ufffd");
+                cursor += 6;
+            }
+            _ => cursor += 2,
+        }
+    }
 }

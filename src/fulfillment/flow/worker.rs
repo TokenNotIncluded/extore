@@ -285,6 +285,7 @@ pub fn worker_once(app: Arc<App>) -> Result<bool> {
             {
                 continue;
             }
+            record_claim(ctx, &current, "worker", None, None)?;
             let p = snapshot(ctx, &current)?["product"].clone();
             selected = Some((current, p, fresh));
         }

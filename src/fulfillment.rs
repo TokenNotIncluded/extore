@@ -1,5 +1,9 @@
 //! Native card redemption and fulfillment with transaction-bound ownership.
+mod automation;
 mod batch;
+mod claim_identity;
+pub use batch::parse_exchange_body;
+pub use claim_identity::{processing_worker, record_claim};
 mod definition;
 pub mod entitlements;
 pub mod flow;
@@ -11,7 +15,7 @@ use sha2::Sha256;
 use std::{collections::HashSet, sync::Arc};
 use subtle::ConstantTimeEq;
 
-pub use definition::{validate_flow, validate_revision_policy};
+pub use definition::{normalize as normalize_flow, validate_flow, validate_revision_policy};
 pub use flow::{flow_card_snapshot, freeze_flow_card, preview_flow, worker_authority, worker_once};
 
 pub fn job(ctx: &Context, jid: &str) -> Result<Value> {
@@ -38,7 +42,7 @@ pub fn require_enabled(ctx: &Context, pid: &str) -> Result<Value> {
         "商品不存在",
     )?;
     if !flag(&p, "enabled") {
-        return Err(ApiError::new(403, "店铺不可用"));
+        return Err(ApiError::new(404, "店铺不可用"));
     }
     Ok(p)
 }
@@ -144,19 +148,17 @@ pub fn progress(ctx: &Context, j: &Value) -> Result<(Vec<Value>, Vec<Value>)> {
     Ok((plan, completed))
 }
 pub fn instructions(ctx: &Context, pid: &str) -> Result<Value> {
-    let owner = require_enabled(ctx, pid)?;
-    let p = catalog::product(ctx, pid)?;
-    let s = required(
-        &ctx.conn,
-        "SELECT factory_slogan FROM shops WHERE id=?",
-        [text(&owner, "shop_id")],
-        "店铺不存在",
-    )?;
-    let mut v = json!({"schema":"extore.work-instructions.v1","shop_id":owner["shop_id"],"product_id":pid,"factory_slogan":s["factory_slogan"],"workshop_slogan":text(&p,"workshop_slogan")});
-    v["revision"] = json!(digest(&v.to_string()));
-    Ok(v)
+    catalog::instructions(ctx, pid)
 }
 pub fn job_view(ctx: &Context, j: &Value, staff: bool) -> Result<Value> {
+    job_view_with_history(ctx, j, staff, true)
+}
+pub fn job_view_with_history(
+    ctx: &Context,
+    j: &Value,
+    staff: bool,
+    history: bool,
+) -> Result<Value> {
     let p = job_product(ctx, j)?;
     let c = card(ctx, text(j, "card_id"))?;
     let mut result = json!({});
@@ -233,12 +235,12 @@ pub fn job_view(ctx: &Context, j: &Value, staff: bool) -> Result<Value> {
     };
     result["queue_ahead"] = json!(ahead);
     result["queue_position"] = json!(if active { ahead + 1 } else { 0 });
-    merge(&mut result, entitlements::job_context(ctx, j, true)?);
+    merge(&mut result, entitlements::job_context(ctx, j, history)?);
     if staff {
         result["instructions"] = instructions(ctx, text(j, "product_id"))?;
         result["params"] = json_field(j, "params", json!({}));
         result["claimed_by"] = j["claimed_by"].clone();
-        result["processing_worker"] = Value::Null;
+        result["processing_worker"] = processing_worker(ctx, j)?;
         for key in ["mode", "parameters", "outputs"] {
             result[key] = p[key].clone();
         }
@@ -292,76 +294,129 @@ pub fn validate_values(
     let mut length = 0usize;
     for f in fields {
         let key = text(f, "key");
-        let raw = input.get(key).unwrap_or(&Value::Null);
-        let raw = if raw.is_null() {
-            ""
-        } else {
-            raw.as_str()
-                .ok_or_else(|| ApiError::bad("字段必须是文本"))?
+        let raw = match input.get(key) {
+            None => "",
+            Some(v) => v
+                .as_str()
+                .ok_or_else(|| ApiError::new(422, "字段必须是文本"))?,
         };
         let kind = text(f, "type");
-        let v = if (!output && !preserve)
+        let mut v = if (!output && !preserve)
             || matches!(
                 kind,
                 "email" | "number" | "url" | "select" | "boolean" | "image" | "images"
             ) {
-            raw.trim()
+            raw.trim().to_owned()
         } else {
-            raw
+            raw.to_owned()
         };
+        let required = f.get("required").and_then(Value::as_bool).unwrap_or(true);
         length += v.chars().count();
-        if f.get("required")
-            .map(|v| v.as_bool().unwrap_or(true))
-            .unwrap_or(true)
-            && v.trim().is_empty()
+        if v.contains('\0') || (!output && v.chars().count() > 10000) || (output && length > 100000)
         {
-            return Err(ApiError::bad(format!(
-                "请填写 {}",
-                f["label"]
-                    .as_object()
-                    .and_then(|o| o.values().next())
-                    .and_then(Value::as_str)
-                    .unwrap_or(key)
-            )));
+            return Err(ApiError::bad("字段内容超过大小上限或包含无效字符"));
         }
-        if (!output && v.chars().count() > 10000) || (output && length > 100000) {
-            return Err(ApiError::new(413, "字段内容超过大小上限"));
-        }
-        if !v.is_empty() {
-            let valid = match kind {
-                "email" => {
-                    v.split_once('@').is_some_and(|(a, b)| {
-                        !a.is_empty()
-                            && b.contains('.')
-                            && !b.starts_with('.')
-                            && !b.ends_with('.')
-                            && !b.contains('@')
-                    }) && !v.chars().any(char::is_whitespace)
-                }
-                "number" => v.parse::<f64>().is_ok_and(f64::is_finite),
-                "url" => valid_url(v),
-                "select" => f["options"]
-                    .as_array()
-                    .is_some_and(|a| a.iter().any(|o| text(o, "value") == v)),
-                "boolean" => matches!(v, "true" | "false"),
-                "images" => serde_json::from_str::<Vec<String>>(v).is_ok_and(|ids| {
-                    ids.len() <= integer(f, "max_items", 10) as usize
-                        && ids.iter().all(|id| uuid::Uuid::parse_str(id).is_ok())
-                        && ids.iter().collect::<HashSet<_>>().len() == ids.len()
-                }),
-                "image" | "file" => uuid::Uuid::parse_str(v).is_ok(),
-                _ => true,
+        if kind == "images" {
+            let ids = if v.is_empty() {
+                Vec::new()
+            } else {
+                serde_json::from_str::<Vec<String>>(&v)
+                    .map_err(|_| ApiError::bad("图片列表必须是文件代码的 JSON 列表"))?
             };
-            if !valid {
-                return Err(ApiError::bad(format!("字段 {key} 格式无效")));
+            if ids.len() > integer(f, "max_items", 10) as usize
+                || ids.iter().any(|id| !file_reference(id))
+                || ids.iter().collect::<HashSet<_>>().len() != ids.len()
+                || (required && ids.is_empty())
+            {
+                return Err(ApiError::bad("图片列表无效、重复或缺少必填内容"));
+            }
+            v = serde_json::to_string(&ids)?;
+        } else {
+            if required && v.trim().is_empty() {
+                return Err(ApiError::bad(format!(
+                    "请填写 {}",
+                    f["label"]
+                        .as_object()
+                        .and_then(|o| o.values().next())
+                        .and_then(Value::as_str)
+                        .unwrap_or(key)
+                )));
+            }
+            if !v.is_empty() {
+                if kind == "boolean" {
+                    v = v.to_lowercase();
+                }
+                let valid = match kind {
+                    "email" => {
+                        v.split_once('@').is_some_and(|(a, b)| {
+                            !a.is_empty()
+                                && b.contains('.')
+                                && !b.starts_with('.')
+                                && !b.ends_with('.')
+                                && !b.contains('@')
+                        }) && !v.chars().any(char::is_whitespace)
+                    }
+                    "number" => finite_decimal(&v),
+                    "url" => valid_url(&v),
+                    "select" => f["options"]
+                        .as_array()
+                        .is_some_and(|a| a.iter().any(|o| text(o, "value") == v)),
+                    "boolean" => matches!(v.as_str(), "true" | "false"),
+                    "image" | "file" => file_reference(&v),
+                    _ => true,
+                };
+                if !valid {
+                    return Err(ApiError::bad(format!("字段 {key} 格式无效")));
+                }
             }
         }
         clean.insert(key.to_owned(), json!(v));
     }
     Ok(Value::Object(clean))
 }
+fn file_reference(v: &str) -> bool {
+    !v.is_empty()
+        && v.len() <= 100
+        && v.as_bytes()[0].is_ascii_alphanumeric()
+        && v.bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'-'))
+}
+fn finite_decimal(value: &str) -> bool {
+    // Values are strings: a finite decimal exponent need not fit a binary float.
+    let value = value.replace('_', "");
+    let value = value.strip_prefix(['+', '-']).unwrap_or(&value);
+    let mut exponent = value.split(['e', 'E']);
+    let significand = exponent.next().unwrap_or("");
+    if let Some(power) = exponent.next() {
+        let power = power.strip_prefix(['+', '-']).unwrap_or(power);
+        if power.is_empty()
+            || !power.bytes().all(|b| b.is_ascii_digit())
+            || exponent.next().is_some()
+        {
+            return false;
+        }
+    }
+    let mut dot = false;
+    let mut digits = 0;
+    for c in significand.bytes() {
+        if c == b'.' && !dot {
+            dot = true;
+        } else if c.is_ascii_digit() {
+            digits += 1;
+        } else {
+            return false;
+        }
+    }
+    digits > 0
+}
+
 fn valid_url(v: &str) -> bool {
-    !v.contains('\\')
+    // A URL parser normalizes an empty user-info component away; reject it first.
+    let authority = v
+        .split_once("://")
+        .map(|(_, rest)| rest.split(['/', '?', '#']).next().unwrap_or(""));
+    authority.is_some_and(|value| !value.contains('@'))
+        && !v.contains('\\')
         && !v.chars().any(|c| c.is_whitespace() || c.is_control())
         && url::Url::parse(v).is_ok_and(|u| {
             matches!(u.scheme(), "http" | "https")
@@ -561,10 +616,11 @@ pub fn apply_simple_update(ctx: &Context, jid: &str, u: &Value) -> Result<Value>
         .iter()
         .map(|s| json!(text(s, "id")))
         .collect::<Vec<_>>();
-    if completed.iter().any(|id| !ids.contains(id))
-        || old_done.iter().any(|id| !completed.contains(id))
-    {
-        return Err(ApiError::new(409, "处理步骤不能回退或引用未定义步骤"));
+    if completed.iter().any(|id| !ids.contains(id)) {
+        return Err(ApiError::bad("提交了任务计划中未定义的处理步骤"));
+    }
+    if old_done.iter().any(|id| !completed.contains(id)) {
+        return Err(ApiError::new(409, "已完成步骤不能撤回"));
     }
     if state == "succeeded" {
         completed = ids.clone();
@@ -600,7 +656,11 @@ pub fn apply_simple_update(ctx: &Context, jid: &str, u: &Value) -> Result<Value>
     let mut content = Value::Null;
     if state == "succeeded" {
         if text(&p, "delivery") == "service" {
-            if has_output {
+            // Legacy workers may send content for service goods. It is ignored
+            // and never persisted; declared structured output is still forbidden.
+            if u.get("output")
+                .is_some_and(|v| !v.is_null() && v.as_object().is_none_or(|o| !o.is_empty()))
+            {
                 return Err(ApiError::bad("服务交付不能包含内容"));
             }
         } else {
@@ -628,11 +688,25 @@ pub fn apply_simple_update(ctx: &Context, jid: &str, u: &Value) -> Result<Value>
             files::validate_output_files(ctx, &j, &p, &output)?;
             content = json!(output_content(&p, &output));
             if integer(&j, "revision_round", 0) > 0 {
-                files::check_storage_quota(
-                    ctx,
-                    (content.as_str().unwrap_or("").len() + output.to_string().len()) as u64,
-                    text(&j, "product_id"),
+                let extra =
+                    (content.as_str().unwrap_or("").len() + output.to_string().len()) as u64;
+                let stored = required(
+                    &ctx.conn,
+                    "SELECT COALESCE(SUM(size),0) AS n FROM job_files WHERE card_id=? AND content IS NOT NULL",
+                    [text(&j, "card_id")],
+                    "容量读取失败",
                 )?;
+                if integer(&stored, "n", 0)
+                    + entitlements::allocated_bytes(ctx, text(&j, "card_id"))?
+                    + extra as i64
+                    > 100 * 1024 * 1024
+                {
+                    return Err(ApiError::new(
+                        413,
+                        "此卡密的交付历史和文件总量已达到容量上限",
+                    ));
+                }
+                files::check_storage_quota(ctx, extra, text(&j, "product_id"))?;
             }
         }
     }
@@ -647,7 +721,13 @@ pub fn apply_simple_update(ctx: &Context, jid: &str, u: &Value) -> Result<Value>
     }
     event(
         ctx,
-        &format!("fulfillment.{state}"),
+        if state == "processing" {
+            "fulfillment.progress"
+        } else if state == "succeeded" {
+            "fulfillment.succeeded"
+        } else {
+            "fulfillment.failed"
+        },
         text(&j, "product_id"),
         Some(&result),
     )?;
@@ -734,6 +814,7 @@ pub fn admit(ctx: &Context) -> Result<()> {
         "/api/redeem" | "/api/batch/redeem" => ("redeem", 20),
         "/api/receipt/revisions" => ("revision", 20),
         "/api/retry" => ("retry", 20),
+        "/api/manage/next" => ("automation-next", 120),
         path if path.starts_with("/api/task-flow/") => ("task-flow", 60),
         _ => return Ok(()),
     };

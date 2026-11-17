@@ -49,9 +49,14 @@ pub fn batch_receipt(ctx: &Context, list: &[Value]) -> Result<Value> {
         .iter()
         .map(|c| receipt_item(ctx, c))
         .collect::<Result<Vec<_>>>()?;
-    Ok(
-        json!({"batch":true,"product":items.first().map(|i|i["product"].clone()).unwrap_or(Value::Null),"items":items}),
-    )
+    let product = list
+        .first()
+        .map(|card| {
+            catalog::product(ctx, text(card, "product_id")).map(|p| catalog::public_product(&p))
+        })
+        .transpose()?
+        .unwrap_or(Value::Null);
+    Ok(json!({"batch":true,"product":product,"items":items}))
 }
 pub fn cleanup(ctx: &Context) -> Result<()> {
     ctx.conn
@@ -79,12 +84,12 @@ pub fn codes(ctx: &Context, raw: &str) -> Result<Vec<String>> {
         .filter(|s| !s.is_empty())
         .map(String::from)
         .collect::<Vec<_>>();
-    if list.is_empty() || list.len() > 30 {
-        return Err(ApiError::bad("请输入卡密，一次最多兑换 30 张"));
-    }
+    if list.is_empty() { return Err(ApiError::bad("请输入卡密")); }
+    if list.len() > 30 { return Err(ApiError::bad("一次最多兑换 30 张卡密")); }
     Ok(list)
 }
 pub fn verified(ctx: &Context, c: &Value) -> Result<()> {
+    ctx.conn.execute("INSERT OR IGNORE INTO card_meta(card_id,variant_id,variant_snapshot) VALUES (?,'default','{}')",[text(c,"id")])?;
     ctx.conn.execute(
         "UPDATE card_meta SET first_verified=COALESCE(first_verified,?) WHERE card_id=?",
         params![now(), text(c, "id")],
@@ -95,26 +100,36 @@ fn exchange(ctx: &Context) -> Result<Value> {
     let values = codes(ctx, ctx.b("code"))?;
     let mut list = Vec::new();
     let mut seen = HashSet::new();
+    let multiple = values.len() > 1;
     for v in values {
         let unwrapped = catalog::unwrap_code(ctx, &v)?;
         let key = catalog::card_digest(&unwrapped);
         if !seen.insert(key.clone()) {
             continue;
         }
+        let ordinal = list.len() + 1;
+        let annotate = |e: ApiError| {
+            if multiple {
+                ApiError::new(e.status, format!("第 {ordinal} 张：{}", e.message))
+            } else {
+                e
+            }
+        };
         let c = required(
             &ctx.conn,
             "SELECT * FROM cards WHERE digest=?",
             [key],
             "卡密不存在",
-        )?;
-        screen(ctx, &c)?;
+        )
+        .map_err(&annotate)?;
+        screen(ctx, &c).map_err(annotate)?;
         list.push(c);
     }
     if list
         .iter()
         .any(|c| c["product_id"] != list[0]["product_id"])
     {
-        return Err(ApiError::bad("一次只能兑换同一商品的卡密"));
+        return Err(ApiError::bad("这些卡密不是同一件商品，请分开兑换"));
     }
     cleanup(ctx)?;
     let value = token();
@@ -427,6 +442,12 @@ fn queue_batch(ctx: &Context) -> Result<Value> {
             }
             _ => return Err(ApiError::bad("队列操作无效")),
         }
+        if action == "claim" {
+            let current = job(ctx, jid)?;
+            if text(&current, "state") == "processing" {
+                record_claim(ctx, &current, &who, Some(&s), None)?;
+            }
+        }
         audit(
             &ctx.conn,
             &who,
@@ -562,6 +583,9 @@ fn callback(ctx: &Context) -> Result<Value> {
     job_view(ctx, &result, false)
 }
 pub fn handle(ctx: &mut Context) -> Result<Option<Reply>> {
+    if let Some(r) = automation::handle(ctx)? {
+        return Ok(Some(r));
+    }
     if let Some(r) = private_worker::handle(ctx)? {
         return Ok(Some(r));
     }
@@ -590,7 +614,7 @@ pub fn handle(ctx: &mut Context) -> Result<Option<Reply>> {
             let items = ctx.body["items"]
                 .as_array()
                 .filter(|a| !a.is_empty() && a.len() <= 30)
-                .ok_or_else(|| ApiError::bad("请逐卡提交参数"))?;
+                .ok_or_else(|| ApiError::bad("请为每张待兑换的卡密填写启动参数"))?;
             let mut seen = HashSet::new();
             for item in items {
                 let cid = text(item, "card_id");
@@ -606,7 +630,7 @@ pub fn handle(ctx: &mut Context) -> Result<Option<Reply>> {
             batch_receipt(ctx, &list)?
         } else {
             if ctx.body.get("items").is_some() {
-                return Err(ApiError::bad("单张卡密不接受批量参数"));
+                return Err(ApiError::bad("单张卡密请直接提交参数"));
             }
             let c = grant(ctx, ctx.b("token"), None)?;
             job_view(

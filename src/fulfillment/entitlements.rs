@@ -216,7 +216,7 @@ pub fn job_context(ctx: &Context, j: &Value, deliveries: bool) -> Result<Value> 
 pub fn allocated_bytes(ctx: &Context, cid: &str) -> Result<i64> {
     let old = required(
         &ctx.conn,
-        "SELECT COALESCE(SUM(COALESCE(length(CAST(v.content AS BLOB)),0)+COALESCE(length(CAST(v.result_json AS BLOB)),0)),0) AS n FROM job_delivery_versions v JOIN jobs j ON j.id=v.job_id WHERE j.card_id=?",
+        "SELECT COALESCE(SUM(COALESCE(length(CAST(v.content AS BLOB)),0)+COALESCE(length(CAST(v.result_json AS BLOB)),0)),0) AS n FROM job_delivery_versions v JOIN jobs j ON j.id=v.job_id WHERE j.card_id=? AND v.result_json IS NOT NULL",
         [cid],
         "容量读取失败",
     )?;
@@ -226,9 +226,54 @@ pub fn allocated_bytes(ctx: &Context, cid: &str) -> Result<i64> {
         [cid],
         "容量读取失败",
     )?;
-    Ok(integer(&old, "n", 0) + integer(&messages, "n", 0))
+    let current = required(
+        &ctx.conn,
+        "SELECT COALESCE(SUM(COALESCE(length(CAST(content AS BLOB)),0)+COALESCE(length(CAST(result_json AS BLOB)),0)),0) AS n FROM jobs WHERE card_id=? AND revision_round>0 AND result_json IS NOT NULL",
+        [cid],
+        "容量读取失败",
+    )?;
+    Ok(integer(&old, "n", 0) + integer(&messages, "n", 0) + integer(&current, "n", 0))
 }
 pub fn request_revision(ctx: &Context, c: &Value, request: &Value) -> Result<Value> {
+    let allowed = [
+        "token",
+        "card_id",
+        "revision",
+        "request_id",
+        "expected_revision",
+        "message",
+    ];
+    if request
+        .as_object()
+        .is_none_or(|o| o.keys().any(|k| !allowed.contains(&k.as_str())))
+        || request["token"]
+            .as_str()
+            .is_none_or(|s| s.chars().count() > 100)
+        || (!request["card_id"].is_null()
+            && request["card_id"]
+                .as_str()
+                .is_none_or(|s| s.chars().count() > 80))
+        || !request["revision"].is_null()
+    {
+        return Err(ApiError::new(422, "修改请求字段无效"));
+    }
+    let rid = text(request, "request_id");
+    let uuid = uuid::Uuid::parse_str(rid)
+        .map_err(|_| ApiError::new(422, "修改请求编号必须是随机 UUID v4"))?;
+    if uuid.get_version_num() != 4 || uuid.to_string() != rid {
+        return Err(ApiError::new(422, "修改请求编号必须是规范的随机 UUID v4"));
+    }
+    let expected = request["expected_revision"]
+        .as_i64()
+        .filter(|x| (0..=1000).contains(x))
+        .ok_or_else(|| ApiError::new(422, "修改轮次无效"))?;
+    let message = text(request, "message").trim();
+    if message.is_empty() || message.chars().count() > 10000 {
+        return Err(ApiError::new(
+            422,
+            "请填写有效的修改建议和 expected_revision",
+        ));
+    }
     require_enabled(ctx, text(c, "product_id"))?;
     let j = required(
         &ctx.conn,
@@ -241,20 +286,6 @@ pub fn request_revision(ctx: &Context, c: &Value, request: &Value) -> Result<Val
             410,
             "卡密已撤销、拒绝或交付已销毁，不能申请修改",
         ));
-    }
-    let rid = text(request, "request_id");
-    let uuid =
-        uuid::Uuid::parse_str(rid).map_err(|_| ApiError::bad("修改请求编号必须是随机 UUID v4"))?;
-    if uuid.get_version_num() != 4 || uuid.to_string() != rid {
-        return Err(ApiError::bad("修改请求编号必须是规范的随机 UUID v4"));
-    }
-    let expected = request["expected_revision"]
-        .as_i64()
-        .filter(|x| (0..=1000).contains(x))
-        .ok_or_else(|| ApiError::bad("修改轮次无效"))?;
-    let message = text(request, "message").trim();
-    if message.is_empty() || message.chars().count() > 10000 || !request["revision"].is_null() {
-        return Err(ApiError::bad("请填写有效的修改建议和 expected_revision"));
     }
     let key = std::fs::read(ctx.app.data.join("issuance.key"))?;
     let mut mac =

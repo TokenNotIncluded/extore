@@ -723,6 +723,9 @@ pub fn handle(ctx: &mut Context) -> Result<Option<Reply>> {
     if !is_flow(ctx, &j)? {
         return Err(ApiError::new(409, "此任务没有步骤流程"));
     }
+    if operation == "restart" && text(&j, "state") == "destroyed" {
+        return Err(ApiError::new(409, "只有允许重试的失败任务可以重新开始"));
+    }
     let (j, r, s) = guard(ctx, &j)?;
     if operation == "restart" {
         expect(&r, epoch, Some(revision))?;
