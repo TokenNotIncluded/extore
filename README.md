@@ -14,8 +14,8 @@
 <p align="center">
   <a href="https://github.com/TokenNotIncluded/extore/actions/workflows/ci.yml"><img src="https://github.com/TokenNotIncluded/extore/actions/workflows/ci.yml/badge.svg?branch=main" alt="CI"></a>
   <a href="https://github.com/TokenNotIncluded/extore/actions/workflows/deploy.yml"><img src="https://github.com/TokenNotIncluded/extore/actions/workflows/deploy.yml/badge.svg?branch=main" alt="Deployment"></a>
-  <a href="https://pypi.org/project/extore/"><img src="https://img.shields.io/pypi/v/extore?color=245449" alt="PyPI version"></a>
-  <a href="https://github.com/TokenNotIncluded/extore/blob/main/pyproject.toml"><img src="https://img.shields.io/badge/Python-3.12%2B-3776AB?logo=python&amp;logoColor=white" alt="Python 3.12+"></a>
+  <a href="https://pypi.org/project/extore/"><img src="https://img.shields.io/pypi/v/extore?color=245449" alt="Python SDK and CLI version"></a>
+  <a href="https://github.com/TokenNotIncluded/extore/blob/main/Cargo.toml"><img src="https://img.shields.io/badge/runtime-Rust-dea584?logo=rust&amp;logoColor=white" alt="Rust runtime"></a>
   <a href="https://github.com/TokenNotIncluded/extore/blob/main/docs/webmcp.md"><img src="https://img.shields.io/badge/WebMCP-native-245449" alt="Native WebMCP"></a>
   <a href="https://github.com/TokenNotIncluded/extore/blob/main/LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue" alt="MIT License"></a>
 </p>
@@ -47,7 +47,7 @@ Extore 接手支付之后的兑换与交付：验证卡密，将顾客带到对�
 | 权限与认证 | 平台管理员使用多个 Passkey；店主可用邮箱密码、可选 TOTP 或多个 Passkey 登录。注册默认关闭，由平台管理员邀请店主。商品链接默认 1 次浏览器登录与 1 个 CLI 绑定，支持委派和会话审计。 |
 | 自动化与二次开发 | 开源商品处理器、店铺加密配置、只写秘密与冻结运行限制；Python SDK、兼容的 Webhook v1 和按节点授权的私有 Worker v2，原生 WebMCP 工具按页面、身份与权限动态提供。 |
 | 命令行操作 | `manage` 管理商品授权，`customer` 兑换与领取，`admin` 用固定账号的设备管理本店或平台；默认精简输出，凭证保存到私密文件。AI 主动申请单商品或当前整店队列权限，店长用设备码审批，可追加权限、集中审计与撤销。 |
-| 界面与存储 | SQLite 持久化任务、事件和投递重试；单文件、单卡、单店与全站附件额度，磁盘余量保护；撕纸与分段虚线界面，明暗和语言默认自动。 |
+| 界面与存储 | SQLite 持久化任务、事件和投递重试；单文件、单卡、单店与全站附件额度，磁盘余量保护；留白清晰、浅色与深色一致的简洁界面，明暗和语言默认自动。 |
 
 顾客上传的是兑换材料，管理者上传的是交付文件。预设处理器来自审核后固定版本的[开源子模块](https://github.com/TokenNotIncluded/extore-processors)，商家在预设中选择并填写配置。浏览器 AI 需要原生 WebMCP 支持及实际授权，具体兼容性见[工具文档](https://github.com/TokenNotIncluded/extore/blob/main/docs/webmcp.md#浏览器兼容性)。
 
@@ -72,9 +72,9 @@ Extore 接手支付之后的兑换与交付：验证卡密，将顾客带到对�
 
 可选的[任务流程](https://github.com/TokenNotIncluded/extore/blob/main/docs/task-flow.md)把顾客输入、处理和展示串起来。验证或批量准备不会替顾客开始计时；顾客只看到当前允许的题目和明确展示的结果。流程在发行卡密时固定，旧卡没有流程快照时继续走原来的兑换方式。短期敏感输入有有效期，只传给当前获授权的处理节点，不能放到展示、普通事件或最终交付中。
 
-[流程开发指南](docs/workflow-development.md)提供三轮问答、文件转换和选择拒绝的完整示例。开发者可以用 `extore workflow validate --definition flow.json --product product.json` 离线检查引用和类型，再用 `FlowDefinition` 构图、`FlowExecution` 更新当前处理步骤；定义版本与 Worker 的签名协议版本独立。
+[流程开发指南](docs/workflow-development.md)提供三轮问答、文件转换和选择拒绝的完整示例。开发者可以用 `uv run extore workflow validate --definition flow.json --product product.json` 离线检查引用和类型，再用 `FlowDefinition` 构图、`FlowExecution` 更新当前处理步骤；定义版本与 Worker 的签名协议版本独立。
 
-没有合适的商品处理器时，可在配置页一键复制开发提示词，或运行 `extore processors contribute`。自有处理器须向 [extore-processors](https://github.com/TokenNotIncluded/extore-processors/compare) 提交 PR；经过源码审核、测试、合并并随 Extore 发布后，才进入商家可选目录。[贡献指南](docs/processor-contributing.md)提供开发模板、测试方法与提交说明。
+没有合适的商品处理器时，可在配置页一键复制开发提示词，或运行 `uv run extore processors contribute`。自有处理器须向 [extore-processors](https://github.com/TokenNotIncluded/extore-processors/compare) 提交 PR；经过源码审核、测试、合并并随 Extore 发布后，才进入商家可选目录。[贡献指南](docs/processor-contributing.md)提供开发模板、测试方法与提交说明。
 
 [商城接入协议](docs/commerce-import-protocol.md)使用 OAuth 2.0 授权码与 S256 PKCE，让上游商城读取商家明确授权的商品详情、规格与参考价，并在独立批准的规格额度内补充卡密。卡密补货按请求幂等，授权可到期或撤销，新增商品不会自动获权。提供开放接口、JSON Schema、Python SDK 和 CLI；实际支付、售价、销售库存与订单仍由上游商城管理。
 
@@ -82,48 +82,50 @@ Extore 接手支付之后的兑换与交付：验证卡密，将顾客带到对�
 
 需要重试时，处理者须说明原因并选择「修改后重提」或「原资料重试」；外部故障也能作为原因。拒绝处理会禁用卡密。原任务、规格和步骤计划保留，重新开始后进度归零。
 
+## Rust 运行时与 LMM 商店
+
+HTTP API、认证、数据库事务、队列和后台 worker 由 Rust 运行。已审核的 Python 商品处理器继续在无网络的 bubblewrap/seccomp 沙箱中执行，保留原有 SDK 与加密配置。生产安装包没有 Python Web 服务或其虚拟环境。迁移方式、兼容性检查和运行边界见 [Rust 迁移说明](docs/rust-migration.md)。
+
+Extore 与 LMM 新架构商店使用同一套克制的浅色/深色界面。商家从 LMM 的 `/store/manage` 发起连接，在 Extore 明确选择店铺、商品与授权范围，再导入商品草稿。单项同步和批量同步保留来源身份，并分别展示同步结果；授权到期时可以重新连接。
+
+LMM 使用 `products.read` 和 `marketplace.sync` 读取商品资料及获批的私有 SKU 发货模板。库存摘要变化与商品配置变化分别处理：前者不改变 `sync_revision`，私有发货内容或商店配置变化会改变它。`cards.issue` 需要独立授权，支付和订单继续由 LMM 商店处理。
+
 ## 快速运行
 
-需要 **Python 3.12+、[uv](https://docs.astral.sh/uv/) 和 Linux**。完整环境、部署和备份说明见[运行指南](https://github.com/TokenNotIncluded/extore/blob/main/docs/getting-started.md)。内置自动处理器还需要系统安装 bubblewrap 0.12 及以上和 libseccomp；Python 包安装不会提供这些依赖。Arch Linux 可执行：
+需要 **Linux、Rust stable**。启用已审核的自动处理器时，还需要系统 Python 3.12+、bubblewrap 0.12+ 和 libseccomp。Arch Linux 可安装：
 
 ```sh
-sudo pacman -S --needed bubblewrap libseccomp
+sudo pacman -S --needed rust python bubblewrap libseccomp openssl
 ```
 
-从 [PyPI](https://pypi.org/project/extore/) 安装后，可直接使用 `extore` 命令：
-
-```sh
-uv tool install extore
-export EXTORE_DATA="$HOME/.local/share/extore"
-extore init
-extore serve
-```
-
-另开一个终端，设置相同的 `EXTORE_DATA` 后运行 `extore worker`。`extore --help` 查看全部命令，`extore --version` 查看版本。生产环境还须配置 `EXTORE_ORIGIN` 并提供 HTTPS，见运行指南。
-
-也可以从源码运行：
+从源码构建并运行原生服务：
 
 ```sh
 git clone --recurse-submodules https://github.com/TokenNotIncluded/extore.git
 cd extore
-uv sync --frozen
-uv run extore init
-uv run extore serve
+cargo build --release --locked
+export EXTORE_DATA="$PWD/data"
+export EXTORE_ORIGIN="http://localhost:8000"
+export EXTORE_STATIC="$PWD/extore/static"
+./target/release/extore init
+./target/release/extore serve
 ```
 
-另开一个终端，在项目目录启动 worker，处理自动发货和 Webhook 投递：
+另开一个终端，在相同项目目录和环境下运行后台任务：
 
 ```sh
-uv run extore worker
+./target/release/extore worker
 ```
 
-打开 <http://localhost:8000>。在 2.5 秒内点击左上角 Logo 5 次，或直接访问 `/admin`。平台管理员首次使用初始化密码注册 Passkey，之后关闭这套首次密码登录；店主账号使用独立的邮箱密码和可选 TOTP，也可添加多个 Passkey。平台管理员先配置 SMTP，再邀请店主。邀请、邮箱确认和密码重置邮件采用统一响应式排版，并保留纯文本版本；详见[多店与账号](https://github.com/TokenNotIncluded/extore/blob/main/docs/shops.md)。
+打开 <http://localhost:8000>，访问 `/admin`。首次初始化会生成私密的管理员注册材料；管理员注册 Passkey 后关闭首次密码登录。店主账号使用独立的邮箱密码和可选 TOTP，也可以添加 Passkey。生产部署必须设置固定的 HTTPS `EXTORE_ORIGIN`，API 与 worker 共享同一数据目录，完整说明见[运行指南](docs/getting-started.md)。
+
+Python SDK 与客户端 CLI 保留使用 `uv`。例如 `uv sync --frozen` 后运行 `uv run extore manage --help` 或 `uv run extore commerce --help`；服务端的 `init`、`serve`、`worker` 和 `reset-auth` 使用上面构建的 Rust 二进制。Arch 安装包把该二进制安装为 `/usr/bin/extore`。
 
 <details>
 <summary>首次登录、认证恢复与运行边界</summary>
 
 - Passkey 需要 HTTPS 或 localhost；部署前确定固定域名。平台管理员首次密码会话只能注册 Passkey，不能管理商品。
-- 平台管理员丢失全部 Passkey 时，在服务器执行 `uv run extore reset-auth` 恢复首次密码登录；店主使用邮件重置自己的密码，开启 TOTP 时还须提供第二因素或恢复码。两者均保留业务数据。详见[认证恢复](https://github.com/TokenNotIncluded/extore/blob/main/docs/getting-started.md#认证恢复)。
+- 平台管理员丢失全部 Passkey 时，在服务器执行 `/usr/bin/extore reset-auth` 恢复首次密码登录；店主使用邮件重置自己的密码，开启 TOTP 时还须提供第二因素或恢复码。两者均保留业务数据。详见[认证恢复](https://github.com/TokenNotIncluded/extore/blob/main/docs/getting-started.md#认证恢复)。
 - API 与 worker 共享数据目录和配置，一个数据库只运行一个 worker。数据目录、数据库、`issuance.key` 和 `master-secrets.key` 都要妥善保护和备份。详见[生产运行](https://github.com/TokenNotIncluded/extore/blob/main/docs/getting-started.md#生产运行)。
 - 领取链接是凭证。一次领取会消耗查看机会；销毁不能撤回已下载的副本、外部内容或历史备份。未知、超时或崩溃的交付默认等待核实，下游须用稳定任务 ID 去重。详见[自动处理与领取](https://github.com/TokenNotIncluded/extore/blob/main/docs/getting-started.md#自动处理与领取)。
 
@@ -135,23 +137,23 @@ uv run extore worker
 
 ```sh
 # 商品授权：CLI 显示网址和短码，由你在浏览器确认权限
-extore manage login --device-code --origin https://extore.example.com --product PRODUCT_ID
-extore manage queues --all
+uv run extore manage login --device-code --origin https://extore.example.com --product PRODUCT_ID
+uv run extore manage queues --all
 
 # 原子领取；持续等待由 CLI 完成，不反复把空队列交给模型
-extore manage next --all --origin https://extore.example.com --watch --limit 1
+uv run extore manage next --all --origin https://extore.example.com --watch --limit 1
 
 # 本店当前全部队列商品：先申请，再由店长核对商品清单和权限
-extore manage login --device-code --origin https://extore.example.com --shop SHOP_ID --pipelines-all --no-wait
+uv run extore manage login --device-code --origin https://extore.example.com --shop SHOP_ID --pipelines-all --no-wait
 
 # 顾客：卡密从私密文件标准输入读取
-extore customer exchange --origin https://extore.example.com --codes-stdin < /path/to/private-codes.txt
+uv run extore customer exchange --origin https://extore.example.com --codes-stdin < /path/to/private-codes.txt
 
 # 店主：首次在浏览器用真实 Passkey 批准此设备
-extore admin login --origin https://extore.example.com
+uv run extore admin login --origin https://extore.example.com
 
 # 已有邮箱账号的店主：隐藏输入密码及已开启的第二因素
-extore admin login --origin https://extore.example.com --email owner@example.com
+uv run extore admin login --origin https://extore.example.com --email owner@example.com
 ```
 
 本店队列授权只覆盖批准清单内的队列商品，之后新建的商品需要再次申请。AI 可提出追加商品或权限，店长可减少申请范围再批准；拒绝、取消或到期的申请不会改变原授权。成功追加保留原任务处理者身份；每次写入仍使用一个商品的独立授权，客户端可以聚合查看多个队列。后台会话管理可查看、撤销整份流水线授权并释放其处理中任务。店主设备授权最多 30 天，8 小时会话由本机私钥续签；后续 JSON 写操作另用一次性设备签名。列表默认摘要，任务详情和教程按需读取，制卡与新授权链接保存为 0600 文件。
@@ -192,7 +194,7 @@ SMTP 凭据、TOTP 密钥与店铺处理器配置加密保存。店主可以回�
 | [验证指南](https://github.com/TokenNotIncluded/extore/blob/main/docs/acceptance.md) | 当前检查方法、数据升级与真实验收边界 |
 | [产品定义](https://github.com/TokenNotIncluded/extore/blob/main/PRODUCT.md) · [设计说明](https://github.com/TokenNotIncluded/extore/blob/main/DESIGN.md) | 项目范围、交互和视觉原则 |
 
-服务运行后，`/docs` 提供交互式 OpenAPI 文档。普通事件和既有回调保持 **v1**；流程私有 Worker 使用独立的 **v2** 签名与节点范围。
+服务运行后，`/docs` 提供 API 入口说明与 OpenAPI JSON 链接。普通事件和既有回调保持 **v1**；流程私有 Worker 使用独立的 **v2** 签名与节点范围。
 
 ## 贡献
 
@@ -203,6 +205,9 @@ SMTP 凭据、TOTP 密钥与店铺处理器配置加密保存。店主可以回�
 ```sh
 uv run ruff check extore scripts tests
 uv run ruff format --check extore scripts tests
+cargo test --locked
+cargo build --locked
+uv run python scripts/check_native_contracts.py
 uv run pytest -q
 node --test tests/*.test.cjs
 ```

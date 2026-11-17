@@ -157,7 +157,11 @@ fn grant_token(ctx: &Context) -> CommerceResult<Reply> {
     audit(
         &ctx.conn,
         &format!("commerce:{cid}"),
-        "commerce.token.exchange",
+        if kind == "refresh_token" {
+            "commerce.token.refresh"
+        } else {
+            "commerce.token.exchange"
+        },
         text(&g, "id"),
         Some(text(&g, "shop_id")),
     )?;

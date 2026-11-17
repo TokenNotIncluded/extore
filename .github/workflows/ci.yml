@@ -18,7 +18,7 @@ jobs:
       - name: Install processor sandbox dependencies
         run: |
           sudo apt-get update -qq
-          sudo apt-get install -y --no-install-recommends build-essential meson ninja-build pkg-config libcap-dev libseccomp2
+          sudo apt-get install -y --no-install-recommends build-essential meson ninja-build pkg-config libcap-dev libseccomp2 libssl-dev
           git init "$RUNNER_TEMP/extore-bubblewrap"
           git -C "$RUNNER_TEMP/extore-bubblewrap" remote add origin https://github.com/containers/bubblewrap.git
           git -C "$RUNNER_TEMP/extore-bubblewrap" fetch --depth=1 origin 719a4fd474d44b26906bcf2b1b0fb6eddd8d56d0
@@ -28,11 +28,18 @@ jobs:
           sudo meson install -C "$RUNNER_TEMP/extore-bubblewrap-build"
           /usr/bin/bwrap --version
       - run: uv sync --frozen --python 3.12
+      - name: Build and test the native service
+        run: |
+          rustup toolchain install stable --profile minimal
+          cargo +stable test --locked
+          cargo +stable build --locked
       - run: uv run ruff check extore scripts tests examples
       - run: uv run ruff format --check extore scripts tests examples
       - run: uv run ruff check --config pyproject.toml processors/official/extore_processors processors/official/tests
       - run: uv run ruff format --check --config pyproject.toml processors/official/extore_processors processors/official/tests
       - run: uv run pytest -q
+      - name: Verify native HTTP and worker contracts
+        run: EXTORE_PROCESSOR_PYTHON="$PWD/.venv/bin/python" uv run python scripts/check_native_contracts.py
       - run: uv run python -m compileall -q extore scripts examples
       - run: uv run python examples/workflows/validate_examples.py
       - name: Check all shipped JavaScript

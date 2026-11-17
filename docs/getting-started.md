@@ -4,7 +4,7 @@
 
 Extore 负责卡密验证、信息收集、任务处理与交付，支持隔离的多家店铺。平台管理员维护店铺、注册和 SMTP；店主只管理自己的商品与任务。支付和支付订单管理仍由另一平台承担，通过制卡接口、Webhook 和签名回调对接。付款适配器默认关闭，尚未选定提供商；内置预设不会发起付款。
 
-- [从 PyPI 安装](#从-pypi-安装)
+- [客户端与 SDK 安装](#客户端与-sdk-安装)
 - [本地运行](#本地运行)
 - [显示偏好](#显示偏好)
 - [基本流程](#基本流程)
@@ -18,50 +18,46 @@ Extore 负责卡密验证、信息收集、任务处理与交付，支持隔离�
 
 首次密码、平台制卡密钥、卡密、管理链接和领取链接属于凭证，请勿提交到 Git 或公开反馈中。
 
-## 从 PyPI 安装
+## 客户端与 SDK 安装
 
-需要 Linux、Python 3.12+ 和 [uv](https://docs.astral.sh/uv/)。安装包已包含网页、Python SDK 与固定版本的预设处理器，无需另行克隆 Git 子模块：
+HTTP 服务与 worker 使用 Rust 二进制。Python 3.12+ 和 [uv](https://docs.astral.sh/uv/) 用于客户端 SDK、远程 CLI、开发和兼容测试；已审核商品处理器也使用隔离的 Python 标准库环境。
+
+在独立客户端环境中可以安装 Python CLI：
 
 ```sh
 uv tool install extore
-export EXTORE_DATA="$HOME/.local/share/extore"
-extore init
-extore serve
+uv run extore manage --help
+uv run extore commerce --help
 ```
 
-另一个终端设置相同的 `EXTORE_DATA` 后执行 `extore worker`。默认网站地址为 `http://localhost:8000`；`extore serve --host 127.0.0.1 --port 8000` 可显式指定监听地址，更换端口或域名时需同步设置 `EXTORE_ORIGIN`。API 与 worker 在前台独立运行，生产环境应交给进程管理器。
-
-`extore --help` 列出全部命令，`extore --version` 输出安装版本。命令包括 `init`、`bootstrap`、`reset-auth`、`integration-key`、`demo`、`serve`、`worker` 与远程 `manage`、`customer`、`admin`；原有 `python -m extore.cli` 管理命令和 `python -m extore.worker` 保持兼容。查看帮助、版本或输入无效参数不会初始化数据库。
-
-从源码构建发行包：
-
-```sh
-uv build -q
-```
+在本项目源码目录，客户端命令使用 `uv run extore …`。服务器安装包的 `/usr/bin/extore` 是 Rust 服务端入口，支持 `init`、`bootstrap`、`serve`、`worker`、`reset-auth`、`integration-key` 和 `version`。客户端命令与服务端入口分别使用。
 
 ## 本地运行
 
-需要 Python 3.12+、[uv](https://docs.astral.sh/uv/) 和 Linux（worker 使用文件锁与进程组）。
-
-以下源码运行命令在项目根目录执行。
+需要 Linux 和 Rust stable。自动处理器还需要系统 Python 3.12+、bubblewrap 0.12+、libseccomp 和可用的内核命名空间。以下命令在项目根目录执行：
 
 ```sh
 git clone --recurse-submodules https://github.com/TokenNotIncluded/extore.git
 cd extore
-# 已有工作目录可先取得主仓库记录的预设处理器版本
 git submodule update --init processors/official
-uv sync --frozen
-uv run python -m extore.cli init
-# 可选：仅在空数据库创建一个本地演示商品，输出演示卡密
-uv run python -m extore.cli demo
-uv run uvicorn extore.app:app --host 127.0.0.1 --port 8000
+cargo build --release --locked
+export EXTORE_DATA="$PWD/data"
+export EXTORE_ORIGIN="http://localhost:8000"
+export EXTORE_STATIC="$PWD/extore/static"
+export EXTORE_LISTEN="127.0.0.1:8000"
+./target/release/extore init
+./target/release/extore serve
 ```
 
-另开一个终端，在项目根目录运行 worker；自动发货和 Webhook 投递需要它：
+`init` 在数据目录写入权限为 0600 的首次管理员注册材料，不把密码输出到服务日志。已有数据库先验证版本与原密钥；schema 22 的增量迁移见 [Rust 迁移说明](rust-migration.md)。
+
+另开终端，使用相同的数据目录、站点地址和静态资源配置启动原生 worker：
 
 ```sh
-uv run python -m extore.worker
+./target/release/extore worker
 ```
+
+监听地址由 `EXTORE_LISTEN` 配置，站点地址由 `EXTORE_ORIGIN` 配置。API 与 worker 在前台独立运行，生产环境交给进程管理器。帮助和版本查询不初始化数据库，未知多余参数会被拒绝。
 
 打开 `http://localhost:8000`。连续点击左上角 Logo 5 次（2.5 秒内）进入后台，也可访问 `/admin`。平台管理员输入服务器初始化密码，注册 Passkey 后获得后台权限，**这套首次密码立即失效**；首次密码会话只能注册 Passkey，不能管理商品。支持多个 Passkey；从浏览器添加或移除前需要最近 10 分钟内登录。[店主 CLI](cli-owner.md#passkey-注册)使用设备签名，注册仍需真实 WebAuthn 结果。
 
@@ -145,10 +141,10 @@ Passkey 需要 HTTPS 或 localhost。更换域名 / RP ID 后，旧 Passkey 无�
 平台管理员丢失全部 Passkey 时，只能在服务器恢复首次密码：
 
 ```sh
-uv run python -m extore.cli reset-auth
+sudo -u extore extore-admin reset-auth
 ```
 
-输入 `RESET` 确认，然后在终端私密输入新密码。平台管理员的 Passkey、登录会话及平台 CLI 设备被撤销，认证挑战被清除；重新进入后台注册新 Passkey。各店账号、Passkey、商品管理设备和业务数据保留。
+该命令撤销平台管理员的 Passkey、登录会话及平台 CLI 设备，清除认证挑战，并生成新的私密首次密码文件。操作人员读取数据目录中的注册材料后，重新进入后台注册 Passkey；各店账号、商品管理设备和业务数据保留。
 
 店主使用 `/account/reset` 发送一次性邮件链接重置密码，已启用 TOTP 时还须提供验证码或恢复码。改密码或重置密码会撤销本店账号会话、店主 CLI 设备及商品处理设备；商品、卡密、任务与管理链接配置保留。设备管理见[商品 CLI](cli.md#配置输出与撤销)、[店主 CLI](cli-owner.md#配置与退出)及[多店与账号](shops.md)。
 
@@ -159,30 +155,30 @@ uv run python -m extore.cli reset-auth
 ```sh
 export EXTORE_ORIGIN=https://redeem.example.com
 export EXTORE_DATA=/var/lib/extore
+export EXTORE_STATIC=/usr/lib/extore/extore/static
+export EXTORE_LISTEN=127.0.0.1:8095
 ```
 
 使用反向代理提供 HTTPS。API 与 worker 必须共享同一个数据目录及配置。一个数据库运行一个 worker；API 可运行多个进程，但建议单进程起步。数据目录权限为 0700，部署前 `umask 077`，专用低权限用户运行。数据库、WAL、`issuance.key` 和 `master-secrets.key` 都是敏感文件，必须一并备份。前者保护平台制卡幂等响应，后者保护 SMTP、邮件队列、TOTP 和处理器配置档案；丢失密钥后不能解密既有秘密。
 
 ```sh
-uv run uvicorn extore.app:app --host 127.0.0.1 --port 8000 --forwarded-allow-ips=127.0.0.1
-uv run python -m extore.worker
+/usr/bin/extore serve
+/usr/bin/extore worker
 ```
 
-文件上传默认每个文件 20 MiB、每张卡密 100 MiB；反向代理须为两个上传接口放行至少 21 MiB 请求，其余接口仍限制 256 KiB。下载只以附件返回，系统不会打开或执行文件。具体额度和清理方式见下文[文件上传与存储](#文件上传与存储)。
+文件上传默认每个文件 20 MiB、每张卡密 100 MiB；反向代理须为上传接口放行至少 21 MiB 请求。原生 API 的一般请求接收上限为 5 MiB，具体业务字段、批量大小及签名回调另有更严格的限制。下载只以附件返回，系统不会打开或执行文件。具体额度和清理方式见下文[文件上传与存储](#文件上传与存储)。
 
-仅信任实际反向代理的地址。限流以 ASGI 的客户端地址为准；不要将可信代理地址设为 `*`。定期监控 worker 和 `/health`；健康检查仅证明 API / SQLite 可读写，不证明 worker 或外部发货平台可用。备份使用 SQLite 在线备份接口或停服务后复制，不能在写入时单独复制主数据库。
+原生服务只在连接来自 loopback 时使用代理提供的客户端地址，并取 `X-Forwarded-For` 最右侧地址；反向代理应覆盖或正确追加该字段。API 绑定本机地址，由已配置的反向代理提供外部访问。定期监控 worker 和 `/health`；健康检查仅证明 API / SQLite 可读写，不证明 worker 或外部发货平台可用。备份使用 SQLite 在线备份接口或停服务后复制，不能在写入时单独复制主数据库。
 
-也提供 [`Dockerfile`](../Dockerfile) 与 [`compose.yaml`](../compose.yaml)。修改 Compose 的 `EXTORE_ORIGIN` 后，在 HTTPS 反向代理后运行：
+也提供构建原生 Rust 程序的 [`Dockerfile`](../Dockerfile) 与 [`compose.yaml`](../compose.yaml)。一次性初始化服务成功后才启动 API 与 worker，已有 `./data` 挂载继续保留。修改 Compose 的 `EXTORE_ORIGIN` 后，在 HTTPS 反向代理后运行：
 
 ```sh
-mkdir -p data
-chmod 700 data
-# 容器默认 uid 10001，须保证其可以写入 data
-sudo chown 10001:10001 data
+sudo install -d -o 10001 -g 10001 -m 0700 data
 docker compose build
-docker compose run --rm -it api python -m extore.cli init
 docker compose up -d
 ```
+
+Docker 的默认安全策略可能拒绝嵌套的非特权命名空间。API 与普通队列可以运行；自动处理器还需要宿主和容器引擎允许 bubblewrap 所需的命名空间，并通过真实沙箱交付验收。隔离不可用时，处理器会拒绝执行，不能把容器启动成功当作自动处理可用。原生 systemd 部署同样检查 bubblewrap 与 seccomp。
 
 预设处理器随程序包安装，执行超时 120 秒；输出最多 1 MB，单条结果最多 100 KB。顾客接口不返回处理器配置中的秘密。
 
@@ -219,11 +215,11 @@ Webhook 须使用 HTTPS 公网地址；DNS 校验后固定连接 IP、保留域�
 链接列表默认只显示 active，history 查看失效链接，all 也包含归档墓碑。CLI 清理默认预览，明确传 `--apply` 才实际执行：
 
 ```sh
-extore admin maintenance status
-extore admin maintenance cleanup --area events --limit 100
-extore admin maintenance cleanup --area events --limit 100 --apply
-extore manage links cleanup --product PRODUCT_ID
-extore manage links cleanup --product PRODUCT_ID --apply
+uv run extore admin maintenance status
+uv run extore admin maintenance cleanup --area events --limit 100
+uv run extore admin maintenance cleanup --area events --limit 100 --apply
+uv run extore manage links cleanup --product PRODUCT_ID
+uv run extore manage links cleanup --product PRODUCT_ID --apply
 ```
 
 店主只能清理本店记录，平台管理员可显式选 `--shop SHOP_ID`；商品管理链接必须有委派权限且只清理自己的失效后代，不能清理自己的链接、同级或上级。维护分批执行，不因单次预览或 SQLite 删除声称磁盘文件已经缩小。保留策略与接口见[协议文档](protocol.md#记录保留与清理)。
@@ -234,23 +230,26 @@ extore manage links cleanup --product PRODUCT_ID --apply
 - [接口、状态与完整事件定义](protocol.md)
 - [Python 处理器及回调 SDK](python-sdk.md)
 - [验收记录与限制](acceptance.md)
-- 服务运行后 `/docs` 提供交互式 OpenAPI 文档。
+- 服务运行后 `/docs` 提供 API 入口说明与 OpenAPI JSON 链接。
 
 ```sh
+cargo test --locked
+cargo build --locked
+uv run python scripts/check_native_contracts.py
 uv run pytest -q
 uv run python -m compileall -q extore processors/official
 node --check extore/static/app.js
 ```
 
-启动时迁移已有数据库，保留商品、卡密、任务和管理链接的权限范围；旧业务归入默认店铺。事件与回调协议仍为版本 1。多店数据与配置相互隔离，商品管理链接只授予指定商品的权限。支付收款与支付订单管理由上游平台负责，本项目不以预设演示结果证明实际付款。
+启动前由原生 `init` 验证或迁移数据库，再启动 API 与 worker；已有商品、卡密、任务和管理链接的权限范围保留。事件与回调协议仍为版本 1。多店数据与配置相互隔离，商品管理链接只授予指定商品的权限。支付收款与支付订单管理由上游平台负责，本项目不以预设演示结果证明实际付款。
 
 ## Arch Linux 原生部署
 
 需要推送 `main` 后自动部署时，见[自动部署](automatic-deployment.md)。它使用专用执行服务，将升级前的恢复材料留在本机统一备份目录，并验证实际上线提交。
 
-[`deploy/arch/PKGBUILD`](../deploy/arch/PKGBUILD) 在目标机用锁定依赖构建运行环境，以 pacman 包管理文件；不复制本地虚拟环境。API 与 worker 使用独立 systemd 服务、低权限 `extore` 用户、只写 `/var/lib/extore`。程序包包含固定版本的预设处理器，不从商家指定的目录加载程序。
+[`deploy/arch/PKGBUILD`](../deploy/arch/PKGBUILD) 在目标机用 `cargo build --release --locked` 构建原生程序，以 pacman 包管理文件；不复制本地虚拟环境。API 与 worker 使用独立 systemd 服务、低权限 `extore` 用户、只写 `/var/lib/extore`。程序包包含固定版本的预设处理器，不从商家指定的目录加载程序。
 
-首次无人值守部署可执行 `sudo -u extore extore-admin bootstrap`：生成随机首次密码，存于 `/var/lib/extore/bootstrap-password.txt`，权限 0600，不输出到日志。由服务器操作人员私密读取并完成 Passkey 注册；注册成功后密码文件也会删除。
+首次无人值守部署可执行 `sudo -u extore extore-admin init`：生成随机首次密码，存于 `/var/lib/extore/bootstrap-password.txt`，权限 0600，不输出到日志。由服务器操作人员私密读取并完成 Passkey 注册；注册成功后密码文件也会删除。
 
 ```sh
 # 服务器终端

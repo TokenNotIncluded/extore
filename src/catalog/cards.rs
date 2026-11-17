@@ -101,11 +101,22 @@ pub fn issue_cards(ctx: &Context, pid: &str, body: &Value) -> Result<Value> {
     if (text(&p, "mode") == "stock") != stock.is_some() {
         return Err(ApiError::new(409, "一卡一文本商品请通过文本导入生成卡密"));
     }
+    let mut blanks = 0usize;
+    let mut duplicates = 0usize;
     let lines = stock.map(|s| {
-        s.lines()
-            .filter(|l| !l.trim().is_empty())
-            .map(|l| l.trim_end_matches('\r').to_owned())
-            .collect::<Vec<_>>()
+        let s = s.strip_prefix('\u{feff}').unwrap_or(s);
+        let mut seen = std::collections::BTreeSet::new();
+        let mut result = Vec::new();
+        for line in s.lines() {
+            if line.trim().is_empty() {
+                blanks += 1;
+            } else if !seen.insert(line.to_owned()) {
+                duplicates += 1;
+            } else {
+                result.push(line.to_owned());
+            }
+        }
+        result
     });
     let count = lines
         .as_ref()
@@ -224,7 +235,7 @@ pub fn issue_cards(ctx: &Context, pid: &str, body: &Value) -> Result<Value> {
     let mut result = json!({"codes":codes,"batch_id":batch});
     if let Some(lines) = &lines {
         result["items"] = json!(items);
-        result["stats"] = json!({"count":lines.len(),"lines":stock.unwrap().lines().count(),"blank_lines":stock.unwrap().lines().filter(|l|l.trim().is_empty()).count()});
+        result["stats"] = json!({"created":lines.len(),"lines":stock.unwrap().lines().count(),"blank":blanks,"duplicates":duplicates});
     }
     Ok(result)
 }
@@ -305,6 +316,9 @@ pub fn handle(ctx: &mut Context) -> Result<Option<Reply>> {
     if ctx.path.ends_with("/cards") && ctx.method == axum::http::Method::POST
         || ctx.path.ends_with("/cards/import-text") && ctx.method == axum::http::Method::POST
     {
+        if ctx.b("product_id").is_empty() {
+            return Err(ApiError::new(422, "请指定商品编号"));
+        }
         let result = issue_cards(ctx, &pid, &ctx.body)?;
         audit(
             &ctx.conn,

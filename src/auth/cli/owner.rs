@@ -589,7 +589,7 @@ pub(super) fn handle(ctx: &mut Context) -> Result<Option<Reply>> {
             params![cid, text(&d, "id"), raw, expires, now()],
         )?;
         return Ok(Some(Reply::json(
-            json!({"challenge_id":cid,"challenge":raw,"expires":expires,"expires_in":(expires-now()).max(0.0) as i64}),
+            json!({"challenge_id":cid,"challenge":raw,"expires":expires,"expires_in":(expires-now()).ceil().max(0.0) as i64}),
         )));
     }
     if ctx.is("POST", "/api/cli/owner/session") {
@@ -643,7 +643,7 @@ pub(super) fn handle(ctx: &mut Context) -> Result<Option<Reply>> {
             d["shop_id"].as_str(),
         )?;
         let mut result = authority(ctx, d["shop_id"].as_str())?;
-        for(k,v)in json!({"access_token":raw,"token_type":"Bearer","expires":expires,"expires_in":(expires-now()).max(0.0) as i64,"device_id":d["id"],"session_id":sid}).as_object().unwrap(){result[k]=v.clone();}
+        for(k,v)in json!({"access_token":raw,"token_type":"Bearer","expires":expires,"expires_in":(expires-now()).ceil().max(0.0) as i64,"device_id":d["id"],"session_id":sid}).as_object().unwrap(){result[k]=v.clone();}
         return Ok(Some(Reply::json(result)));
     }
     if ctx.is("GET", "/api/cli/owner/status") {
@@ -706,7 +706,7 @@ pub(super) fn handle(ctx: &mut Context) -> Result<Option<Reply>> {
             ],
         )?;
         return Ok(Some(Reply::json(
-            json!({"challenge_id":cid,"challenge":raw,"expires":expires,"expires_in":(expires-now()).max(0.0) as i64}),
+            json!({"challenge_id":cid,"challenge":raw,"expires":expires,"expires_in":(expires-now()).ceil().max(0.0) as i64}),
         )));
     }
     if ctx.is("GET", "/api/admin/cli-owner-devices") {

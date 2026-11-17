@@ -1,4 +1,6 @@
+mod api;
 mod auth;
+mod board;
 mod catalog;
 mod commerce;
 mod common;
@@ -113,7 +115,17 @@ async fn request(
                     .collect::<BTreeMap<_, _>>()
             )
         } else {
-            serde_json::from_slice(&raw)?
+            if parts.uri.path() == "/api/batch/exchange" {
+                fulfillment::parse_exchange_body(&raw)?
+            } else {
+                serde_json::from_slice(&raw).map_err(|e| {
+                    if parts.uri.path().starts_with("/api/callbacks/v2/") {
+                        ApiError::new(422, "回调必须使用有效 JSON")
+                    } else {
+                        ApiError::from(e)
+                    }
+                })?
+            }
         };
         let remote_ip = if peer.ip().is_loopback() {
             parts
@@ -148,12 +160,19 @@ async fn request(
         let safe = matches!(ctx.method, Method::GET | Method::HEAD | Method::OPTIONS);
         let external = ctx.path.starts_with("/api/integrations/")
             || ctx.path.starts_with("/api/callbacks/")
-            || ctx.path.starts_with("/api/cli/");
+            || ctx.path.starts_with("/api/cli/")
+            || ctx.path == "/api/manage/next";
         if !safe && !external && ctx.header("authorization").is_empty() {
             if ctx.header("origin") != ctx.app.origin {
                 return Err(ApiError::new(403, "请求来源无效"));
             }
+            let legacy_batch_json = ctx.header("content-type").is_empty()
+                && matches!(
+                    ctx.path.as_str(),
+                    "/api/batch/exchange" | "/api/batch/receipt"
+                );
             if !ctx.raw_body.is_empty()
+                && !legacy_batch_json
                 && !ctx.header("content-type").starts_with("application/json")
                 && !ctx
                     .header("content-type")
@@ -204,13 +223,10 @@ fn dispatch(ctx: &mut Context) -> Result<Reply> {
             json!({"status":"ok","runtime":"rust","version":env!("CARGO_PKG_VERSION")}),
         ));
     }
-    if ctx.is("GET", "/api/source") {
-        return Ok(Reply::json(
-            json!({"name":"extore","version":env!("CARGO_PKG_VERSION"),"repository":"https://github.com/TokenNotIncluded/extore","runtime":"rust"}),
-        ));
-    }
     for handler in [
         auth::handle,
+        api::handle,
+        board::handle,
         pipeline::handle,
         maintenance::handle,
         commerce::handle,
@@ -284,6 +300,13 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
         .init();
     let args = std::env::args().skip(1).collect::<Vec<_>>();
     let command = args.first().map(String::as_str).unwrap_or("serve");
+    if args.iter().skip(1).any(|a| matches!(a.as_str(), "--help" | "-h")) {
+        println!("Extore {}\nCommands: init, bootstrap, serve, worker, reset-auth, integration-key, version\nConfigure the server with EXTORE_DATA, EXTORE_ORIGIN, EXTORE_STATIC and EXTORE_LISTEN.", env!("CARGO_PKG_VERSION"));
+        return Ok(());
+    }
+    if args.len() > 1 {
+        return Err("Unexpected arguments; use environment variables to configure the native server".into());
+    }
     if matches!(command, "--version" | "-V" | "version") {
         println!("extore {} (Rust)", env!("CARGO_PKG_VERSION"));
         return Ok(());
@@ -309,7 +332,7 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
     {
         return Err("EXTORE_ORIGIN must be HTTPS (or localhost for development)".into());
     }
-    if command == "init" {
+    if matches!(command, "init" | "bootstrap") {
         catalog::initialize(&app)?;
         return Ok(());
     }
@@ -317,13 +340,24 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
         catalog::validate_state(&app)?;
         return worker::run(app).await.map_err(Into::into);
     }
+    if command == "integration-key" {
+        catalog::validate_state(&app)?;
+        let c = app.db()?;
+        let key = token();
+        c.execute_batch("BEGIN IMMEDIATE")?;
+        set_setting(&c, "integration_key", &digest(&key))?;
+        audit(&c, "owner", "integration_key.rotate", "platform", None)?;
+        c.execute_batch("COMMIT")?;
+        println!("{key}");
+        return Ok(());
+    }
     if command == "reset-auth" {
         auth::reset_auth(&app)?;
         return Ok(());
     }
     if matches!(command, "--help" | "-h" | "help") {
         println!(
-            "Extore {}\n\nCommands: init, serve, worker, reset-auth, version\n\nEnvironment: EXTORE_DATA, EXTORE_ORIGIN, EXTORE_STATIC, EXTORE_LISTEN",
+            "Extore {}\n\nCommands: init, bootstrap, serve, worker, reset-auth, integration-key, version\n\nEnvironment: EXTORE_DATA, EXTORE_ORIGIN, EXTORE_STATIC, EXTORE_LISTEN",
             env!("CARGO_PKG_VERSION")
         );
         return Ok(());

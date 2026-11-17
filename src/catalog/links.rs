@@ -26,12 +26,16 @@ fn view(mut value: Value) -> Value {
     value
 }
 pub fn create(ctx: &Context, s: &Value, body: &Value) -> Result<Value> {
-    let pid = text(body, "product_id");
+    let pid = if text(body, "product_id").is_empty() && text(s, "role") == "staff" {
+        text(s, "product_id")
+    } else {
+        text(body, "product_id")
+    };
     auth::authorize_product(ctx, s, pid)?;
     let p = super::require_active(ctx, pid)?;
     let name = text(body, "name").trim();
     if name.is_empty() || name.chars().count() > 100 {
-        return Err(ApiError::bad("请填写管理链接名称"));
+        return Err(ApiError::new(422, "请填写管理链接名称"));
     }
     let permissions = body
         .get("permissions")
@@ -39,7 +43,7 @@ pub fn create(ctx: &Context, s: &Value, body: &Value) -> Result<Value> {
         .unwrap_or(json!(["queue.view", "queue.process"]));
     let requested = permissions
         .as_array()
-        .ok_or_else(|| ApiError::bad("权限必须是列表"))?
+        .ok_or_else(|| ApiError::new(422, "权限必须是列表"))?
         .iter()
         .map(|v| v.as_str().unwrap_or("").to_owned())
         .collect::<BTreeSet<_>>();
@@ -49,13 +53,21 @@ pub fn create(ctx: &Context, s: &Value, body: &Value) -> Result<Value> {
             && !requested.contains("queue.view"))
         || (requested.contains("fulfillment.configure") && !requested.contains("product.edit"))
     {
-        return Err(ApiError::bad("商品权限组合无效"));
+        return Err(ApiError::new(422, "商品权限组合无效"));
+    }
+    for key in ["max_uses", "max_cli_uses"] {
+        if body.get(key).is_some_and(|v| v.as_i64().is_none()) {
+            return Err(ApiError::new(422, "链接次数必须为整数"));
+        }
+    }
+    if body.get("days").is_some_and(|v| v.as_f64().is_none()) {
+        return Err(ApiError::new(422, "链接有效期无效"));
     }
     let max = integer(body, "max_uses", 1);
     let max_cli = integer(body, "max_cli_uses", 1);
     let days = body.get("days").and_then(Value::as_f64).unwrap_or(7.0);
     if !(1..=1000).contains(&max) || !(1..=1000).contains(&max_cli) || days <= 0.0 || days > 90.0 {
-        return Err(ApiError::bad("链接次数或有效期无效"));
+        return Err(ApiError::new(422, "链接次数或有效期无效"));
     }
     let mut expires = now() + days * 86400.0;
     let parent = if text(s, "role") == "staff" {
@@ -145,7 +157,7 @@ pub fn handle(ctx: &mut Context) -> Result<Option<Reply>> {
         }
         let scope = auth::access::link_scope(ctx, &s)?;
         let own = auth::selected_shop(ctx, &s, ctx.q("shop_id"))?;
-        let values=rows(&ctx.conn,"SELECT s.* FROM staff s JOIN products p ON p.id=s.product_id WHERE (?='' OR s.product_id=?) AND (? IS NULL OR p.shop_id=?) AND NOT EXISTS(SELECT 1 FROM pipeline_bindings b WHERE b.staff_id=s.id) ORDER BY s.created DESC",params![pid,pid,own,own])?.into_iter().filter(|v|scope.as_ref().is_none_or(|ids|ids.contains(text(v,"id")))).take(500).map(view).collect::<Vec<_>>();
+        let values=rows(&ctx.conn,"SELECT s.* FROM staff s JOIN products p ON p.id=s.product_id WHERE (?='' OR s.product_id=?) AND (? IS NULL OR p.shop_id=?) AND NOT EXISTS(SELECT 1 FROM pipeline_bindings b WHERE b.staff_id=s.id) ORDER BY s.created DESC",params![pid,pid,own,own])?.into_iter().filter(|v|scope.as_ref().is_none_or(|ids|ids.contains(text(v,"id"))) && !(text(&s,"role")=="staff" && text(v,"id")==text(&s,"staff_id"))).take(500).map(view).collect::<Vec<_>>();
         return Ok(Some(Reply::json(json!(values))));
     }
     if ctx.path.ends_with("/revoke") && ctx.method == axum::http::Method::POST {

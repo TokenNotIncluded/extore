@@ -447,7 +447,7 @@ pub fn handle(ctx: &mut Context) -> Result<Option<Reply>> {
             params![cid, did, challenge, expires, now()],
         )?;
         return Ok(Some(Reply::json(
-            json!({"challenge_id":cid,"challenge":challenge,"expires":expires,"expires_in":(expires-now()).max(0.0) as i64}),
+            json!({"challenge_id":cid,"challenge":challenge,"expires":expires,"expires_in":(expires-now()).ceil().max(0.0) as i64}),
         )));
     }
     if ctx.is("POST", "/api/cli/session") {
@@ -495,7 +495,7 @@ pub fn handle(ctx: &mut Context) -> Result<Option<Reply>> {
             &sid,
             staff["shop_id"].as_str(),
         )?;
-        let mut value = json!({"access_token":access,"token_type":"Bearer","expires":expires,"expires_in":(expires-now()).max(0.0) as i64,"device_id":d["id"],"session_id":sid,"client_name":d["client_name"],"agent_type":d["agent_type"],"product_id":staff["product_id"],"shop_id":staff["shop_id"],"permissions":staff["permissions"]});
+        let mut value = json!({"access_token":access,"token_type":"Bearer","expires":expires,"expires_in":(expires-now()).ceil().max(0.0) as i64,"device_id":d["id"],"session_id":sid,"client_name":d["client_name"],"agent_type":d["agent_type"],"product_id":staff["product_id"],"shop_id":staff["shop_id"],"permissions":staff["permissions"]});
         scope_metadata(&staff, &mut value);
         return Ok(Some(Reply::json(value)));
     }
@@ -575,7 +575,7 @@ pub fn handle(ctx: &mut Context) -> Result<Option<Reply>> {
             staff["shop_id"].as_str(),
         )?;
         return Ok(Some(Reply::json(
-            json!({"token":value,"origin":ctx.app.origin,"expires":expires,"expires_in":(expires-now()).max(0.0) as i64,"staff_id":staff["id"],"product_id":staff["product_id"],"shop_id":staff["shop_id"]}),
+            json!({"token":value,"origin":ctx.app.origin,"expires":expires,"expires_in":(expires-now()).ceil().max(0.0) as i64,"staff_id":staff["id"],"product_id":staff["product_id"],"shop_id":staff["shop_id"]}),
         )));
     }
     let prefix = if path.starts_with("/api/admin/cli-devices") {

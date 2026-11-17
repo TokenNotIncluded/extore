@@ -228,6 +228,13 @@ fn job_once(app: Arc<App>) -> Result<bool> {
                     "UPDATE jobs SET lease=?,claimed_by='worker' WHERE id=?",
                     params![now() + 150.0, text(&j, "id")],
                 )?;
+                fulfillment::record_claim(
+                    ctx,
+                    &fulfillment::job(ctx, text(&j, "id"))?,
+                    "worker",
+                    None,
+                    None,
+                )?;
                 return Ok(Some((j, p)));
             }
         }

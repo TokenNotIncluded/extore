@@ -2,6 +2,7 @@ mod batches;
 mod cards;
 mod lifecycle;
 mod links;
+mod migration;
 pub mod profiles;
 mod proxy;
 mod tracking;
@@ -25,8 +26,15 @@ pub fn initialize(app: &App) -> Result<()> {
     std::fs::set_permissions(&app.data, std::fs::Permissions::from_mode(0o700))?;
     let c = app.db()?;
     let version: i64 = c.query_row("PRAGMA user_version", [], |r| r.get(0))?;
+    if version == 22 {
+        validate_state_versions(app, &[22, 23])?;
+        migration::upgrade22(&c)?;
+        validate_state(app)?;
+        println!("Extore schema 23 ready");
+        return Ok(());
+    }
     if version != 0 && version != 23 {
-        return Err(ApiError::new(409, "请先将旧数据库升级到 schema 23"));
+        return Err(ApiError::new(409, "请先将旧数据库升级到 schema 22 或 23"));
     }
     if version == 23 {
         validate_state(app)?;
@@ -152,8 +160,11 @@ pub fn product(ctx: &Context, pid: &str) -> Result<Value> {
 }
 pub fn require_active(ctx: &Context, pid: &str) -> Result<Value> {
     let p = product(ctx, pid)?;
-    if flag(&p, "deleted") || flag(&p, "purged") {
-        return Err(ApiError::new(409, "商品已删除"));
+    if flag(&p, "purged") {
+        return Err(ApiError::new(409, "商品已永久移出回收站，不能再次发行或修改"));
+    }
+    if flag(&p, "deleted") {
+        return Err(ApiError::new(409, "商品已删除，请先从回收站恢复"));
     }
     let shop = required(
         &ctx.conn,
@@ -288,7 +299,15 @@ fn validate_fields(p: &mut Value, key: &str) -> Result<()> {
     }
     Ok(())
 }
-pub fn normalize(mut input: Value) -> Result<Value> {
+pub fn normalize(input: Value) -> Result<Value> {
+    normalize_inner(input).map_err(|mut e| {
+        if e.status == 400 {
+            e.status = 422;
+        }
+        e
+    })
+}
+fn normalize_inner(mut input: Value) -> Result<Value> {
     if !input.is_object() {
         return Err(ApiError::bad("商品配置必须是对象"));
     }
@@ -414,6 +433,14 @@ pub fn normalize(mut input: Value) -> Result<Value> {
             {
                 return Err(ApiError::bad("参考价必须为非负十进制文本，最多六位小数"));
             }
+            let whole = parts[0].trim_start_matches('0');
+            let whole = if whole.is_empty() { "0" } else { whole };
+            let fraction = parts.get(1).map(|v| v.trim_end_matches('0')).unwrap_or("");
+            v["price"] = json!(if fraction.is_empty() {
+                whole.to_owned()
+            } else {
+                format!("{whole}.{fraction}")
+            });
         }
         let currency = text(v, "currency");
         if !(3..=5).contains(&currency.len()) || !currency.bytes().all(|b| b.is_ascii_uppercase()) {
@@ -557,15 +584,28 @@ pub fn handle(ctx: &mut Context) -> Result<Option<Reply>> {
                 &["admin", "staff"]
             },
             if ctx.method == axum::http::Method::GET {
-                None
+                if ctx.path == "/api/manage/product" {
+                    Some("product.edit")
+                } else {
+                    None
+                }
             } else {
                 Some("product.edit")
             },
         )?;
         let selected = text(&session, "product_id").to_owned();
+        if !selected.is_empty()
+            && !ctx.q("product_id").is_empty()
+            && selected != ctx.q("product_id")
+        {
+            return Err(ApiError::new(403, "没有此商品权限"));
+        }
         if ctx.is("GET", "/api/admin/products") || ctx.is("GET", "/api/manage/products") {
             let own = auth::selected_shop(ctx, &session, ctx.q("shop_id"))?;
             let view = ctx.q("view");
+            if !["", "active", "deleted", "all", "history"].contains(&view) {
+                return Err(ApiError::new(422, "商品列表范围无效"));
+            }
             let mut result = Vec::new();
             for item in rows(
                 &ctx.conn,
@@ -581,7 +621,20 @@ pub fn handle(ctx: &mut Context) -> Result<Option<Reply>> {
                             || view == "all"
                             || ((view.is_empty() || view == "active") && !deleted)))
                 {
-                    result.push(owner_view(ctx, p, &session)?);
+                    result.push(
+                        if ctx.path == "/api/manage/products"
+                            || matches!(ctx.q("compact"), "true" | "1")
+                        {
+                            let shop_id = p["shop_id"].clone();
+                            let mut summary = managed_summary(p);
+                            if is_admin {
+                                summary["shop_id"] = shop_id;
+                            }
+                            summary
+                        } else {
+                            owner_view(ctx, p, &session)?
+                        },
+                    );
                 }
             }
             return Ok(Some(Reply::json(json!(result))));
@@ -608,7 +661,7 @@ pub fn handle(ctx: &mut Context) -> Result<Option<Reply>> {
                     if text(&source, "shop_id") != shop {
                         return Err(ApiError::new(403, "仅可复制本店商品"));
                     }
-                    let mut p = product(ctx, ctx.b("from_product_id"))?;
+                    let mut p = require_active(ctx, ctx.b("from_product_id"))?;
                     p["name"] = json!(if ctx.b("name").is_empty() {
                         "未命名商品"
                     } else {
@@ -668,6 +721,26 @@ pub fn handle(ctx: &mut Context) -> Result<Option<Reply>> {
             auth::authorize_product(ctx, &session, &pid)?;
             let old = require_active(ctx, &pid)?;
             let mut incoming = ctx.body.clone();
+            let can_configure = session["permissions"]
+                .as_array()
+                .is_some_and(|v| v.contains(&json!("fulfillment.configure")));
+            if text(&session, "role") == "staff" && !can_configure {
+                if let Some(variants) = incoming["variants"].as_array_mut() {
+                    for variant in variants {
+                        if variant.get("marketplace").is_none() {
+                            if let Some(saved) = old["variants"]
+                                .as_array()
+                                .and_then(|vs| {
+                                    vs.iter().find(|v| text(v, "id") == text(variant, "id"))
+                                })
+                                .and_then(|v| v.get("marketplace"))
+                            {
+                                variant["marketplace"] = saved.clone();
+                            }
+                        }
+                    }
+                }
+            }
             if text(&incoming, "webhook_secret").is_empty() {
                 incoming["webhook_secret"] = old["webhook_secret"].clone();
             }
@@ -686,6 +759,8 @@ pub fn handle(ctx: &mut Context) -> Result<Option<Reply>> {
                     "processor_config",
                     "task_flow",
                     "revision_policy",
+                    "allow_retry",
+                    "max_attempts",
                 ] {
                     if p[field] != old[field] {
                         return Err(ApiError::new(403, "此授权未允许配置发货"));
@@ -702,6 +777,25 @@ pub fn handle(ctx: &mut Context) -> Result<Option<Reply>> {
                 [&pid],
             )?
             .is_some();
+            let retained_variants = p["variants"].as_array().unwrap();
+            for issued_variant in rows(
+                &ctx.conn,
+                "SELECT DISTINCT COALESCE(m.variant_id,'default') AS variant_id FROM cards c LEFT JOIN card_meta m ON m.card_id=c.id WHERE c.product_id=?",
+                [&pid],
+            )? {
+                if !retained_variants
+                    .iter()
+                    .any(|v| text(v, "id") == text(&issued_variant, "variant_id"))
+                {
+                    return Err(ApiError::new(409, "已有卡密的规格不能删除，可将其停用"));
+                }
+            }
+            if issued && old["task_flow"].is_object() && p["view_policy"] != old["view_policy"] {
+                return Err(ApiError::new(
+                    409,
+                    "已有任务流卡密，不能修改已冻结的查看方式",
+                ));
+            }
             if issued && text(&old, "mode") != "manual" {
                 for field in [
                     "mode",
@@ -713,11 +807,27 @@ pub fn handle(ctx: &mut Context) -> Result<Option<Reply>> {
                     "task_flow",
                     "webhook_secret",
                 ] {
-                    if p[field] != old[field] {
+                    let changed = if matches!(field, "parameters" | "outputs") {
+                        field_contract(&p[field]) != field_contract(&old[field])
+                    } else {
+                        p[field] != old[field]
+                    };
+                    if changed {
                         return Err(ApiError::new(409, "已有卡密，不能修改已冻结的交付结构"));
                     }
                 }
             }
+            ctx.conn.execute(
+                "UPDATE jobs SET progress_plan=? WHERE product_id=? AND progress_plan IS NULL",
+                params![old["progress_steps"].to_string(), pid],
+            )?;
+            ctx.conn.execute(
+                "UPDATE jobs SET schema_snapshot=? WHERE product_id=? AND schema_snapshot IS NULL",
+                params![
+                    json!({"parameters":old["parameters"],"outputs":old["outputs"]}).to_string(),
+                    pid
+                ],
+            )?;
             let config = p["processor_config"].clone();
             p["processor_config"] = json!({});
             ctx.conn.execute(
@@ -747,9 +857,60 @@ pub fn handle(ctx: &mut Context) -> Result<Option<Reply>> {
     }
     Ok(None)
 }
+fn field_contract(v: &Value) -> Value {
+    let mut v = v.clone();
+    if let Some(fields) = v.as_array_mut() {
+        for field in fields {
+            if let Some(o) = field.as_object_mut() {
+                for k in ["label", "description", "collapsed"] {
+                    o.remove(k);
+                }
+            }
+        }
+    }
+    v
+}
+fn managed_summary(p: Value) -> Value {
+    let mut value = json!({});
+    for k in [
+        "id",
+        "name",
+        "mode",
+        "delivery",
+        "view_policy",
+        "parameters",
+        "outputs",
+        "variants",
+        "progress_steps",
+        "support_email",
+        "deleted",
+        "deleted_at",
+        "purged",
+        "purged_at",
+    ] {
+        if let Some(v) = p.get(k) {
+            value[k] = v.clone();
+        }
+    }
+    if let Some(variants) = value["variants"].as_array_mut() {
+        for v in variants {
+            v.as_object_mut().unwrap().remove("marketplace");
+        }
+    }
+    value
+}
 fn owner_view(ctx: &Context, mut p: Value, s: &Value) -> Result<Value> {
-    if text(s, "role") == "staff" {
+    if text(s, "role") == "staff"
+        && !s["permissions"]
+            .as_array()
+            .is_some_and(|v| v.contains(&json!("fulfillment.configure")))
+    {
         p["webhook_secret"] = json!("");
+        if let Some(variants) = p["variants"].as_array_mut() {
+            for v in variants {
+                v.as_object_mut().unwrap().remove("marketplace");
+            }
+        }
     }
     profiles::decorate(ctx, &mut p, s)?;
     Ok(p)
@@ -782,27 +943,19 @@ pub fn instructions(ctx: &Context, pid: &str) -> Result<Value> {
 }
 
 fn private_skus(p: &Value) -> std::collections::BTreeMap<String, Value> {
-    p["variants"]
-        .as_array()
-        .into_iter()
-        .flatten()
-        .map(|v| {
-            (
-                text(v, "id").to_owned(),
-                v.get("marketplace")
-                    .cloned()
-                    .unwrap_or_else(variant_marketplace_defaults),
-            )
-        })
-        .collect()
+    p["variants"].as_array().into_iter().flatten().map(|v|(text(v,"id").to_owned(),json!({"marketplace":v.get("marketplace").cloned().unwrap_or_else(variant_marketplace_defaults),"revision_allowance":p["revision_policy"]["attribute_key"].as_str().map(|k|v["attributes"].get(k).cloned().unwrap_or(json!(0)))}))).collect()
 }
 pub fn validate_state(app: &App) -> Result<()> {
+    validate_state_versions(app, &[23])
+}
+
+fn validate_state_versions(app: &App, versions: &[i64]) -> Result<()> {
     if !app.data.join("extore.sqlite3").is_file() {
         return Err(ApiError::new(500, "数据库不存在，请先初始化"));
     }
     let c = app.db()?;
     let version: i64 = c.query_row("PRAGMA user_version", [], |r| r.get(0))?;
-    if version != 23 {
+    if !versions.contains(&version) {
         return Err(ApiError::new(409, "此版本需要 schema 23 数据库"));
     }
     let key = std::fs::read(app.data.join("master-secrets.key"))?;
