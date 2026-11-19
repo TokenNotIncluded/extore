@@ -20,6 +20,7 @@ import json
 import os
 from pathlib import Path
 import secrets
+import signal
 import socket
 import sqlite3
 import ssl
@@ -348,12 +349,16 @@ def run(args):
                 "basicConstraints=critical,CA:FALSE\n"
                 "keyUsage=critical,digitalSignature,keyEncipherment\n"
                 "extendedKeyUsage=serverAuth\n"
+                "subjectKeyIdentifier=hash\n"
+                "authorityKeyIdentifier=keyid,issuer\n"
             )
             commands = [
                 ["openssl", "req", "-x509", "-nodes", "-newkey", "rsa:2048",
                  "-days", "1", "-subj", "/CN=Extore fixture CA",
                  "-addext", "basicConstraints=critical,CA:TRUE",
                  "-addext", "keyUsage=critical,keyCertSign,cRLSign",
+                 "-addext", "subjectKeyIdentifier=hash",
+                 "-addext", "authorityKeyIdentifier=keyid:always",
                  "-keyout", str(ca_key), "-out", str(certificate)],
                 ["openssl", "req", "-new", "-nodes", "-newkey", "rsa:2048",
                  "-subj", "/CN=localhost.localdomain",
@@ -547,6 +552,11 @@ def run(args):
                     except subprocess.TimeoutExpired:
                         process.kill()
                         process.wait()
+                    report["fixture_cleanup"] = {
+                        "rust_service_pid": process.pid,
+                        "rust_service_returncode": process.returncode,
+                        "tls_listeners_closed": len(servers),
+                    }
     except Exception as error:
         # Assertions deliberately carry only static labels, paths and statuses.
         report["failure"] = str(error)
@@ -557,7 +567,12 @@ def run(args):
         print(json.dumps({"status": report["status"], "report": str(report_path)}))
 
 
+def terminate_fixture(_signal, _frame):
+    raise InterruptedError("fixture termination requested")
+
+
 def main():
+    signal.signal(signal.SIGTERM, terminate_fixture)
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--binary", required=True, type=Path)
     parser.add_argument("--host-library", required=True, type=Path)
@@ -575,7 +590,18 @@ def main():
             "--inside-netns", "--parent-netns", os.readlink("/proc/self/ns/net"),
             *sys.argv[1:],
         ]
-        raise SystemExit(subprocess.run(command, timeout=300).returncode)
+        process = subprocess.Popen(command)
+        try:
+            code = process.wait(timeout=300)
+        except BaseException:
+            process.terminate()
+            try:
+                process.wait(timeout=30)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                process.wait()
+            raise
+        raise SystemExit(code)
     require(bool(args.parent_netns), "missing namespace ownership proof")
     run(args)
 
