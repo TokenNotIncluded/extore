@@ -181,3 +181,10 @@ A caller that already owns separate namespaces may use `--inside-netns` with
 `--parent-netns`; with `--private-hosts` it must also provide
 `--parent-mountns`. These identifiers must differ from the executing child's
 namespaces. The fixture refuses hostname mapping without that separation.
+
+Some hosts consult a shared system resolver before the hosts file. The private
+mapping therefore also bind mounts a temporary `nsswitch.conf` with
+`hosts: files`; other NSS databases keep their original settings. Both bind
+mounts are removed and both caller file digests are checked. This changes only
+the test namespace and prevents the host's resolver from taking precedence over
+the two explicit fixture hostnames.

@@ -329,7 +329,7 @@ def private_host_mapping(args, temp, report):
             "refusing hostname overrides in the caller's mount namespace")
     subprocess.run(["mount", "--make-rprivate", "/"], check=True,
                    capture_output=True)
-    before = digest("/etc/hosts")
+    before = {path: digest(path) for path in ("/etc/hosts", "/etc/nsswitch.conf")}
     hosts = temp / "private-hosts"
     hosts.write_text(
         "127.0.0.1 localhost localhost.localdomain extore.lmm.best\n"
@@ -337,25 +337,43 @@ def private_host_mapping(args, temp, report):
         "127.0.0.2 api.lmm.best\n"
     )
     hosts.chmod(0o644)
-    subprocess.run(["mount", "--bind", str(hosts), "/etc/hosts"],
-                   check=True, capture_output=True)
+    nsswitch = temp / "private-nsswitch"
+    nsswitch.write_text("\n".join(
+        line for line in Path("/etc/nsswitch.conf").read_text().splitlines()
+        if not line.lstrip().startswith("hosts:")
+    ) + "\nhosts: files\n")
+    nsswitch.chmod(0o644)
+    mounted = []
     try:
+        for source, target in ((hosts, "/etc/hosts"),
+                               (nsswitch, "/etc/nsswitch.conf")):
+            subprocess.run(["mount", "--bind", str(source), target],
+                           check=True, capture_output=True)
+            mounted.append(target)
         for name, address in (("extore.lmm.best", "127.0.0.1"),
                               ("api.lmm.best", "127.0.0.2")):
             resolved = {entry[4][0] for entry in socket.getaddrinfo(
                 name, 443, type=socket.SOCK_STREAM)}
             require(resolved == {address}, "private hostname mapping differs")
         report["isolated_mount_namespace"] = True
+        report["private_hostname_resolution"] = "files"
         report["private_hostname_mapping"] = {
             "extore.lmm.best": "127.0.0.1", "api.lmm.best": "127.0.0.2"}
         yield
     finally:
-        subprocess.run(["umount", "/etc/hosts"], check=True,
-                       capture_output=True)
-        unchanged = digest("/etc/hosts") == before
+        failed = []
+        for target in reversed(mounted):
+            result = subprocess.run(["umount", target], capture_output=True)
+            if result.returncode:
+                failed.append(target)
+        unchanged = {path: digest(path) == expected
+                     for path, expected in before.items()}
         report["private_hosts_cleanup"] = {
-            "bind_unmounted": True, "original_hosts_unchanged": unchanged}
-        require(unchanged, "private hosts restoration differs")
+            "bind_unmounted": not failed, "bound_file_count": len(mounted),
+            "original_hosts_unchanged": unchanged["/etc/hosts"],
+            "original_nsswitch_unchanged": unchanged["/etc/nsswitch.conf"]}
+        require(not failed, "private resolver bind cleanup failed")
+        require(all(unchanged.values()), "private resolver restoration differs")
 
 
 def run(args):
@@ -653,7 +671,9 @@ def main():
             "--parent-mountns", os.readlink("/proc/self/ns/mnt"),
             *sys.argv[1:],
         ]
-        caller_hosts = digest("/etc/hosts") if args.private_hosts else None
+        caller_files = ({path: digest(path) for path in
+                         ("/etc/hosts", "/etc/nsswitch.conf")}
+                        if args.private_hosts else None)
         process = subprocess.Popen(command)
         try:
             code = process.wait(timeout=args.consumer_timeout_seconds + 120)
@@ -666,14 +686,17 @@ def main():
                 process.wait()
             raise
         finally:
-            if caller_hosts is not None:
-                unchanged = digest("/etc/hosts") == caller_hosts
+            if caller_files is not None:
+                unchanged = {path: digest(path) == expected
+                             for path, expected in caller_files.items()}
                 if args.report.is_file():
                     report = json.loads(args.report.read_text())
-                    report["caller_hosts_file_unchanged"] = unchanged
+                    report["caller_hosts_file_unchanged"] = unchanged["/etc/hosts"]
+                    report["caller_nsswitch_file_unchanged"] = unchanged["/etc/nsswitch.conf"]
                     args.report.write_text(json.dumps(report, indent=2) + "\n")
                     args.report.chmod(0o600)
-                require(unchanged, "caller hosts changed during isolated fixture")
+                require(all(unchanged.values()),
+                        "caller resolver files changed during isolated fixture")
         raise SystemExit(code)
     require(bool(args.parent_netns), "missing namespace ownership proof")
     run(args)
