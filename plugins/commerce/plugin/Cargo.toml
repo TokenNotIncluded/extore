@@ -1,0 +1,17 @@
+[package]
+name = "extore-commerce-plugin"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Extore Commerce HTTPS client exported through the Project Z plugin ABI"
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+extore-plugin-api = { path = "../api", version = "=1.0.0" }
+zplugin = { workspace = true, features = ["std"] }
+serde_json.workspace = true
+reqwest.workspace = true

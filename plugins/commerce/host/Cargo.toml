@@ -1,0 +1,18 @@
+[package]
+name = "extore-plugin-host"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "C-callable host bridge that loads the real zplugin Extore interface"
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+extore-plugin-api = { path = "../api", version = "=1.0.0" }
+zplugin = { workspace = true, features = ["std"] }
+
+[lints.rust]
+unsafe_op_in_unsafe_fn = "deny"
