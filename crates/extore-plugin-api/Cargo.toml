@@ -1,0 +1,12 @@
+[package]
+name = "extore-plugin-api"
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+description = "Versioned Extore commerce interface for Project Z native plugins"
+repository = "https://github.com/TokenNotIncluded/extore"
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = { version = "1", features = ["float_roundtrip"] }
+zplugin = { version = "=0.3.1", features = ["std", "macros"] }

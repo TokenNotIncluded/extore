@@ -56,3 +56,8 @@ tower = { version = "0.5", features = ["util"] }
 lto = "thin"
 codegen-units = 1
 strip = true
+
+[workspace]
+members = ["crates/extore-plugin-api"]
+default-members = ["."]
+resolver = "2"
