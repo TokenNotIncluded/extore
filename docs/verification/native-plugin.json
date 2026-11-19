@@ -1,0 +1,73 @@
+{
+  "schema": "extore.native-plugin-verification.v1",
+  "source_inputs_sha256": "8a69b0b017fa7efebbcb43e1bab8d05a0a54ad5c29bdaf0e9954aac90ccca2fc",
+  "target": "x86_64-unknown-linux-gnu",
+  "rustc": "1.100.0",
+  "profile": "dev",
+  "debug_info": false,
+  "incremental": false,
+  "build": {
+    "command": [
+      "cargo",
+      "build",
+      "--locked",
+      "--offline",
+      "-j",
+      "1",
+      "-p",
+      "extore",
+      "-p",
+      "extore-zplugin"
+    ],
+    "exit_code": 0
+  },
+  "result": "pass",
+  "checks": [
+    "independent_native_load",
+    "interface_version_rejected",
+    "method_signature_rejected",
+    "configure_required",
+    "invalid_configuration_rejected",
+    "missing_state_not_created",
+    "existing_directory_without_database_rejected",
+    "unsupported_schema_not_migrated",
+    "master_key_fingerprint_checked",
+    "configured_store_is_immutable",
+    "http_catalog_parity",
+    "grant_product_subset",
+    "shop_catalog_isolation",
+    "private_fields_filtered",
+    "decimal_price_preserved",
+    "stable_revision",
+    "live_revision_change",
+    "scope_enforced",
+    "invalid_token_rejected",
+    "expired_token_rejected",
+    "changed_product_ownership_rejected",
+    "real_http_revocation_visible_in_loaded_instance",
+    "removed_database_not_recreated",
+    "configure_does_not_recreate_removed_database"
+  ],
+  "elapsed_seconds": 2.676,
+  "artifacts": {
+    "binary": {
+      "name": "extore",
+      "sha256": "21beb4a9624f07ac8dbf0cf55736cbf9c5acf5c52886a6eee9da68e246de6fcb"
+    },
+    "plugin": {
+      "name": "libextore_zplugin.so",
+      "sha256": "9f8160b557056e540f6fbef035fe0d0d11356412053d0b4e1e48d9eedbf26d96"
+    },
+    "probe": {
+      "name": "native_probe",
+      "sha256": "c54e9bd107ed5078c62fa2ff41bc78ada2c7411e60b06c95f0a905ac450265fc"
+    }
+  },
+  "scope": "Linux GNU native ABI, isolated SQLite state, real Rust HTTP PKCE and revoke",
+  "fixtures": "seeded administrator session, shops and products; no production state",
+  "limits": [
+    "Development artifacts; production deployment is a separate release step.",
+    "The fixture seeds an administrator session; browser/WebAuthn UI is outside this test.",
+    "Python processor SDK/runner compatibility remains outside this catalog interface."
+  ]
+}

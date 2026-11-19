@@ -1,0 +1,16 @@
+[package]
+name = "extore-zplugin"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.95"
+license = "MIT"
+description = "Extore commerce runtime as a Project Z native plugin"
+repository = "https://github.com/TokenNotIncluded/extore"
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+extore = { path = "../..", features = ["plugin"] }
+extore-plugin-api = { path = "../extore-plugin-api" }
+zplugin = { version = "=0.3.1", features = ["std", "macros"] }

@@ -61,7 +61,17 @@ pub struct App {
 }
 impl App {
     pub fn db(&self) -> Result<Connection> {
-        let c = Connection::open(self.data.join("extore.sqlite3"))?;
+        Self::configure_db(Connection::open(self.data.join("extore.sqlite3"))?)
+    }
+
+    pub fn existing_db(&self) -> Result<Connection> {
+        Self::configure_db(Connection::open_with_flags(
+            self.data.join("extore.sqlite3"),
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
+        )?)
+    }
+
+    fn configure_db(c: Connection) -> Result<Connection> {
         c.busy_timeout(Duration::from_secs(20))?;
         c.execute_batch("PRAGMA foreign_keys=ON; PRAGMA secure_delete=ON;")?;
         Ok(c)

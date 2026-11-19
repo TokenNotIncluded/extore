@@ -953,7 +953,20 @@ fn validate_state_versions(app: &App, versions: &[i64]) -> Result<()> {
     if !app.data.join("extore.sqlite3").is_file() {
         return Err(ApiError::new(500, "数据库不存在，请先初始化"));
     }
-    let c = app.db()?;
+    let c = app.existing_db()?;
+    validate_state_connection_versions(app, &c, versions)
+}
+
+#[cfg(feature = "plugin")]
+pub(crate) fn validate_state_connection(app: &App, c: &rusqlite::Connection) -> Result<()> {
+    validate_state_connection_versions(app, c, &[23])
+}
+
+fn validate_state_connection_versions(
+    app: &App,
+    c: &rusqlite::Connection,
+    versions: &[i64],
+) -> Result<()> {
     let version: i64 = c.query_row("PRAGMA user_version", [], |r| r.get(0))?;
     if !versions.contains(&version) {
         return Err(ApiError::new(409, "此版本需要 schema 23 数据库"));
@@ -967,7 +980,7 @@ fn validate_state_versions(app: &App, versions: &[i64]) -> Result<()> {
         Sha256::digest([b"extore-secret-key-v1\0".as_slice(), key.as_slice()].concat())
     );
     let saved = required(
-        &c,
+        c,
         "SELECT fingerprint FROM secret_store_state WHERE id=1",
         [],
         "数据库主密钥校验记录缺失",
@@ -980,7 +993,7 @@ fn validate_state_versions(app: &App, versions: &[i64]) -> Result<()> {
         if fernet::Fernet::new(issuance.trim()).is_none() {
             return Err(ApiError::new(500, "发行记录密钥无效"));
         }
-    } else if row(&c, "SELECT 1 FROM api_requests LIMIT 1", [])?.is_some() {
+    } else if row(c, "SELECT 1 FROM api_requests LIMIT 1", [])?.is_some() {
         return Err(ApiError::new(500, "历史发行记录密钥缺失"));
     }
     Ok(())

@@ -6,7 +6,11 @@ license = "MIT"
 description = "Multi-shop redemption, fulfillment and LMM marketplace integration"
 repository = "https://github.com/TokenNotIncluded/extore"
 
+[features]
+plugin = ["dep:extore-plugin-api"]
+
 [dependencies]
+extore-plugin-api = { path = "crates/extore-plugin-api", optional = true }
 axum = { version = "0.8.9", features = ["multipart"] }
 tokio = { version = "1", features = ["full"] }
 rusqlite = { version = "0.43", features = ["bundled"] }
@@ -58,6 +62,6 @@ codegen-units = 1
 strip = true
 
 [workspace]
-members = ["crates/extore-plugin-api"]
+members = ["crates/extore-plugin-api", "crates/extore-zplugin"]
 default-members = ["."]
 resolver = "2"
