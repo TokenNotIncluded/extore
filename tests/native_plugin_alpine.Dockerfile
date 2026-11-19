@@ -24,7 +24,7 @@ RUN cargo +1.100.0 build --locked --release --target "$EXTORE_RUST_TARGET" --bin
 RUN cp "/target/$EXTORE_RUST_TARGET/release/extore" /native-out/extore-server
 
 FROM alpine:3.22@sha256:49340b346798875b5592e5d420241f2f9cfba5f47e62ebb1446a1b34734e898f AS fixture
-RUN apk add --no-cache python3 openssl iproute2 libgcc libssl3 libcrypto3
+RUN apk add --no-cache python3 openssl iproute2 libgcc libssl3 libcrypto3 openrc ca-certificates
 COPY --from=fixture-build /work/ /work/
 COPY --from=fixture-build /native-out/ /opt/extore/
 WORKDIR /work

@@ -156,3 +156,11 @@ library hashes so the Go host can verify the exact files before loading them.
 Image creation, installation, native loading and successful business calls are
 distinct validation steps. Record the image ID, binary/library hashes and real
 probe result for each target before accepting that target.
+
+The fixture consumer defaults to a 180 second timeout. For a prebuilt browser
+consumer, pass `--consumer-timeout-seconds 480` before `--consumer`; accepted
+values are 1 through 480 seconds. The outer namespace deadline adds 120 seconds
+for setup and cleanup. Extore still enforces its existing 600 second recent
+authentication requirement and no session timestamp is renewed by this option.
+The test-only Alpine runtime includes OpenRC and CA certificates so the candidate
+APK can be installed from local files with networking disabled.

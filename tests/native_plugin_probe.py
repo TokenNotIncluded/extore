@@ -513,7 +513,7 @@ def run(args):
                         result = subprocess.run(args.consumer,
                             env=dict(os.environ,
                                 EXTORE_PLUGIN_PROBE_CONFIG=str(config_path)),
-                            capture_output=True, timeout=180)
+                            capture_output=True, timeout=args.consumer_timeout_seconds)
                         output_path = report_path.with_suffix(".consumer.log")
                         output_path.write_bytes(result.stdout + result.stderr)
                         output_path.chmod(0o600)
@@ -582,8 +582,12 @@ def main():
     parser.add_argument("--inside-netns", action="store_true",
                         help=argparse.SUPPRESS)
     parser.add_argument("--parent-netns", help=argparse.SUPPRESS)
+    parser.add_argument("--consumer-timeout-seconds", type=int, default=180,
+                        help="Consumer limit, 1..480 seconds (default: 180)")
     parser.add_argument("--consumer", nargs=argparse.REMAINDER)
     args = parser.parse_args()
+    if not 1 <= args.consumer_timeout_seconds <= 480:
+        parser.error("--consumer-timeout-seconds must be between 1 and 480")
     if not args.inside_netns:
         command = [
             "unshare", "--user", "--map-root-user", "--net", "--",
@@ -593,7 +597,7 @@ def main():
         ]
         process = subprocess.Popen(command)
         try:
-            code = process.wait(timeout=300)
+            code = process.wait(timeout=args.consumer_timeout_seconds + 120)
         except BaseException:
             process.terminate()
             try:
