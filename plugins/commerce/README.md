@@ -164,3 +164,20 @@ for setup and cleanup. Extore still enforces its existing 600 second recent
 authentication requirement and no session timestamp is renewed by this option.
 The test-only Alpine runtime includes OpenRC and CA certificates so the candidate
 APK can be installed from local files with networking disabled.
+
+For the default LMM browser connect button, pass
+`--origin https://extore.lmm.best --private-hosts`. The helper creates a new
+mount namespace in addition to its user and network namespaces. It bind mounts
+a temporary hosts file mapping `extore.lmm.best` to `127.0.0.1` and
+`api.lmm.best` to `127.0.0.2`; the caller's hosts file is never written.
+The Extore TLS leaf, issuer and server origin use the selected origin. Cleanup
+unmounts the private file and verifies the caller's hosts digest is unchanged.
+The consumer can serve LMM HTTPS on `127.0.0.2:443` and use its unchanged
+`https://api.lmm.best/store/manage` callback. Extore's built-in
+`lmm-best-store` client and callback allowlist remain production code paths;
+the browser consumer must create its own authorization through those paths.
+
+A caller that already owns separate namespaces may use `--inside-netns` with
+`--parent-netns`; with `--private-hosts` it must also provide
+`--parent-mountns`. These identifiers must differ from the executing child's
+namespaces. The fixture refuses hostname mapping without that separation.

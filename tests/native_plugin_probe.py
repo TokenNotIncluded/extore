@@ -13,6 +13,7 @@ from __future__ import annotations
 import argparse
 import base64
 import ctypes
+from contextlib import ExitStack, contextmanager
 import hashlib
 import http.client
 import http.server
@@ -128,7 +129,9 @@ class NativeBridge:
         self.releases = 0
         self.closes = 0
 
-    def open(self, *, path=None, origin=ORIGIN, expected=0):
+    def open(self, *, path=None, origin=None, expected=0):
+        if origin is None:
+            origin = ORIGIN
         path = self.plugin if path is None else str(path).encode()
         origin = origin.encode()
         handle = ctypes.c_size_t(0)
@@ -314,6 +317,47 @@ def serve_tls(upstream_port, certificate, key, observations):
     return servers
 
 
+
+@contextmanager
+def private_host_mapping(args, temp, report):
+    """Bind test DNS only after proving a distinct private mount namespace."""
+    if not args.private_hosts:
+        yield
+        return
+    require(bool(args.parent_mountns) and
+            args.parent_mountns != os.readlink("/proc/self/ns/mnt"),
+            "refusing hostname overrides in the caller's mount namespace")
+    subprocess.run(["mount", "--make-rprivate", "/"], check=True,
+                   capture_output=True)
+    before = digest("/etc/hosts")
+    hosts = temp / "private-hosts"
+    hosts.write_text(
+        "127.0.0.1 localhost localhost.localdomain extore.lmm.best\n"
+        "::1 localhost ip6-localhost\n"
+        "127.0.0.2 api.lmm.best\n"
+    )
+    hosts.chmod(0o644)
+    subprocess.run(["mount", "--bind", str(hosts), "/etc/hosts"],
+                   check=True, capture_output=True)
+    try:
+        for name, address in (("extore.lmm.best", "127.0.0.1"),
+                              ("api.lmm.best", "127.0.0.2")):
+            resolved = {entry[4][0] for entry in socket.getaddrinfo(
+                name, 443, type=socket.SOCK_STREAM)}
+            require(resolved == {address}, "private hostname mapping differs")
+        report["isolated_mount_namespace"] = True
+        report["private_hostname_mapping"] = {
+            "extore.lmm.best": "127.0.0.1", "api.lmm.best": "127.0.0.2"}
+        yield
+    finally:
+        subprocess.run(["umount", "/etc/hosts"], check=True,
+                       capture_output=True)
+        unchanged = digest("/etc/hosts") == before
+        report["private_hosts_cleanup"] = {
+            "bind_unmounted": True, "original_hosts_unchanged": unchanged}
+        require(unchanged, "private hosts restoration differs")
+
+
 def run(args):
     require(args.parent_netns != os.readlink("/proc/self/ns/net"),
             "refusing to use the caller's network namespace")
@@ -328,6 +372,7 @@ def run(args):
     report = {
         "status": "failed",
         "scope": "native bridge component test; optional consumer is separate",
+        "origin": ORIGIN,
         "service_binary_sha256": digest(binary),
         "host_library_sha256": digest(host),
         "plugin_library_sha256": digest(plugin),
@@ -338,14 +383,15 @@ def run(args):
         "pinned_image_unloaded": False,
     }
     try:
-        with tempfile.TemporaryDirectory(prefix="extore-native-plugin-") as temp:
+        with tempfile.TemporaryDirectory(prefix="extore-native-plugin-") as temp, ExitStack() as cleanup:
             temp = Path(temp)
+            cleanup.enter_context(private_host_mapping(args, temp, report))
             data = temp / "data"
             certificate, ca_key = temp / "ca.pem", temp / "ca-key.pem"
             server_certificate, key = temp / "server.pem", temp / "server-key.pem"
             csr, extensions = temp / "server.csr", temp / "server.ext"
             extensions.write_text(
-                "subjectAltName=DNS:localhost.localdomain\n"
+                f"subjectAltName=DNS:{urllib.parse.urlsplit(ORIGIN).hostname}\n"
                 "basicConstraints=critical,CA:FALSE\n"
                 "keyUsage=critical,digitalSignature,keyEncipherment\n"
                 "extendedKeyUsage=serverAuth\n"
@@ -361,7 +407,7 @@ def run(args):
                  "-addext", "authorityKeyIdentifier=keyid:always",
                  "-keyout", str(ca_key), "-out", str(certificate)],
                 ["openssl", "req", "-new", "-nodes", "-newkey", "rsa:2048",
-                 "-subj", "/CN=localhost.localdomain",
+                 "-subj", f"/CN={urllib.parse.urlsplit(ORIGIN).hostname}",
                  "-keyout", str(key), "-out", str(csr)],
                 ["openssl", "x509", "-req", "-in", str(csr),
                  "-CA", str(certificate), "-CAkey", str(ca_key), "-CAcreateserial",
@@ -573,28 +619,41 @@ def terminate_fixture(_signal, _frame):
 
 
 def main():
+    global ORIGIN
     signal.signal(signal.SIGTERM, terminate_fixture)
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--binary", required=True, type=Path)
     parser.add_argument("--host-library", required=True, type=Path)
     parser.add_argument("--plugin-library", required=True, type=Path)
     parser.add_argument("--report", required=True, type=Path)
+    parser.add_argument("--origin", default=ORIGIN,
+                        choices=(ORIGIN, "https://extore.lmm.best"))
+    parser.add_argument("--private-hosts", action="store_true",
+                        help="Map formal Extore/LMM names inside a private mount namespace")
     parser.add_argument("--inside-netns", action="store_true",
                         help=argparse.SUPPRESS)
     parser.add_argument("--parent-netns", help=argparse.SUPPRESS)
+    parser.add_argument("--parent-mountns", help=argparse.SUPPRESS)
     parser.add_argument("--consumer-timeout-seconds", type=int, default=180,
                         help="Consumer limit, 1..480 seconds (default: 180)")
     parser.add_argument("--consumer", nargs=argparse.REMAINDER)
     args = parser.parse_args()
+    ORIGIN = args.origin
+    if args.private_hosts and ORIGIN != "https://extore.lmm.best":
+        parser.error("--private-hosts requires --origin https://extore.lmm.best")
     if not 1 <= args.consumer_timeout_seconds <= 480:
         parser.error("--consumer-timeout-seconds must be between 1 and 480")
     if not args.inside_netns:
-        command = [
-            "unshare", "--user", "--map-root-user", "--net", "--",
+        command = ["unshare", "--user", "--map-root-user", "--net"]
+        if args.private_hosts:
+            command += ["--mount", "--propagation", "private"]
+        command += ["--",
             sys.executable, str(Path(__file__).resolve()),
             "--inside-netns", "--parent-netns", os.readlink("/proc/self/ns/net"),
+            "--parent-mountns", os.readlink("/proc/self/ns/mnt"),
             *sys.argv[1:],
         ]
+        caller_hosts = digest("/etc/hosts") if args.private_hosts else None
         process = subprocess.Popen(command)
         try:
             code = process.wait(timeout=args.consumer_timeout_seconds + 120)
@@ -606,6 +665,15 @@ def main():
                 process.kill()
                 process.wait()
             raise
+        finally:
+            if caller_hosts is not None:
+                unchanged = digest("/etc/hosts") == caller_hosts
+                if args.report.is_file():
+                    report = json.loads(args.report.read_text())
+                    report["caller_hosts_file_unchanged"] = unchanged
+                    args.report.write_text(json.dumps(report, indent=2) + "\n")
+                    args.report.chmod(0o600)
+                require(unchanged, "caller hosts changed during isolated fixture")
         raise SystemExit(code)
     require(bool(args.parent_netns), "missing namespace ownership proof")
     run(args)
