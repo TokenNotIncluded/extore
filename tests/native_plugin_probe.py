@@ -502,6 +502,7 @@ def run(args):
                         "owner_cookie_b": beta["cookie"],
                         "root_ca_file": str(certificate),
                         "host_library": str(host), "plugin_library": str(plugin),
+                        "host_sha256": digest(host), "plugin_sha256": digest(plugin),
                         "shop_a": alpha, "shop_b": beta,
                         "report_path": str(temp / "consumer-facts.json"),
                     }

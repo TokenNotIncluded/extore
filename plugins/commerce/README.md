@@ -103,3 +103,56 @@ fail the operation. Its two fixed output names are `THIRD-PARTY-NATIVE.txt` and
 `THIRD-PARTY-NATIVE.json`; the latter records package versions, licenses,
 checksums and source notice hashes without local registry paths. Include both
 alongside the distributed libraries.
+
+## Alpine development image
+
+GNU and musl libraries belong to separate artifact groups. Rust 1.100.0's
+[x86_64 musl target](https://github.com/rust-lang/rust/blob/1.100.0/compiler/rustc_target/src/spec/targets/x86_64_unknown_linux_musl.rs)
+defaults to a static C runtime. The test image selects a dynamic musl runtime for
+the shared libraries and uses Alpine's native C linker:
+
+```text
+-C target-feature=-crt-static -C link-self-contained=no -C linker=cc
+```
+
+
+The test-only [Alpine Dockerfile](../../tests/native_plugin_alpine.Dockerfile)
+pins Rust 1.100.0 / Alpine 3.22 and Alpine 3.22 image digests. Its two targets share
+the native library build. For an amd64 builder:
+
+```sh
+docker build --platform linux/amd64 \
+  -f tests/native_plugin_alpine.Dockerfile \
+  --build-arg EXTORE_RUST_TARGET=x86_64-unknown-linux-musl \
+  --target native-export --output type=local,dest=output/native-musl .
+docker build --platform linux/amd64 \
+  -f tests/native_plugin_alpine.Dockerfile \
+  --build-arg EXTORE_RUST_TARGET=x86_64-unknown-linux-musl \
+  --target fixture -t extore-plugin-fixture:review .
+```
+
+
+For an arm64 builder, select `linux/arm64` and
+`aarch64-unknown-linux-musl`. A target's successful build does not
+establish that it passed runtime acceptance.
+
+The `native-export` target emits the two libraries and
+`licenses/extore/THIRD-PARTY-NATIVE.{txt,json}`.
+The `fixture` target also builds the existing Extore server and provides
+Python, OpenSSL and the network utility used by the real-service probe. No
+application source or database format is changed.
+
+Run the fixture in a fresh container network namespace with no published ports.
+The `--inside-netns` entry point requires the caller's observed parent
+network namespace identifier and refuses an identical namespace. Only the
+container's network administration capability is needed to bring up its own
+loopback device; a privileged container is unnecessary. Use a container-only
+`localhost.localdomain` host mapping, keep both library paths explicit,
+and supply the prebuilt musl Go consumer after `--consumer`.
+When testing an APK, install it in that temporary container and select its actual
+installed library paths. The private consumer configuration includes both
+library hashes so the Go host can verify the exact files before loading them.
+
+Image creation, installation, native loading and successful business calls are
+distinct validation steps. Record the image ID, binary/library hashes and real
+probe result for each target before accepting that target.
