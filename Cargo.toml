@@ -6,6 +6,9 @@ license = "MIT"
 description = "Multi-shop redemption, fulfillment and LMM marketplace integration"
 repository = "https://github.com/TokenNotIncluded/extore"
 
+[lib]
+path = "src/lib.rs"
+
 [dependencies]
 axum = { version = "0.8.9", features = ["multipart"] }
 tokio = { version = "1", features = ["full"] }

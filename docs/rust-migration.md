@@ -2,6 +2,16 @@
 
 Extore 的 HTTP 服务、认证、商城协议、队列和后台任务由 Rust 程序运行。Axum 接收请求，SQLite 保存业务状态，原生 worker 处理任务、通知和邮件；已有商品处理器通过审核过的 Python SDK 在独立的离线沙箱中运行。
 
+## Rust library 与目录插件
+
+同一个 Cargo package 现在提供 `extore` library 和薄二进制入口；[src/main.rs](../src/main.rs) 调用 [src/lib.rs](../src/lib.rs) 的 `extore::run()`。HTTP 路由、认证、事务、商品、队列和 worker 的现有实现位于该 library 的模块树中。入口沿用当前进程的命令行参数及 `EXTORE_*` 环境配置，并自行创建 Tokio runtime；从同步启动入口调用。此边界复用了 [81840095 的运行时库化设计](https://github.com/TokenNotIncluded/extore/commit/818400958a8660e5e72b1eefb4815dbb34452098)，保留本分支原有业务体。
+
+LMM 通过固定的 Extore 源码依赖构建并加载[原生商城目录插件](../plugins/commerce/README.md)。唯一应用接口仍是 `extore.commerce` v1 的 `configure(origin, CA)` 和 `catalog(access_token)`；Go 在专用线程调用进程内 Rust 宿主，宿主通过 zplugin 加载同源目录插件。目录及授权数据继续来自既有 Extore HTTPS 服务，OAuth、刷新和撤销沿用原接口。
+
+library 包含完整 Rust 运行时；本次 zplugin 公开的业务能力是授权目录读取。LMM 的目录插件使用所需的 API 与 HTTPS 客户端依赖，不加载 Extore 服务端的 SQLite 状态或密钥，也不启动另一个服务。Python processor SDK、离线 runner 和客户端 CLI 保留兼容用途。
+
+运行时库化后的源码需要重新通过 Cargo、原生 HTTP/worker 和最终 LMM 浏览器验证。此前目录插件测试的通过记录只覆盖其当时固定的输入；不能把旧服务二进制或旧提交的 receipt 改标为本次新 library 已通过。
+
 ## 运行范围
 
 | 部分 | 运行方式 | 保留的行为 |

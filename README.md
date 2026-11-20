@@ -86,6 +86,8 @@ Extore 接手支付之后的兑换与交付：验证卡密，将顾客带到对�
 
 HTTP API、认证、数据库事务、队列和后台 worker 由 Rust 运行。已审核的 Python 商品处理器继续在无网络的 bubblewrap/seccomp 沙箱中执行，保留原有 SDK 与加密配置。生产安装包没有 Python Web 服务或其虚拟环境。迁移方式、兼容性检查和运行边界见 [Rust 迁移说明](docs/rust-migration.md)。
 
+同一个 Rust package 提供可调用的运行时 library 与薄命令入口。LMM 以固定源码依赖构建同源 zplugin，通过进程内宿主使用获批商品目录；当前插件 API 的业务范围是目录读取，授权与商品数据仍由既有 Extore 服务负责。完整 library、目录插件及保留的 Python SDK 边界见[库与插件说明](docs/rust-migration.md#rust-library-与目录插件)。
+
 Extore 与 LMM 新架构商店使用同一套克制的浅色/深色界面。商家从 LMM 的 `/store/manage` 发起连接，在 Extore 明确选择店铺、商品与授权范围，再导入商品草稿。单项同步和批量同步保留来源身份，并分别展示同步结果；授权到期时可以重新连接。
 
 LMM 使用 `products.read` 和 `marketplace.sync` 读取商品资料及获批的私有 SKU 发货模板。库存摘要变化与商品配置变化分别处理：前者不改变 `sync_revision`，私有发货内容或商店配置变化会改变它。`cards.issue` 需要独立授权，支付和订单继续由 LMM 商店处理。

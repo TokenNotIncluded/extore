@@ -64,3 +64,67 @@ jobs:
       - run: uv run extore commerce --help
       - run: uv run extore admin commerce --help
       - run: uv run python examples/commerce_import/mock_roundtrip.py
+      - name: Record the tested native service for review
+        if: github.event_name == 'workflow_dispatch'
+        run: |
+          python3 - <<'PY'
+          import hashlib
+          import json
+          import os
+          from pathlib import Path
+          import shutil
+          import subprocess
+          import tarfile
+
+          root = Path.cwd()
+          revision = subprocess.check_output(["git", "rev-parse", "HEAD"], text=True).strip()
+          if revision != os.environ["GITHUB_SHA"]:
+              raise SystemExit("review checkout does not match the workflow commit")
+          subprocess.run(["git", "diff", "--exit-code"], check=True)
+          binary = root / "target/debug/extore"
+          destination = Path(os.environ["RUNNER_TEMP"]) / "extore-native-review"
+          destination.mkdir()
+          shutil.copy2(binary, destination / "extore")
+          def sha256(path):
+              with path.open("rb") as stream:
+                  return hashlib.file_digest(stream, "sha256").hexdigest()
+          names = subprocess.check_output(
+              ["git", "ls-files", "-z", "--", "Cargo.toml", "Cargo.lock", "src"],
+          ).decode().split("\0")
+          inputs = [
+              {"path": name, "sha256": sha256(root / name), "bytes": (root / name).stat().st_size}
+              for name in sorted(names) if name
+          ]
+          manifest = {
+              "schema_version": 1,
+              "kind": "extore-native-service-review",
+              "source_revision": revision,
+              "rustc": subprocess.check_output(["rustc", "+stable", "-Vv"], text=True),
+              "build_command": ["cargo", "+stable", "build", "--locked"],
+              "binary": {"path": "extore", "sha256": sha256(destination / "extore"),
+                         "bytes": (destination / "extore").stat().st_size},
+              "source_files": inputs,
+              "scope": "review service binary after existing CI and native HTTP/worker checks; not a deployment",
+          }
+          (destination / "MANIFEST.json").write_text(
+              json.dumps(manifest, sort_keys=True, indent=2) + "\n"
+          )
+          archive = destination.with_suffix(".tar.gz")
+          with tarfile.open(archive, "w:gz") as output:
+              output.add(destination / "extore", arcname="extore")
+              output.add(destination / "MANIFEST.json", arcname="MANIFEST.json")
+          archive.with_suffix(archive.suffix + ".sha256").write_text(
+              sha256(archive) + "  " + archive.name + "\n"
+          )
+          PY
+      - name: Upload the review service binary
+        if: github.event_name == 'workflow_dispatch'
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: extore-native-review-${{ github.sha }}
+          path: |
+            ${{ runner.temp }}/extore-native-review.tar.gz
+            ${{ runner.temp }}/extore-native-review.tar.gz.sha256
+          if-no-files-found: error
+          retention-days: 7
+          compression-level: 0
