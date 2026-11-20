@@ -67,7 +67,7 @@ jobs:
       - name: Record the tested native service for review
         if: github.event_name == 'workflow_dispatch'
         run: |
-          python3 - <<'PY'
+          uv run --frozen python - <<'PY'
           import hashlib
           import json
           import os
