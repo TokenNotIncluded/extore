@@ -9,6 +9,7 @@ from pathlib import Path
 import selectors
 import subprocess
 import time
+from uuid import UUID
 
 from native_plugin_fixture import ExtoreFixture, digest
 
@@ -83,6 +84,12 @@ def main():
     passed += ["independent_native_load", "interface_version_rejected", "method_signature_rejected"]
 
     with ExtoreFixture(args.binary) as fixture:
+        status, _, shops = fixture.request("GET", "/api/platform/shops", admin=True)
+        assert status == 200
+        assert {fixture.shop_a, fixture.shop_b}.issubset({shop["id"] for shop in shops})
+        assert all(str(UUID(shop["id"])) == shop["id"] for shop in shops)
+        passed += ["browser_shop_identifier_contract"]
+
         authorization = fixture.authorize()
         limited = fixture.authorize(scopes=["marketplace.sync"])
         expired = fixture.authorize()

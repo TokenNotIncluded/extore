@@ -18,6 +18,7 @@ import sqlite3
 import subprocess
 import tempfile
 import time
+from uuid import uuid4
 from urllib.parse import parse_qs, urlencode, urlsplit
 
 
@@ -32,8 +33,8 @@ class ExtoreFixture:
         self._temporary = None
         self._server = None
         self._log = None
-        self.shop_a = "plugin-shop-a"
-        self.shop_b = "plugin-shop-b"
+        self.shop_a = str(uuid4())
+        self.shop_b = str(uuid4())
         self.products = {self.shop_a: "plugin-product-a", self.shop_b: "plugin-product-b"}
 
     def __enter__(self):
