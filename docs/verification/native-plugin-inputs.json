@@ -1,6 +1,6 @@
 {
   "schema": "extore.native-plugin-inputs.v1",
-  "sha256": "8a69b0b017fa7efebbcb43e1bab8d05a0a54ad5c29bdaf0e9954aac90ccca2fc",
+  "sha256": "3d3d4092dc8000f3730f87db18096c3ceafddac275ed14b416a96440d75ef4dc",
   "files": [
     {
       "path": "Cargo.lock",
@@ -44,13 +44,13 @@
     },
     {
       "path": "scripts/native_plugin_fixture.py",
-      "sha256": "a4762e16f44716e80c3e9f32e7b21b507dd020d66efea81dc2c31a88c8b2f88f",
-      "bytes": 9292
+      "sha256": "fd44a30f6b8f50f6588098a81549802c19518a8f0f58ad6e5b80c1515571875e",
+      "bytes": 9309
     },
     {
       "path": "scripts/test-native-plugin.py",
-      "sha256": "9b5d4c4d46e223fece112346b25b059c4bdc4f84273769b5d8242ea8b85c0f6c",
-      "bytes": 10796
+      "sha256": "2714a4592430412067e2f47bb769a653fdd70486d320e485b14e85758daf3004",
+      "bytes": 11151
     },
     {
       "path": "src/api/openapi.json",
@@ -357,5 +357,16 @@
       "sha256": "57f42a456dfe4ac74211f11e4c3d37951dcd063c32d5fd93a19e3abda2b22bd5",
       "bytes": 11953
     }
-  ]
+  ],
+  "snapshot_update": {
+    "source_parent": "1c29a9a0bfa7e64c938581e5c5e5fcb1e6832f04",
+    "runtime_revision": "818400958a8660e5e72b1eefb4815dbb34452098",
+    "previous_input_sha256": "8a69b0b017fa7efebbcb43e1bab8d05a0a54ad5c29bdaf0e9954aac90ccca2fc",
+    "previous_manifest_git_blob": "f58af3be14304ace1d8db70416f96cad517b1c43",
+    "changed_paths": [
+      "scripts/native_plugin_fixture.py",
+      "scripts/test-native-plugin.py"
+    ],
+    "scope": "Refresh only the two UUID-aware Python fixture entries; historical runtime build and native-check receipts remain unchanged."
+  }
 }
